@@ -248,10 +248,24 @@ fn refused_for_authoring(p: &Principal) -> Option<&'static str> {
         PrincipalKind::Role => {
             Some("role principals are migrated to managed groups; grant to a group instead")
         }
+        // SP3c-3: the implicit workspace grant is migrated to a `ws:<slug>
+        // members` group grant; authoring writes that grant directly.
+        PrincipalKind::WorkspaceMembers => Some(
+            "workspace_members principals are migrated to managed groups; assign the catalog \
+             to the workspace instead",
+        ),
         PrincipalKind::Group if p.r#ref.starts_with("role:") && p.r#ref.ends_with(" holders") => {
             Some(
                 "role:<name> holders groups are managed migration targets; grant to the \
                  role's intended group directly",
+            )
+        }
+        // SP3c-3: a `ws:<slug> members` group mirrors a workspace's members and
+        // is written only by the workspace-assignment migration and its sync.
+        PrincipalKind::Group if p.r#ref.starts_with("ws:") && p.r#ref.ends_with(" members") => {
+            Some(
+                "ws:<slug> members groups are managed workspace-assignment migration targets; \
+                 assign the catalog to the workspace instead",
             )
         }
         _ => None,
@@ -830,8 +844,24 @@ pub async fn mint_missing_usernames(pool: &sqlx::PgPool) -> anyhow::Result<Usern
 mod tests {
     use super::*;
 
-    /// People & groups Task 3 review: a workspace ref in any form `Uuid`
-    /// parses is stored canonical, so it matches `standsFor` byte for byte.
+    /// SP3c-3: workspace-members principals and `ws:<slug> members` groups are
+    /// migration targets; ordinary groups and users are untouched.
+    #[test]
+    fn workspace_members_authoring_is_refused_but_ordinary_refs_are_not() {
+        let p = |kind, r: &str| Principal {
+            kind,
+            r#ref: r.to_string(),
+        };
+        assert!(refused_for_authoring(&p(PrincipalKind::WorkspaceMembers, "x")).is_some());
+        assert!(refused_for_authoring(&p(PrincipalKind::Group, "ws:acme members")).is_some());
+        assert!(refused_for_authoring(&p(PrincipalKind::Group, "analysts")).is_none());
+        assert!(refused_for_authoring(&p(PrincipalKind::User, "ws:acme members")).is_none());
+    }
+
+    /// People & groups Task 3 review, as amended by SP3c-3: a NEW
+    /// `workspace_members` ref can no longer be authored (it is migrated to a
+    /// managed group), and a workspace ref already STORED in any form `Uuid`
+    /// parses still resolves, so it matches `standsFor` byte for byte.
     #[tokio::test]
     async fn a_workspace_ref_is_stored_in_its_canonical_form() {
         let Some(dsn) = egret_test_db::url().await else {
@@ -849,14 +879,17 @@ mod tests {
                 .await
                 .expect("workspace");
         let mut conn = db.pool.acquire().await.expect("conn");
-        let forms = [
+        // SP3c-3: authoring a NEW `workspace_members` principal is refused — the
+        // implicit workspace grant is migrated to a `ws:<slug> members` group, so
+        // the authoring-boundary canonicalisation this ref used to receive no
+        // longer runs (the guard refuses before `lookup`). What still matters,
+        // and is tested below, is that refs already STORED keep resolving in any
+        // spelling.
+        for form in [
             ws.to_string().to_uppercase(),
             ws.simple().to_string(),
-            format!("{{{ws}}}"),
-            ws.urn().to_string(),
             ws.to_string(),
-        ];
-        for form in forms {
+        ] {
             let mut set = PrincipalSet {
                 include: vec![Principal {
                     kind: PrincipalKind::WorkspaceMembers,
@@ -864,29 +897,16 @@ mod tests {
                 }],
                 exclude: Vec::new(),
             };
-            resolve_principal_refs(&mut conn, "principals", &mut set, None)
+            let err = resolve_principal_refs(&mut conn, "principals", &mut set, None)
                 .await
-                .unwrap_or_else(|e| panic!("{form}: {e}"));
-            assert_eq!(set.include[0].r#ref, ws.to_string(), "{form}");
+                .expect_err(&format!(
+                    "{form}: new workspace_members authoring must be refused"
+                ));
+            assert!(
+                format!("{err}").contains("migrated to managed groups"),
+                "{form}: {err}"
+            );
         }
-        // Two spellings of one workspace collapse to one entry.
-        let mut set = PrincipalSet {
-            include: vec![
-                Principal {
-                    kind: PrincipalKind::WorkspaceMembers,
-                    r#ref: ws.simple().to_string(),
-                },
-                Principal {
-                    kind: PrincipalKind::WorkspaceMembers,
-                    r#ref: ws.to_string(),
-                },
-            ],
-            exclude: Vec::new(),
-        };
-        resolve_principal_refs(&mut conn, "principals", &mut set, None)
-            .await
-            .expect("resolve");
-        assert_eq!(set.include.len(), 1);
 
         // A non-canonical spelling already STORED still names the workspace
         // the compiler expands: it resolves, it is not "unmatched".
@@ -969,6 +989,50 @@ mod tests {
         assert!(
             matches!(stored, Stored::Unresolved(_)),
             "a never-synced holder group must be Unresolved (fails open), never silently Empty"
+        );
+    }
+
+    /// SP3c-3: a `ws:<slug> members` group ref whose row was never synced must
+    /// NOT be silently accepted — an author naming it in an exclude would have
+    /// the subtract evaporate (the J-F3 fail-open hole). An authoring write is
+    /// refused, and the stored-ref report classifies it `Unresolved` (fails
+    /// open), never `Empty`. Mirrors the role-holder-group guard.
+    #[tokio::test]
+    async fn a_ghost_ws_members_group_ref_is_not_silently_accepted() {
+        let Some(dsn) = egret_test_db::url().await else {
+            return;
+        };
+        let db = egret_metastore::Db::connect(&dsn, 2)
+            .await
+            .expect("connect");
+        db.migrate().await.expect("migrate");
+        let mut conn = db.pool.acquire().await.expect("conn");
+
+        // Managed-shaped, but no `groups` row has ever been synced for it.
+        let ghost = Principal {
+            kind: PrincipalKind::Group,
+            r#ref: format!(
+                "ws:ghost-{} members",
+                &Uuid::new_v4().simple().to_string()[..12]
+            ),
+        };
+
+        // The authoring boundary refuses it rather than storing a ref that
+        // expands to nobody.
+        let mut set = PrincipalSet {
+            include: vec![ghost.clone()],
+            exclude: Vec::new(),
+        };
+        let err = resolve_principal_refs(&mut conn, "principals", &mut set, None)
+            .await
+            .expect_err("a never-synced ws-members-group ref must be refused, not accepted");
+        assert!(matches!(err, PermHttpError::BadRequest(_)), "{err}");
+
+        // The stored-ref report flags it fail-open (Unresolved), not Empty.
+        let stored = classify_stored(&mut conn, &ghost).await.expect("classify");
+        assert!(
+            matches!(stored, Stored::Unresolved(_)),
+            "a never-synced ws members group must be Unresolved (fails open), never silently Empty"
         );
     }
 

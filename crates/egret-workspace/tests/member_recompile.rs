@@ -110,8 +110,20 @@ async fn seed(db: &Db) -> Fixture {
     egret_perm::sync_assignment_grants(&perm, catalog_id, &[workspace_id])
         .await
         .expect("assign catalog to workspace");
+    // SP3c-3 Task 5: the authoring path writes a grant whose principal is the
+    // managed `ws:<slug> members` group; ensure that group exists exactly as the
+    // production recompile seam (`egret-bin`) does on the bind path, so the grant
+    // enforces. It starts empty (the workspace has no members yet); `MemberRepo`
+    // writes keep it in sync from here (Task 2).
+    {
+        let mut tx = pool.begin().await.expect("begin");
+        egret_perm_compile::ws_members_group::sync_ws_members_group_in_tx(&mut tx, workspace_id)
+            .await
+            .expect("ensure ws members group");
+        tx.commit().await.expect("commit");
+    }
     let grant_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment_group'",
     )
     .bind(catalog_id)
     .fetch_one(pool)
@@ -257,4 +269,103 @@ async fn a_membership_write_in_an_unreferenced_workspace_compiles_nothing() {
         .remove(WorkspaceId(ws_id), "user", user.0)
         .await
         .expect("remove");
+}
+
+/// SP3c-3 Task 2: once a workspace's implicit grant names the managed
+/// `ws:<slug> members` group, the LIVE `MemberRepo` add/remove must re-sync that
+/// group AND recompile the group-ref grant. A removal that did not would leave
+/// the ex-member named in the compiled policy (fail OPEN).
+#[tokio::test]
+async fn a_member_write_resyncs_the_ws_members_group_and_recompiles_the_group_ref_grant() {
+    let Some(db) = test_db().await else { return };
+    let f = seed(&db).await;
+    let members = MemberRepo::new(db.clone());
+    let ws = WorkspaceId(f.workspace_id);
+
+    let alice = new_user(&db, &unique("memrec-g-alice")).await;
+    let bob = new_user(&db, &unique("memrec-g-bob")).await;
+    let username = |id: Uuid| {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT username::text FROM users WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("username")
+        }
+    };
+    let alice_name = username(alice.0).await;
+    let bob_name = username(bob.0).await;
+
+    members
+        .add(ws, "user", alice.0, "ws_viewer", alice)
+        .await
+        .expect("add alice");
+
+    // Migrate: create the managed group and rewrite the grant's principal to it.
+    let slug: String = sqlx::query_scalar("SELECT slug FROM workspaces WHERE id = $1")
+        .bind(f.workspace_id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("slug");
+    let gname = egret_perm_compile::ws_members_group::ws_members_group_name(&slug);
+    let mut tx = db.pool.begin().await.expect("begin");
+    egret_perm_compile::ws_members_group::sync_ws_members_group_in_tx(&mut tx, f.workspace_id)
+        .await
+        .expect("sync");
+    sqlx::query(
+        "UPDATE perm.grant_principals SET kind = 'group'::perm.principal_kind, ref = $2 \
+          WHERE grant_id = $1 AND kind = 'workspace_members'::perm.principal_kind",
+    )
+    .bind(f.grant_id)
+    .bind(&gname)
+    .execute(&mut *tx)
+    .await
+    .expect("rewrite principal");
+    egret_perm_compile::recompile_services_in_tx(&mut tx, &[f.service_id])
+        .await
+        .expect("recompile");
+    tx.commit().await.expect("commit");
+    assert_eq!(named_users(&db, &f).await, Some(vec![alice_name.clone()]));
+
+    // The managed group must never itself hold the workspace (circular).
+    let circular: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM access_grants ag JOIN groups g ON g.id = ag.principal_id \
+          WHERE ag.principal_type = 'group' AND g.name = $1 AND ag.scope_type = 'workspace'",
+    )
+    .bind(&gname)
+    .fetch_one(&db.pool)
+    .await
+    .expect("circular");
+    assert_eq!(circular, 0);
+
+    // ADD via the live path: the group and the compiled policy both gain bob.
+    members
+        .add(ws, "user", bob.0, "ws_viewer", alice)
+        .await
+        .expect("add bob");
+    let mut both = vec![alice_name.clone(), bob_name.clone()];
+    both.sort();
+    assert_eq!(named_users(&db, &f).await, Some(both));
+
+    // REMOVE via the live path: fail-CLOSED, alice is gone from both.
+    members
+        .remove(ws, "user", alice.0)
+        .await
+        .expect("remove alice");
+    let in_group: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id \
+          WHERE g.name = $1 AND ug.user_id = $2)",
+    )
+    .bind(&gname)
+    .bind(alice.0)
+    .fetch_one(&db.pool)
+    .await
+    .expect("in group");
+    assert!(!in_group, "the removed member must leave the managed group");
+    assert_eq!(
+        named_users(&db, &f).await,
+        Some(vec![bob_name]),
+        "a removed member must be gone from the compiled group-ref policy (fail-OPEN otherwise)"
+    );
 }

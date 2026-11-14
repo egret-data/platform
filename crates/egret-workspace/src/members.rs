@@ -117,6 +117,12 @@ impl MemberRepo {
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+        // SP3c-3: refresh the managed `ws:<slug> members` group BEFORE the
+        // recompile, so a group-ref grant sees the new membership (no-op until the
+        // workspace's grant is migrated).
+        egret_perm_compile::ws_members_group::sync_ws_members_group_if_present_in_tx(&mut tx, ws.0)
+            .await
+            .map_err(compile_err)?;
         if !services.is_empty() {
             egret_perm_compile::recompile_services_in_tx(&mut tx, &services)
                 .await
@@ -156,6 +162,12 @@ impl MemberRepo {
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
+        // SP3c-3: refresh the managed `ws:<slug> members` group BEFORE the
+        // recompile, so a group-ref grant sees the new membership (no-op until the
+        // workspace's grant is migrated).
+        egret_perm_compile::ws_members_group::sync_ws_members_group_if_present_in_tx(&mut tx, ws.0)
+            .await
+            .map_err(compile_err)?;
         if !services.is_empty() {
             egret_perm_compile::recompile_services_in_tx(&mut tx, &services)
                 .await

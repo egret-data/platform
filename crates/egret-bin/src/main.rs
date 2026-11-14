@@ -263,6 +263,32 @@ async fn recompile_catalog_assignment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     catalog_id: uuid::Uuid,
 ) -> Result<(), egret_perm::CompileError> {
+    // SP3c-3 Task 5: ensure the managed `ws:<slug> members` group exists and
+    // mirrors each bound workspace's members BEFORE compiling. The authoring path
+    // `egret_perm::sync_assignment_grants_in_tx` writes a grant whose principal
+    // NAMES that group, but it lives in `egret-perm` and cannot create/populate
+    // the group — that sync is in `egret-perm-compile`, which depends on
+    // `egret-perm`, so the reverse call would be a dependency cycle. Both
+    // production bind paths (`egret-engine-mgmt`'s assignment handler and
+    // `egret-catalog-registry::ensure_warehouse_catalog`) reach the compiler only
+    // through this shared body, in the SAME transaction as that grant write, so
+    // this is the one seam that can make a freshly-bound catalog's group grant
+    // actually enforce. It runs even when the catalog has no bound engine yet (no
+    // services to compile): the group must still exist so a later engine
+    // attachment — or a membership write through `sync_ws_members_group_if_present`
+    // — finds it. `sync_ws_members_group_in_tx` is idempotent.
+    let workspace_ids: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT workspace_id FROM registry.catalog_workspaces \
+          WHERE catalog_id = $1 ORDER BY workspace_id",
+    )
+    .bind(catalog_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(egret_perm::CompileError::from_db)?;
+    for ws in workspace_ids {
+        egret_perm_compile::ws_members_group::sync_ws_members_group_in_tx(tx, ws).await?;
+    }
+
     let mut ids = egret_policy::services_for_catalog_via(tx, catalog_id)
         .await
         .map_err(egret_perm_compile::db_error::from_store)?;

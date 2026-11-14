@@ -1,28 +1,46 @@
 //! The implicit workspace grant (SP4a Task 6): assigning a catalog to a
 //! workspace grants that workspace `read`.
 //!
-//! **D7 branch taken**: `docs/en/plans/2026-09-24-permission-model-sp4a-d7-result.md`,
-//! measured 2026-09-24 on the live kind cluster (helm revision 61), found —
-//! by mechanism, not by a query experiment — that groups do NOT reach the
-//! engine: Trino has no `group-provider.properties`, nothing in
-//! `egret-provisioner` writes one, and egret runs no usersync, so
-//! `getGroups(user)` is empty for every user on every engine egret
-//! provisions today. `workspace-members` therefore CANNOT compile to a
-//! Ranger group. Per D7 §3, this module stores `PrincipalKind::WorkspaceMembers`
-//! on the implicit grant instead, and leaves EXPANSION into the member list
-//! enumerated at compile time to the compiler — which today refuses a
-//! `WorkspaceMembers` principal outright (`CompileError::UnexpandedPrincipalKind`,
-//! `egret-perm-compile`'s `grants` module) rather than silently dropping it, because Task 4 found
-//! that dropping is fail-closed on `include` but fail-OPEN on `exclude`. This
-//! task does not weaken that refusal; a later task (recompile-on-membership-write,
-//! same staleness shape as D5's StarRocks tag expansion) owns the expansion.
-//! One consequence worth being explicit about: until that later task lands,
-//! compiling ANY profile that reaches a catalog with an implicit grant will
-//! return `Err(CompileError::UnexpandedPrincipalKind)` for that grant — see
-//! `actions::CompileError`'s doc comment on that variant (this crate) and
-//! the sibling crate `egret-perm-compile`'s `grants` module doc, which owns
-//! the compiler itself (split out of this crate in this same fix round —
-//! see that crate's own doc comment for why).
+//! **SP3c-3 Task 5 — the grant is now an explicit group grant.** The original
+//! implementation (SP4a D7) stored a `PrincipalKind::WorkspaceMembers` principal
+//! on an `origin='workspace_assignment'` grant, because D7 measured that a Ranger
+//! GROUP reaches nobody on any engine egret provisions (no `group-provider`, no
+//! usersync) and left the compiler to ENUMERATE the workspace's members at
+//! compile time. SP3c-3 keeps that enumeration — but routes it through a managed
+//! `ws:<slug> members` group (Tasks 1-2) that mirrors the workspace's members and
+//! is expanded to those members' usernames exactly as `workspace_members` was.
+//! So this path now AUTHORS the migrated shape directly: for each bound
+//! workspace it upserts one explicit READ grant whose single principal is
+//! `kind='group' ref=ws:<slug> members`. No `workspace_members` principal is
+//! written going forward; Task 4's reversible migration backfills the grants
+//! authored before SP3c-3.
+//!
+//! **Why `origin='workspace_assignment_group'` and not plain `explicit`
+//! (migration 0227).** The grant must stay deduplicated and reversible: binding
+//! the same catalog+workspace twice must not accumulate grants, and unbinding
+//! must remove exactly the right one — never a human-authored `explicit` grant
+//! on the same catalog. The old shape got this from `origin='workspace_assignment'`
+//! plus `origin_workspace_id` plus the partial unique index `grants_one_per_assignment`.
+//! A plain `explicit` grant has no such key (and the schema CHECK forbids an
+//! `explicit` grant from carrying `origin_workspace_id` at all). So SP3c-3 gives
+//! the new grant its OWN origin value, `workspace_assignment_group`, which keeps
+//! `origin_workspace_id` set and is keyed by its own partial unique index
+//! `grants_one_per_assignment_group`. Task 4's migrate rewrites the old grants
+//! onto this SAME shape, so a migrated grant and a freshly-authored one are
+//! identical rows.
+//!
+//! **The managed group itself is ensured on the recompile seam, not here.** The
+//! `ws:<slug> members` `public.groups` row and its `user_groups` membership are
+//! synced by `egret_perm_compile::ws_members_group::sync_ws_members_group_in_tx`,
+//! which this (lower) crate cannot call — `egret-perm-compile` depends on
+//! `egret-perm`, so the reverse would be a cycle. Both production callers of this
+//! function (`egret-engine-mgmt`'s assignment handler and
+//! `egret-catalog-registry::ensure_warehouse_catalog`) recompile the catalog's
+//! profiles in the SAME transaction right after this returns, through
+//! `CatalogAssignmentCompiler`/`ProfileCompilerPort` — and `egret-bin`'s shared
+//! `recompile_catalog_assignment` ensures each bound workspace's managed group
+//! before it recompiles, so the group the principal here names exists and is
+//! populated by the time the compiler expands it.
 
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -30,18 +48,30 @@ use uuid::Uuid;
 use crate::error::PermError;
 use crate::store::PermStore;
 
-/// Replace the SET of implicit (`origin = 'workspace_assignment'`) grants a
-/// catalog carries with exactly one per id in `workspace_ids`: an id absent
-/// from a previous call's set gets its grant deleted, an id newly present
-/// gets one inserted. This is set membership only, not a repair pass — an
-/// existing implicit grant's `actions`/`effect` or its `grant_principals` row
-/// is left untouched by a re-run even if it had drifted from what this
-/// function would have written (`ON CONFLICT ... DO NOTHING`, not `DO
-/// UPDATE`). Nothing else writes an `origin = 'workspace_assignment'` row or
-/// its principal today, so that drift cannot happen in practice — but the
-/// function does not defend against it, and a future writer of those rows
-/// must not assume it does. Opens and commits its own transaction against
-/// `store`'s pool — use
+/// The name of the managed group that mirrors a workspace's members:
+/// `ws:<slug> members`. The spelling is LOAD-BEARING and shared across crates —
+/// the authoring path here writes a `grant_principals.ref` with it, and
+/// `egret_perm_compile::ws_members_group` syncs a `public.groups` row under the
+/// exact same name and validates principal refs against it. It lives in this
+/// (lower) crate so both the authoring path and the compiler derive the name
+/// from ONE definition rather than two that could drift
+/// (`egret_perm_compile::ws_members_group::ws_members_group_name` re-exports it).
+pub fn ws_members_group_name(slug: &str) -> String {
+    format!("ws:{slug} members")
+}
+
+/// Replace the SET of implicit assignment grants a catalog carries with exactly
+/// one per id in `workspace_ids`: an id absent from a previous call's set gets
+/// its grant deleted, an id newly present gets one inserted. Each inserted grant
+/// is the SP3c-3 group shape (`origin = 'workspace_assignment_group'`, principal
+/// `kind='group' ref=ws:<slug> members`). This is set membership only, not a
+/// repair pass — an existing grant's `actions`/`effect` or its `grant_principals`
+/// row is left untouched by a re-run even if it had drifted from what this
+/// function would have written (`ON CONFLICT ... DO NOTHING`, not `DO UPDATE`).
+/// Nothing else writes a `workspace_assignment_group` row or its principal today,
+/// so that drift cannot happen in practice — but the function does not defend
+/// against it, and a future writer of those rows must not assume it does. Opens
+/// and commits its own transaction against `store`'s pool — use
 /// [`sync_assignment_grants_in_tx`] instead when this write must be atomic
 /// with another write already inside a transaction (the catalog-workspace
 /// assignment write in `egret-engine-mgmt::catalogs::set_catalog_workspaces`
@@ -59,16 +89,16 @@ pub async fn sync_assignment_grants(
     Ok(())
 }
 
-/// The transaction-composable core of [`sync_assignment_grants`]. Touches
-/// only rows with `origin = 'workspace_assignment'` for `catalog_id` — never
-/// an explicit grant, which is what
-/// `unassigning_removes_the_implicit_grant_but_never_an_explicit_one`
-/// (`tests/assignment.rs`) proves. Idempotent THROUGH `grants_one_per_assignment`
-/// (the partial unique index on `(catalog_id, origin_workspace_id) WHERE
-/// origin = 'workspace_assignment'`, `migrations/0154_perm_model.sql`): the
-/// insert below names that index's exact conflict target rather than relying
-/// on a plain `ON CONFLICT DO NOTHING`, so re-running with the same
-/// workspace set is a no-op instead of racing the index.
+/// The transaction-composable core of [`sync_assignment_grants`]. Touches only
+/// assignment grants for `catalog_id` — never a human-authored `explicit` grant,
+/// which is what `unassigning_removes_the_implicit_grant_but_never_an_explicit_one`
+/// (`tests/assignment.rs`) proves. Idempotent THROUGH
+/// `grants_one_per_assignment_group` (the partial unique index on
+/// `(catalog_id, origin_workspace_id) WHERE origin = 'workspace_assignment_group'`,
+/// `migrations/0227_ws_assignment_group_origin.sql`): the insert below names that
+/// index's exact conflict target rather than relying on a plain `ON CONFLICT DO
+/// NOTHING`, so re-running with the same workspace set is a no-op instead of
+/// racing the index.
 ///
 /// An assignment grants `read`, never `write` — the brief's own words: this
 /// is what makes a catalog assignment visible to an engine, not a blanket
@@ -80,14 +110,17 @@ pub async fn sync_assignment_grants_in_tx(
 ) -> Result<(), PermError> {
     let ids: Vec<Uuid> = workspace_ids.to_vec();
 
-    // Drop implicit grants for workspaces no longer in the set. An empty
-    // `ids` makes `origin_workspace_id = ANY($2)` false for every row, so
-    // this correctly removes ALL implicit grants for the catalog when
+    // Drop assignment grants for workspaces no longer in the set. Both origins
+    // are swept: the SP3c-3 `workspace_assignment_group` shape AND the legacy
+    // `workspace_assignment` shape, so unbinding a catalog whose grant has not
+    // yet been migrated (Task 4) still removes it rather than leaving it dangling.
+    // An empty `ids` makes `origin_workspace_id = ANY($2)` false for every row,
+    // so this correctly removes ALL assignment grants for the catalog when
     // `workspace_ids` is empty.
     sqlx::query(
         "DELETE FROM perm.grants \
            WHERE catalog_id = $1 \
-             AND origin = 'workspace_assignment' \
+             AND origin IN ('workspace_assignment', 'workspace_assignment_group') \
              AND NOT (origin_workspace_id = ANY($2))",
     )
     .bind(catalog_id)
@@ -95,14 +128,17 @@ pub async fn sync_assignment_grants_in_tx(
     .execute(&mut **tx)
     .await?;
 
-    // Upsert one implicit grant per workspace in the set. `ON CONFLICT`
-    // names `grants_one_per_assignment`'s exact target (columns + predicate)
-    // so a re-run is a no-op through the index, not around it.
+    // Upsert one group grant per workspace in the set. `ON CONFLICT` names
+    // `grants_one_per_assignment_group`'s exact target (columns + predicate) so a
+    // re-run is a no-op through the index, not around it — and so it never
+    // conflicts with a human `explicit` grant, which lives under a different
+    // origin and is outside this partial index entirely.
     for workspace_id in &ids {
         let new_grant_id: Option<Uuid> = sqlx::query_scalar(
             "INSERT INTO perm.grants (effect, actions, catalog_id, origin, origin_workspace_id) \
-             VALUES ('allow'::perm.effect, ARRAY['read'], $1, 'workspace_assignment', $2) \
-             ON CONFLICT (catalog_id, origin_workspace_id) WHERE origin = 'workspace_assignment' \
+             VALUES ('allow'::perm.effect, ARRAY['read'], $1, 'workspace_assignment_group', $2) \
+             ON CONFLICT (catalog_id, origin_workspace_id) \
+                 WHERE origin = 'workspace_assignment_group' \
              DO NOTHING \
              RETURNING id",
         )
@@ -111,16 +147,23 @@ pub async fn sync_assignment_grants_in_tx(
         .fetch_optional(&mut **tx)
         .await?;
 
-        // Only a newly inserted grant needs its principal row — an existing
-        // one (the conflict-DO-NOTHING case) already has it.
+        // Only a newly inserted grant needs its principal row — an existing one
+        // (the conflict-DO-NOTHING case) already has it. The principal is the
+        // managed `ws:<slug> members` group; the slug is read from the same
+        // `public.workspaces` row the compiler's group sync resolves it from, and
+        // both derive the name through [`ws_members_group_name`].
         if let Some(grant_id) = new_grant_id {
+            let slug: String =
+                sqlx::query_scalar("SELECT slug FROM public.workspaces WHERE id = $1")
+                    .bind(workspace_id)
+                    .fetch_one(&mut **tx)
+                    .await?;
             sqlx::query(
                 "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
-                 VALUES ($1, 'workspace_members'::perm.principal_kind, $2, \
-                         'include'::perm.principal_mode)",
+                 VALUES ($1, 'group'::perm.principal_kind, $2, 'include'::perm.principal_mode)",
             )
             .bind(grant_id)
-            .bind(workspace_id.to_string())
+            .bind(ws_members_group_name(&slug))
             .execute(&mut **tx)
             .await?;
         }

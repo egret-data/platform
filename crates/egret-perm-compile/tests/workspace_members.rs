@@ -212,18 +212,33 @@ fn named_users(body: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The id of the one implicit grant the assignment wrote for this catalog.
+/// The id of a LEGACY `workspace_assignment` + `workspace_members` grant for this
+/// catalog, written via raw SQL. These tests exercise the `workspace_members`
+/// principal EXPANSION, which the compiler still performs (the SP3c-3 migration
+/// relies on it, and un-migrated grants still carry it). The live authoring path
+/// (`sync_assignment_grants`) now writes the `ws:<slug> members` GROUP shape
+/// instead (SP3c-3 Task 5) — tested in `ws_assignment_migrate.rs` — so it can no
+/// longer produce the row these expansion tests need.
 async fn assign_and_get_grant_id(db: &Db, f: &Fixture) -> Uuid {
-    egret_perm::sync_assignment_grants(&f.perm, f.catalog_id, &[f.workspace_id])
-        .await
-        .expect("assign catalog to workspace");
-    sqlx::query_scalar(
-        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+    let grant_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, origin, origin_workspace_id) \
+         VALUES ('allow'::perm.effect, ARRAY['read'], $1, 'workspace_assignment', $2) RETURNING id",
     )
     .bind(f.catalog_id)
+    .bind(f.workspace_id)
     .fetch_one(&db.pool)
     .await
-    .expect("implicit grant")
+    .expect("insert legacy implicit grant");
+    sqlx::query(
+        "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
+         VALUES ($1, 'workspace_members'::perm.principal_kind, $2, 'include'::perm.principal_mode)",
+    )
+    .bind(grant_id)
+    .bind(f.workspace_id.to_string())
+    .execute(&db.pool)
+    .await
+    .expect("insert legacy workspace_members principal");
+    grant_id
 }
 
 /// **The headline of D3.** Assigning a catalog to a workspace must produce a

@@ -7,14 +7,27 @@
  */
 
 /**
- * Why a grant exists. `WorkspaceAssignment` rows are written by the
- * assignment path, not by a human, and are recreated from the assignment on
- * demand (D3) — `perm.grants` enforces at most one such row per
- * `(catalog_id, workspace_id)` via `grants_one_per_assignment`.
+ * Why a grant exists. `WorkspaceAssignment`/`WorkspaceAssignmentGroup` rows are
+ * written by the assignment path, not by a human, and are recreated from the
+ * assignment on demand (D3) — `perm.grants` enforces at most one such row per
+ * `(catalog_id, workspace_id)` via `grants_one_per_assignment` (the old shape)
+ * and `grants_one_per_assignment_group` (the SP3c-3 shape).
+ *
+ * `WorkspaceAssignmentGroup` is the SP3c-3 Task-5 authoring shape: an explicit
+ * READ grant on the managed `ws:<slug> members` group. It is a distinct origin
+ * value (not folded into `Explicit`) so the two assignment shapes stay out of
+ * the human `explicit` grants' way — view-exposure follow, which keys on
+ * `Explicit`, must NOT treat an assignment grant as a human one — while the
+ * dedicated origin keeps bind/unbind idempotent through its own partial unique
+ * index. Task 4's reversible migration converges the old
+ * `WorkspaceAssignment` rows onto this exact shape.
  */
 export type GrantOrigin = {
   type: 'explicit';
 } | {
   workspace_id: string;
   type: 'workspace_assignment';
+} | {
+  workspace_id: string;
+  type: 'workspace_assignment_group';
 };

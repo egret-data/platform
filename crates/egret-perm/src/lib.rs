@@ -29,7 +29,7 @@ pub use actions::{
     EngineType, OverlapKind, OverlapRule, TableCount, EXTERNAL_PLUGIN_ASSUMPTIONS,
     MODELLED_RANGER_PLUGINS,
 };
-pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx};
+pub use assignment::{sync_assignment_grants, sync_assignment_grants_in_tx, ws_members_group_name};
 pub use engine_grants::{
     create_engine_grant_in_tx, delete_engine_grant_in_tx, get_engine_grant_via,
     list_engine_grants_for_engine_via, list_engine_grants_for_profile_via, list_engine_grants_via,

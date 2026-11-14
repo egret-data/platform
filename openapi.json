@@ -9797,6 +9797,141 @@
         }
       }
     },
+    "/api/control-plane/perm/migrate/ws-assignments": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3c-3: rewrite every implicit workspace-assignment grant into an explicit\ngrant on the managed `ws:<slug> members` group, PROVABLY — the compiled\nartifact of every affected profile is fingerprinted before and after and the\nwhole transaction rolls back on any difference. Reversible via the `undo`\nroute.",
+        "operationId": "migrate_ws_assignments",
+        "responses": {
+          "200": {
+            "description": "Every implicit workspace grant rewritten; the compiled output of each affected profile is byte-identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WsAssignmentMigration"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: the equivalence gate refused, or a recompile it needed was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/migrate/ws-assignments/undo": {
+      "post": {
+        "tags": [
+          "perm"
+        ],
+        "summary": "SP3c-3: undo one workspace-assignment migration, restoring the implicit\ngrants it rewrote. Refuses, changing nothing, if a rewritten row changed since.",
+        "operationId": "undo_ws_assignments",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoWsAssignmentsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The migration undone"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing policy:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such migration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing was changed: a rewritten row was edited since",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/overlaps": {
       "get": {
         "tags": [
@@ -48958,9 +49093,28 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "workspace_id",
+              "type"
+            ],
+            "properties": {
+              "workspace_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace_assignment_group"
+                ]
+              }
+            }
           }
         ],
-        "description": "Why a grant exists. `WorkspaceAssignment` rows are written by the\nassignment path, not by a human, and are recreated from the assignment on\ndemand (D3) — `perm.grants` enforces at most one such row per\n`(catalog_id, workspace_id)` via `grants_one_per_assignment`."
+        "description": "Why a grant exists. `WorkspaceAssignment`/`WorkspaceAssignmentGroup` rows are\nwritten by the assignment path, not by a human, and are recreated from the\nassignment on demand (D3) — `perm.grants` enforces at most one such row per\n`(catalog_id, workspace_id)` via `grants_one_per_assignment` (the old shape)\nand `grants_one_per_assignment_group` (the SP3c-3 shape).\n\n`WorkspaceAssignmentGroup` is the SP3c-3 Task-5 authoring shape: an explicit\nREAD grant on the managed `ws:<slug> members` group. It is a distinct origin\nvalue (not folded into `Explicit`) so the two assignment shapes stay out of\nthe human `explicit` grants' way — view-exposure follow, which keys on\n`Explicit`, must NOT treat an assignment grant as a human one — while the\ndedicated origin keeps bind/unbind idempotent through its own partial unique\nindex. Task 4's reversible migration converges the old\n`WorkspaceAssignment` rows onto this exact shape."
       },
       "GrantView": {
         "allOf": [
@@ -59238,6 +59392,20 @@
           }
         }
       },
+      "UndoWsAssignmentsRequest": {
+        "type": "object",
+        "description": "`POST …/migrate/ws-assignments/undo`.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The `id` the migration answered with."
+          }
+        }
+      },
       "UndonePolicy": {
         "type": "object",
         "description": "One restored policy.",
@@ -62809,6 +62977,32 @@
           "query_count": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "WsAssignmentMigration": {
+        "type": "object",
+        "description": "What one migration run did: its provenance id, the catalogs it touched, and\nhow many implicit grants were rewritten.",
+        "required": [
+          "id",
+          "catalogs",
+          "rewritten"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "rewritten": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       },

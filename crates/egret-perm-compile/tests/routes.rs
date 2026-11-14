@@ -1844,8 +1844,10 @@ async fn patching_a_workspace_assignment_grant_is_refused() {
     egret_perm::sync_assignment_grants(&f.perm, f.catalog_id, &[ws_id])
         .await
         .expect("assign catalog to workspace");
+    // SP3c-3 Task 5: the authoring path now writes the group-assignment shape.
     let implicit: Uuid = sqlx::query_scalar(
-        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+        "SELECT id FROM perm.grants \
+          WHERE catalog_id = $1 AND origin = 'workspace_assignment_group'",
     )
     .bind(f.catalog_id)
     .fetch_one(&f.db.pool)
@@ -1874,7 +1876,10 @@ async fn patching_a_workspace_assignment_grant_is_refused() {
         .fetch_one(&f.db.pool)
         .await
         .expect("read origin");
-    assert_eq!(origin, "workspace_assignment", "the row must be untouched");
+    assert_eq!(
+        origin, "workspace_assignment_group",
+        "the row must be untouched"
+    );
 }
 
 #[tokio::test]
@@ -3781,24 +3786,35 @@ async fn explain_agrees_with_the_compiled_policy_for_a_collision_suffixed_member
         assert_eq!(res.rows_affected(), 1, "the membership row must exist");
     }
 
-    // `sync_assignment_grants` COMMITS the implicit grant, and the recompile that
-    // materialises its policy is a second transaction. Between the two this
-    // profile has desired state with no policy behind it — and a tag-rule
-    // recompile reconciles EVERY profile, this one included. So both steps run
-    // under the universe lock, like the helpers that mint a profile: see
-    // `TAG_FANOUT_LOCK`. Released before `explain` is asked, which changes nothing.
+    // This test exercises the `workspace_members` principal EXPANSION (and that
+    // `explain` agrees with it) for a collision-suffixed member. That expansion is
+    // still live compiler code, but the live authoring path now writes the
+    // `ws:<slug> members` group shape (SP3c-3 Task 5), so the legacy grant is
+    // written here via raw SQL. The recompile that materialises its policy is a
+    // separate transaction; a tag-rule recompile reconciles EVERY profile, so both
+    // steps run under the universe lock (`TAG_FANOUT_LOCK`), released before
+    // `explain` is asked.
     let grant_id: Uuid = {
         let _universe = exclusive(&f).await;
-        egret_perm::sync_assignment_grants(&f.perm, f.catalog_id, &[ws_id])
-            .await
-            .expect("assign catalog to workspace");
         let grant_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+            "INSERT INTO perm.grants (effect, actions, catalog_id, origin, origin_workspace_id) \
+             VALUES ('allow'::perm.effect, ARRAY['read'], $1, 'workspace_assignment', $2) \
+             RETURNING id",
         )
         .bind(f.catalog_id)
+        .bind(ws_id)
         .fetch_one(&f.db.pool)
         .await
-        .expect("implicit grant");
+        .expect("insert legacy implicit grant");
+        sqlx::query(
+            "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
+             VALUES ($1, 'workspace_members'::perm.principal_kind, $2, 'include'::perm.principal_mode)",
+        )
+        .bind(grant_id)
+        .bind(ws_id.to_string())
+        .execute(&f.db.pool)
+        .await
+        .expect("insert legacy workspace_members principal");
         egret_perm_compile::recompile_service(&f.perm, &f.policy, f.service_id)
             .await
             .expect("recompile the profile");
@@ -8490,9 +8506,11 @@ async fn refs_that_resolve_are_accepted() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     let msg = body["error"].as_str().unwrap_or_default();
+    // SP3c-3: a real workspace is refused as a migration target (author the
+    // `ws:<slug> members` group grant instead), NOT rejected as an unknown ref.
     assert!(
-        !msg.contains("principals.include[0]"),
-        "a real workspace is not an unknown ref; got {msg:?}"
+        msg.contains("migrated to managed groups"),
+        "a real workspace is refused as a migration target, not as an unknown ref; got {msg:?}"
     );
 }
 

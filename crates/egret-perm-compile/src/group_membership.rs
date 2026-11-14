@@ -196,6 +196,13 @@ impl egret_auth::groups::GroupMembershipRecompiler for PermGroupRecompiler {
         tx: &mut Transaction<'static, Postgres>,
         service_ids: &[i64],
     ) -> egret_core::Result<()> {
+        // SP3c-3: this runs after the membership write (a group join/leave, a
+        // group delete or a user hard-delete), which can change who belongs to a
+        // workspace through a group that holds it. Refresh the managed `ws:<slug>
+        // members` groups first, so group-ref grants compile the new membership.
+        crate::ws_members_group::sync_all_existing_ws_members_groups_in_tx(tx)
+            .await
+            .map_err(|e| to_core(e, None))?;
         for summary in recompile_services_in_tx(tx, service_ids)
             .await
             .map_err(|e| to_core(e, None))?
