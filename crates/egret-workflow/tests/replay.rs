@@ -1393,9 +1393,14 @@ async fn a_replay_on_the_frozen_source_keeps_the_executions_variables(pool: sqlx
     assert_eq!(out_value(&pool, new).await, "old");
 }
 
-/// A restart on another source reads that source's `variables:` too.
+/// A restart on another source CARRIES the old execution's variables, as
+/// Kestra's restart on a revision does: `ExecutionService.restart(.., revision)`
+/// never calls `applyNewRevision` and `Execution.childExecution` copies
+/// `this.variables` (user decision 2026-11-14, final review I2). The column
+/// holds the run's whole variables value, so the old `x` wins over the chosen
+/// source's `variables:`.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_restart_on_another_source_reads_that_sources_variables(pool: sqlx::PgPool) {
+async fn a_restart_on_another_source_carries_the_executions_variables(pool: sqlx::PgPool) {
     // Arrange
     egret_workflow::storage::install_mem_for_tests();
     let (_db, ws, _) = setup(&pool).await;
@@ -1405,7 +1410,8 @@ async fn a_restart_on_another_source_reads_that_sources_variables(pool: sqlx::Pg
     let old = start(&pool, ws, &vars_flow("old")).await;
     drive(&pool, &reg, old).await;
     assert_eq!(exec_state(&pool, old).await, "FAILED");
-    assert!(exec_variables(&pool, old).await.is_some());
+    let old_variables = exec_variables(&pool, old).await;
+    assert!(old_variables.is_some());
 
     // Act
     let new = replay(
@@ -1418,11 +1424,13 @@ async fn a_restart_on_another_source_reads_that_sources_variables(pool: sqlx::Pg
     )
     .await
     .expect("restarted");
+    let copied = exec_variables(&pool, new).await;
     drive(&pool, &reg, new).await;
 
     // Assert
+    assert_eq!(copied, old_variables);
     assert_eq!(exec_state(&pool, new).await, "SUCCESS");
-    assert_eq!(out_value(&pool, new).await, "new");
+    assert_eq!(out_value(&pool, new).await, "old");
 }
 
 // ── Fix round 1: the refusals `refusals_write_nothing` did not reach ──────

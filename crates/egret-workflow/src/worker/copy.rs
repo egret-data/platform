@@ -277,12 +277,17 @@ async fn replay_locked(
             input_files: req.input_files.clone(),
             labels,
             backfill_id: None,
+            // The column holds the run's WHOLE variables value and wins over
+            // the source's `variables:` at render time. A replay follows
             // Kestra `applyNewRevision` (`ES:514-517`, user decision
-            // 2026-11-14): the column holds the run's WHOLE variables value
-            // and wins over the source's `variables:` at render time, so it
-            // travels only on the frozen source. On any other source, NULL:
-            // that source's `variables:` apply.
-            variables: if req.source == old_ctx.source {
+            // 2026-11-14): it travels only on the frozen source; on any
+            // other source, NULL, so that source's `variables:` apply. A
+            // restart on a source carries it, as Kestra's restart on a
+            // revision does: `restart(.., revision)` never calls
+            // `applyNewRevision` (`ES:353-368`) and `Execution.childExecution`
+            // copies `this.variables` (user decision 2026-11-14, final
+            // review I2).
+            variables: if req.kind == ReplayKind::RestartOnSource || req.source == old_ctx.source {
                 old.variables.clone()
             } else {
                 None
