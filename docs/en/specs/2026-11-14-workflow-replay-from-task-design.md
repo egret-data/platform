@@ -29,6 +29,12 @@ Kestra's restart also takes a `revision` (`ES:281-373`). With a revision, the re
   - Kestra's `breakpoints` parameter stops a replay before chosen tasks and comes with "resume from breakpoint". It is a debugging feature with its own pause and resume state, so it gets a package of its own, next to 7c (pause and resume).
   - 7b refuses the parameter with 400, code `replay_breakpoints_unsupported`, and the message names the later package.
 
+- **Q4–Q7 (2026-11-14, after the plan's investigation; see the plan's "Spec corrections").**
+  - **Q4 (S1):** a replay from a task drops the `errors:` runs of every scope it climbs through, so the chosen task really runs again. Kestra keeps them, and its executor then stays in error mode.
+  - **Q5 (S2):** a restart on another source carries the kept runs' outputs, as a replay from a task does. Kestra's restart with a revision carries none.
+  - **Q6 (S4):** a `Loop` run reset in a copy goes `CREATED`, and its iterations run again under the new execution. Kestra fails such a `Loop` at once.
+  - **Q7 (S7):** a replay from a task and a restart on another source also refuse `files_pruned` and `after_execution_running`, as 7a's restart does. A whole replay is unchanged.
+
 ### 2.2 Design decisions (default decisions, 2026-11-14)
 
 - **D1. Copy then reset, as Kestra does.** A replay from a task, or a restart on another source, creates the new execution row and copies the old execution's task runs into it. Each copy gets a new id (Kestra `mapTaskRunId`) with parent links remapped and outputs carried over (`taskOutputService.copyOutputs`).

@@ -26,7 +26,7 @@ Tasks: T0, A1–A5 (engine), B1 (routes), C1 (frontend), Z (docs, gates, live ch
 
 ## Spec corrections
 
-Each item is a place where the spec's assumption is wrong or incomplete, with the evidence. The plan implements the line marked **Plan**; the controller confirms S1, S2, S4 and S7 with the user.
+Each item is a place where the spec's assumption is wrong or incomplete, with the evidence. The plan implements the line marked **Plan**; the user confirmed S1, S2, S4 and S7 on 2026-11-14, each as the line marked **Plan**.
 
 - **S1 (D2: what Kestra's successors include).**
   - Kestra's `GraphUtils.successors` (`GraphUtils.java:144-181`) walks the flow graph from the chosen run's node. It **always** reaches the `finally:` and `afterExecution:` runs of every scope it climbs through: a list's last node links to its cluster's finally node (`GraphUtils.java:488-489`), the finally chain links to the afterExecution node, then to the end (`:413-421`, `:365-399`).
@@ -195,7 +195,7 @@ Each item is a place where the spec's assumption is wrong or incomplete, with th
 
 ## Global constraints
 
-- Spec Q1–Q3 and D1–D14 are binding, as amended only by the Spec corrections above once the controller has confirmed them. When the spec and egret's code disagree in a way not listed above, **stop and report**; do not improvise. Kestra source: `/Users/1pro-l4r8/Documents/github/data-portal/kestra` at `96893b58` (read-only).
+- Spec Q1–Q3 and D1–D14 are binding, as amended only by the Spec corrections above (S1, S2, S4 and S7 confirmed by the user 2026-11-14). When the spec and egret's code disagree in a way not listed above, **stop and report**; do not improvise. Kestra source: `/Users/1pro-l4r8/Documents/github/data-portal/kestra` at `96893b58` (read-only).
 - **Code search:** CodeGraph first, `codegraph_explore` with `projectPath: /Users/1pro-l4r8/Documents/github/data-portal/egret-execops`. Use grep only for literal strings. `rg` is not installed.
 - **Environment:**
   - `export CARGO_TARGET_DIR=/Users/1pro-l4r8/Documents/github/data-portal/egret-execops/target`
