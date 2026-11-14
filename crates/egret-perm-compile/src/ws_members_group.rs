@@ -6,10 +6,10 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 /// The managed group that mirrors a workspace's members. The naming is
-/// load-bearing: principal-ref validation and the migration rely on it.
-pub fn ws_members_group_name(slug: &str) -> String {
-    format!("ws:{slug} members")
-}
+/// load-bearing: principal-ref validation, the migration AND the authoring path
+/// rely on it, so the ONE definition lives in `egret-perm` (the lower crate the
+/// authoring path is in) and is re-exported here for this crate's callers.
+pub use egret_perm::ws_members_group_name;
 
 async fn workspace_slug(
     tx: &mut Transaction<'_, Postgres>,

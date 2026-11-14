@@ -110,8 +110,20 @@ async fn seed(db: &Db) -> Fixture {
     egret_perm::sync_assignment_grants(&perm, catalog_id, &[workspace_id])
         .await
         .expect("assign catalog to workspace");
+    // SP3c-3 Task 5: the authoring path writes a grant whose principal is the
+    // managed `ws:<slug> members` group; ensure that group exists exactly as the
+    // production recompile seam (`egret-bin`) does on the bind path, so the grant
+    // enforces. It starts empty (the workspace has no members yet); `MemberRepo`
+    // writes keep it in sync from here (Task 2).
+    {
+        let mut tx = pool.begin().await.expect("begin");
+        egret_perm_compile::ws_members_group::sync_ws_members_group_in_tx(&mut tx, workspace_id)
+            .await
+            .expect("ensure ws members group");
+        tx.commit().await.expect("commit");
+    }
     let grant_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment_group'",
     )
     .bind(catalog_id)
     .fetch_one(pool)

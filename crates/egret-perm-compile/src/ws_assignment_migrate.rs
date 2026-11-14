@@ -36,19 +36,28 @@
 //! - its `perm.grant_principals` row: `kind='workspace_members'`,
 //!   `ref=<workspace id>` → `kind='group'`, `ref=ws:<slug> members`, `mode`
 //!   unchanged (`include`);
-//! - its `perm.grants` row: `origin='workspace_assignment'` → `origin='explicit'`,
-//!   and `origin_workspace_id` → `NULL`.
+//! - its `perm.grants` row: `origin='workspace_assignment'` →
+//!   `origin='workspace_assignment_group'`, `origin_workspace_id` UNCHANGED.
 //!
-//! Clearing `origin_workspace_id` is NOT optional: `perm.grants` carries
-//! `CHECK ((origin = 'workspace_assignment') = (origin_workspace_id IS NOT NULL))`
-//! (`migrations/0154_perm_model.sql`), so an `explicit` grant MUST have a null
-//! `origin_workspace_id` or the row is rejected. Clearing it also takes the row
-//! out of the partial unique index `grants_one_per_assignment`
-//! (`(catalog_id, origin_workspace_id) WHERE origin='workspace_assignment'`), so
-//! the rewritten grant no longer collides on that index. The undo does not need
+//! The rewrite CONVERGES on the exact row the authoring path
+//! (`egret_perm::sync_assignment_grants_in_tx`) now writes for a fresh bind
+//! (SP3c-3 Task 5): `origin='workspace_assignment_group'` keeping the workspace
+//! id, principal `kind='group' ref=ws:<slug> members`. So a migrated grant and a
+//! freshly-authored one are byte-identical rows — the authoring path's dedup, its
+//! unbind DELETE and its idempotent re-bind all treat them the same. Keeping
+//! `origin_workspace_id` is valid under the widened schema CHECK (migration 0226:
+//! `(origin IN ('workspace_assignment','workspace_assignment_group')) =
+//! (origin_workspace_id IS NOT NULL)`), and it is what keys the grant in the
+//! partial unique index `grants_one_per_assignment_group`. The undo does not need
 //! `origin_workspace_id` to FIND the grant — provenance records the grant id —
-//! and restores both columns in one UPDATE (the row-level CHECK is evaluated at
-//! statement end, so setting both at once is valid).
+//! and restores `origin='workspace_assignment'` in one UPDATE.
+//!
+//! **Why this also resolves the undo/re-bind race the Task-4 review flagged.**
+//! Before Task 5, a re-bind re-created a fresh `origin='workspace_assignment'`
+//! grant, which the undo's restore (also to `workspace_assignment`) could collide
+//! with on `grants_one_per_assignment`. Now the authoring path never writes
+//! `workspace_assignment` — it writes `workspace_assignment_group` — so the undo's
+//! restore target is one that nothing else recreates.
 //!
 //! # Reversible
 //!
@@ -357,11 +366,16 @@ pub async fn migrate_ws_assignments_in_tx(
             )));
         }
 
-        // Rewrite the grant: origin -> explicit, origin_workspace_id -> NULL (the
-        // schema CHECK requires a null origin_workspace_id on an explicit grant).
+        // Rewrite the grant's origin to the SP3c-3 group-assignment shape,
+        // KEEPING origin_workspace_id. This converges on exactly the row the
+        // authoring path (`egret_perm::sync_assignment_grants_in_tx`) now writes
+        // for a fresh bind: `origin='workspace_assignment_group'` with its
+        // workspace id, deduplicated by the `grants_one_per_assignment_group`
+        // partial unique index (migration 0226). A migrated grant and a
+        // freshly-authored one are therefore identical rows.
         sqlx::query(
             "UPDATE perm.grants \
-                SET origin = 'explicit', origin_workspace_id = NULL \
+                SET origin = 'workspace_assignment_group' \
               WHERE id = $1 AND origin = 'workspace_assignment'",
         )
         .bind(grant_id)
@@ -399,7 +413,15 @@ pub async fn migrate_ws_assignments_in_tx(
     let grant_ids: Vec<Uuid> = originals.iter().map(|o| o.grant_id).collect();
     let principal_hashes: Vec<String> = originals
         .iter()
-        .map(|o| row_hash(o.grant_id, "explicit", None, &o.group_name, "include"))
+        .map(|o| {
+            row_hash(
+                o.grant_id,
+                "workspace_assignment_group",
+                Some(o.origin_workspace_id),
+                &o.group_name,
+                "include",
+            )
+        })
         .collect();
     let original_json = serde_json::to_value(&originals).map_err(PermHttpError::db)?;
 
@@ -473,7 +495,7 @@ async fn restore_grant(
     let grant_changed = sqlx::query(
         "UPDATE perm.grants \
             SET origin = 'workspace_assignment', origin_workspace_id = $2 \
-          WHERE id = $1 AND origin = 'explicit'",
+          WHERE id = $1 AND origin = 'workspace_assignment_group'",
     )
     .bind(o.grant_id)
     .bind(o.origin_workspace_id)

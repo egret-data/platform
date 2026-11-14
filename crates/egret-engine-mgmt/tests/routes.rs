@@ -211,6 +211,21 @@ impl egret_engine_mgmt::ProfileCompilerPort for RealProfileCompiler {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         catalog_id: Uuid,
     ) -> Result<(), egret_perm::CompileError> {
+        // Mirror `egret-bin`'s `recompile_catalog_assignment` (SP3c-3 Task 5):
+        // ensure each bound workspace's managed `ws:<slug> members` group before
+        // compiling, so the group grant the authoring path wrote actually enforces.
+        let workspace_ids: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT workspace_id FROM registry.catalog_workspaces \
+              WHERE catalog_id = $1 ORDER BY workspace_id",
+        )
+        .bind(catalog_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(egret_perm::CompileError::from_db)?;
+        for ws in workspace_ids {
+            egret_perm_compile::ws_members_group::sync_ws_members_group_in_tx(tx, ws).await?;
+        }
+
         let mut ids = egret_policy::services_for_catalog_via(tx, catalog_id)
             .await
             .map_err(|e| egret_perm::CompileError::Db(e.to_string()))?;
@@ -9269,7 +9284,7 @@ async fn workspace_assignment_route_syncs_perm_grants() {
                 g.scope.catalog_id == catalog
                     && matches!(
                         g.origin,
-                        egret_perm::GrantOrigin::WorkspaceAssignment { .. }
+                        egret_perm::GrantOrigin::WorkspaceAssignmentGroup { .. }
                     )
             })
             .cloned()
@@ -9294,7 +9309,7 @@ async fn workspace_assignment_route_syncs_perm_grants() {
     assert_eq!(after_assign[0].actions, vec![egret_perm::Action::Read]);
     assert!(matches!(
         after_assign[0].origin,
-        egret_perm::GrantOrigin::WorkspaceAssignment { workspace_id } if workspace_id == ws
+        egret_perm::GrantOrigin::WorkspaceAssignmentGroup { workspace_id } if workspace_id == ws
     ));
 
     let (status, _) = call(
@@ -9496,7 +9511,8 @@ async fn assigning_a_catalog_compiles_its_implicit_grant_with_no_manual_step() {
     assert_eq!(status, StatusCode::OK);
 
     let grant_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment'",
+        "SELECT id FROM perm.grants \
+          WHERE catalog_id = $1 AND origin = 'workspace_assignment_group'",
     )
     .bind(cid)
     .fetch_one(&f.db.pool)

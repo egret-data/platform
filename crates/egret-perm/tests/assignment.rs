@@ -1,7 +1,8 @@
 //! `sync_assignment_grants`: assigning a catalog to a workspace grants that
-//! workspace `read` (SP4a Task 6). See `crates/egret-perm/src/assignment.rs`
-//! for the D7 branch this stores against (`WorkspaceMembers`, not a Ranger
-//! group).
+//! workspace `read` (SP4a Task 6). Since SP3c-3 Task 5 the grant is the explicit
+//! `ws:<slug> members` GROUP shape (`origin='workspace_assignment_group'`,
+//! principal `kind='group'`), not the old `workspace_assignment` +
+//! `workspace_members` shape — see `crates/egret-perm/src/assignment.rs`.
 //!
 //! DB-gated; self-skips only under `EGRET_ALLOW_DB_SKIP`, and otherwise FAILS:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
@@ -9,7 +10,8 @@
 
 use egret_metastore::Db;
 use egret_perm::{
-    Action, Effect, Grant, GrantOrigin, PermStore, Principal, PrincipalKind, PrincipalSet, Scope,
+    ws_members_group_name, Action, Effect, Grant, GrantOrigin, PermStore, Principal, PrincipalKind,
+    PrincipalSet, Scope,
 };
 use uuid::Uuid;
 
@@ -24,7 +26,7 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}_{}", &Uuid::new_v4().simple().to_string()[..12])
 }
 
-async fn seed_catalog_and_workspace(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
+async fn seed_catalog_and_workspace(pool: &sqlx::PgPool) -> (Uuid, Uuid, String) {
     let catalog_id: Uuid = sqlx::query_scalar(
         "INSERT INTO registry.catalogs (name, kind, config) \
          VALUES ($1, 'generic', '{}'::jsonb) RETURNING id",
@@ -34,16 +36,17 @@ async fn seed_catalog_and_workspace(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
     .await
     .expect("catalog");
 
+    let slug = unique("perm-assign-ws");
     let workspace_id: Uuid = sqlx::query_scalar(
         "INSERT INTO workspaces (slug, name, status) VALUES ($1, 'Perm Assign', 'active') \
          RETURNING id",
     )
-    .bind(unique("perm-assign-ws"))
+    .bind(&slug)
     .fetch_one(pool)
     .await
     .expect("workspace");
 
-    (catalog_id, workspace_id)
+    (catalog_id, workspace_id, slug)
 }
 
 fn explicit_write_grant(catalog_id: Uuid) -> Grant {
@@ -92,7 +95,8 @@ async fn grants_for(store: &PermStore, catalog_id: Uuid) -> Vec<Grant> {
 async fn assigning_a_catalog_creates_exactly_one_read_grant_for_that_workspace() {
     let Some(db) = test_db().await else { return };
     let store = PermStore::new(db.pool.clone());
-    let (catalog_id, ws) = seed_catalog_and_workspace(&db.pool).await;
+    let (catalog_id, ws, slug) = seed_catalog_and_workspace(&db.pool).await;
+    let group = ws_members_group_name(&slug);
 
     egret_perm::sync_assignment_grants(&store, catalog_id, &[ws])
         .await
@@ -100,9 +104,13 @@ async fn assigning_a_catalog_creates_exactly_one_read_grant_for_that_workspace()
     let g: Vec<_> = grants_for(&store, catalog_id)
         .await
         .into_iter()
-        .filter(|g| matches!(g.origin, GrantOrigin::WorkspaceAssignment { .. }))
+        .filter(|g| matches!(g.origin, GrantOrigin::WorkspaceAssignmentGroup { .. }))
         .collect();
     assert_eq!(g.len(), 1);
+    assert!(
+        matches!(g[0].origin, GrantOrigin::WorkspaceAssignmentGroup { workspace_id } if workspace_id == ws),
+        "the assignment grant names its workspace"
+    );
     assert_eq!(
         g[0].actions,
         vec![Action::Read],
@@ -111,10 +119,10 @@ async fn assigning_a_catalog_creates_exactly_one_read_grant_for_that_workspace()
     assert_eq!(
         g[0].principals.include,
         vec![Principal {
-            kind: PrincipalKind::WorkspaceMembers,
-            r#ref: ws.to_string(),
+            kind: PrincipalKind::Group,
+            r#ref: group.clone(),
         }],
-        "the implicit grant's principal is WorkspaceMembers (D7): groups don't reach the engine"
+        "SP3c-3: the assignment grant's principal is the managed `ws:<slug> members` group"
     );
 
     // Idempotent: re-running must not accumulate. The unique index is the
@@ -128,7 +136,7 @@ async fn assigning_a_catalog_creates_exactly_one_read_grant_for_that_workspace()
     let after: Vec<_> = grants_for(&store, catalog_id)
         .await
         .into_iter()
-        .filter(|g| matches!(g.origin, GrantOrigin::WorkspaceAssignment { .. }))
+        .filter(|g| matches!(g.origin, GrantOrigin::WorkspaceAssignmentGroup { .. }))
         .collect();
     assert_eq!(after.len(), 1);
     assert_eq!(
@@ -138,8 +146,8 @@ async fn assigning_a_catalog_creates_exactly_one_read_grant_for_that_workspace()
     assert_eq!(
         after[0].principals.include,
         vec![Principal {
-            kind: PrincipalKind::WorkspaceMembers,
-            r#ref: ws.to_string(),
+            kind: PrincipalKind::Group,
+            r#ref: group,
         }],
         "the principal row must still be there after a no-op re-run"
     );
@@ -149,7 +157,7 @@ async fn assigning_a_catalog_creates_exactly_one_read_grant_for_that_workspace()
 async fn unassigning_removes_the_implicit_grant_but_never_an_explicit_one() {
     let Some(db) = test_db().await else { return };
     let store = PermStore::new(db.pool.clone());
-    let (catalog_id, ws) = seed_catalog_and_workspace(&db.pool).await;
+    let (catalog_id, ws, _slug) = seed_catalog_and_workspace(&db.pool).await;
     egret_perm::sync_assignment_grants(&store, catalog_id, &[ws])
         .await
         .unwrap();
@@ -174,8 +182,8 @@ async fn reassigning_to_a_different_workspace_drops_the_old_implicit_grant() {
     // first sync.
     let Some(db) = test_db().await else { return };
     let store = PermStore::new(db.pool.clone());
-    let (catalog_id, ws1) = seed_catalog_and_workspace(&db.pool).await;
-    let (_, ws2) = seed_catalog_and_workspace(&db.pool).await;
+    let (catalog_id, ws1, _slug1) = seed_catalog_and_workspace(&db.pool).await;
+    let (_, ws2, _slug2) = seed_catalog_and_workspace(&db.pool).await;
 
     egret_perm::sync_assignment_grants(&store, catalog_id, &[ws1])
         .await
@@ -192,6 +200,6 @@ async fn reassigning_to_a_different_workspace_drops_the_old_implicit_grant() {
     );
     assert!(matches!(
         g[0].origin,
-        GrantOrigin::WorkspaceAssignment { workspace_id } if workspace_id == ws2
+        GrantOrigin::WorkspaceAssignmentGroup { workspace_id } if workspace_id == ws2
     ));
 }

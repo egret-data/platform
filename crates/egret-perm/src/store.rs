@@ -113,6 +113,14 @@ fn grant_from_row(row: GrantRow, principals: PrincipalSet) -> Result<Grant, Perm
             })?;
             GrantOrigin::WorkspaceAssignment { workspace_id }
         }
+        "workspace_assignment_group" => {
+            let workspace_id = row.origin_workspace_id.ok_or_else(|| {
+                PermError::Invalid(
+                    "workspace_assignment_group grant with no origin_workspace_id".into(),
+                )
+            })?;
+            GrantOrigin::WorkspaceAssignmentGroup { workspace_id }
+        }
         other => return Err(PermError::Invalid(format!("unknown grant origin: {other}"))),
     };
     Ok(Grant {
@@ -433,6 +441,9 @@ pub async fn create_grant_in_tx(
         GrantOrigin::Explicit => ("explicit", None),
         GrantOrigin::WorkspaceAssignment { workspace_id } => {
             ("workspace_assignment", Some(*workspace_id))
+        }
+        GrantOrigin::WorkspaceAssignmentGroup { workspace_id } => {
+            ("workspace_assignment_group", Some(*workspace_id))
         }
     };
     let id: Uuid = sqlx::query_scalar(

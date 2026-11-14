@@ -271,11 +271,19 @@ struct Seeded {
 }
 
 /// A StarRocks profile (one bound engine, one attached Iceberg catalog) whose
-/// catalog is assigned to a fresh workspace that has one (username-less) member,
-/// so the implicit `origin='workspace_assignment'` grant with a
-/// `kind='workspace_members'` principal exists exactly as production writes it.
-/// The service is NOT compiled yet.
-async fn seed_service_with_ws_assignment_grant(db: &Db) -> Seeded {
+/// catalog's warehouse belongs to a fresh workspace with one (username-less)
+/// member — but with NO assignment grant yet. The authoring tests bind through
+/// the real path; the Task-4 seed adds a legacy grant on top. The service is NOT
+/// compiled yet.
+struct UnboundSeed {
+    service_id: i64,
+    catalog_id: Uuid,
+    workspace_id: Uuid,
+    slug: String,
+    member: Uuid,
+}
+
+async fn seed_unbound_service_and_catalog(db: &Db) -> UnboundSeed {
     let pool = &db.pool;
     let policy = PolicyStore::new(db.clone());
     egret_policy::seed_starrocks(&policy)
@@ -337,28 +345,48 @@ async fn seed_service_with_ws_assignment_grant(db: &Db) -> Seeded {
     .await
     .expect("attach catalog");
 
-    // The implicit grant, written exactly as the assignment path writes it.
-    let mut tx = pool.begin().await.unwrap();
-    egret_perm::sync_assignment_grants_in_tx(&mut tx, catalog_id, &[workspace_id])
-        .await
-        .expect("sync assignment grant");
-    tx.commit().await.unwrap();
-
-    let grant_id: Uuid = sqlx::query_scalar(
-        "SELECT id FROM perm.grants \
-          WHERE catalog_id = $1 AND origin = 'workspace_assignment' AND origin_workspace_id = $2",
-    )
-    .bind(catalog_id)
-    .bind(workspace_id)
-    .fetch_one(pool)
-    .await
-    .expect("implicit grant exists");
-
-    Seeded {
+    UnboundSeed {
         service_id: service.id,
         catalog_id,
         workspace_id,
         slug,
+        member,
+    }
+}
+
+/// [`seed_unbound_service_and_catalog`] plus a LEGACY implicit grant, written
+/// exactly as the PRE-SP3c-3 assignment path wrote it — via raw SQL, because the
+/// authoring path (`sync_assignment_grants_in_tx`) now writes the `ws:<slug>
+/// members` group shape directly (Task 5) and can no longer produce the old
+/// `workspace_assignment` + `workspace_members` row this migration rewrites. This
+/// is the pre-existing binding Task 4 backfills.
+async fn seed_service_with_ws_assignment_grant(db: &Db) -> Seeded {
+    let pool = &db.pool;
+    let base = seed_unbound_service_and_catalog(db).await;
+    let grant_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, origin, origin_workspace_id) \
+         VALUES ('allow'::perm.effect, ARRAY['read'], $1, 'workspace_assignment', $2) RETURNING id",
+    )
+    .bind(base.catalog_id)
+    .bind(base.workspace_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert legacy implicit grant");
+    sqlx::query(
+        "INSERT INTO perm.grant_principals (grant_id, kind, ref, mode) \
+         VALUES ($1, 'workspace_members'::perm.principal_kind, $2, 'include'::perm.principal_mode)",
+    )
+    .bind(grant_id)
+    .bind(base.workspace_id.to_string())
+    .execute(pool)
+    .await
+    .expect("insert legacy workspace_members principal");
+
+    Seeded {
+        service_id: base.service_id,
+        catalog_id: base.catalog_id,
+        workspace_id: base.workspace_id,
+        slug: base.slug,
         grant_id,
     }
 }
@@ -422,8 +450,9 @@ async fn migrating_a_ws_assignment_is_byte_identical_and_removes_workspace_membe
         "this catalog was migrated: {m:?}"
     );
 
-    // (a) No `workspace_members` principal remains for THIS grant; it is now an
-    // `explicit` grant naming the `ws:<slug> members` group.
+    // (a) No `workspace_members` principal remains for THIS grant; it is now a
+    // `workspace_assignment_group` grant naming the `ws:<slug> members` group —
+    // the SAME shape the authoring path writes for a fresh bind (Task 5).
     let ws_members_left: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM perm.grant_principals \
           WHERE grant_id = $1 AND kind = 'workspace_members'::perm.principal_kind",
@@ -440,10 +469,11 @@ async fn migrating_a_ws_assignment_is_byte_identical_and_removes_workspace_membe
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-    assert_eq!(origin, "explicit");
-    assert!(
-        ows.is_none(),
-        "origin_workspace_id cleared on an explicit grant"
+    assert_eq!(origin, "workspace_assignment_group");
+    assert_eq!(
+        ows,
+        Some(seeded.workspace_id),
+        "origin_workspace_id is KEPT on a group-assignment grant (converges with the authoring path)"
     );
 
     let group_ref: String = sqlx::query_scalar(
@@ -555,6 +585,226 @@ async fn undo_409s_when_a_row_changed() {
         err.to_string().contains("undo refused"),
         "a 409 naming the change: {err}"
     );
+
+    tx.rollback().await.unwrap();
+    cleanup(&pool, seeded.grant_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// SP3c-3 Task 5: the AUTHORING path. Binding a catalog to a workspace through the
+// real `egret_perm::sync_assignment_grants_in_tx` now writes the explicit
+// `ws:<slug> members` group grant directly — the same shape Task 4 migrates onto.
+// These run every write inside ONE transaction that is rolled back (nothing
+// commits), scoped to this test's own catalog/workspace, under the file's SERIAL
+// mutex. The managed group is ensured here with `sync_ws_members_group_in_tx`
+// exactly as `egret-bin`'s `recompile_catalog_assignment` does on the production
+// bind path (which this crate cannot call directly without a dependency cycle).
+
+/// The (origin, origin_workspace_id, principal kind, ref, mode) of the single
+/// assignment grant on a catalog — the "shape" that Task 4's migrate and Task 5's
+/// authoring must agree on.
+async fn grant_shape(
+    tx: &mut Transaction<'_, Postgres>,
+    grant_id: Uuid,
+) -> (String, Option<Uuid>, String, String, String) {
+    sqlx::query_as(
+        "SELECT g.origin, g.origin_workspace_id, p.kind::text, p.ref, p.mode::text \
+           FROM perm.grants g JOIN perm.grant_principals p ON p.grant_id = g.id \
+          WHERE g.id = $1",
+    )
+    .bind(grant_id)
+    .fetch_one(&mut **tx)
+    .await
+    .expect("grant shape")
+}
+
+#[tokio::test]
+async fn binding_authors_a_ws_members_group_grant_that_enforces() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let base = seed_unbound_service_and_catalog(&db).await;
+
+    // Everything in ONE rolled-back transaction.
+    let mut tx = pool.begin().await.unwrap();
+
+    // Bind via the REAL authoring path, then ensure the managed group exactly as
+    // the production recompile seam (`egret-bin`) does before it compiles.
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, base.catalog_id, &[base.workspace_id])
+        .await
+        .expect("bind");
+    sync_ws_members_group_in_tx(&mut tx, base.workspace_id)
+        .await
+        .expect("ensure ws members group");
+
+    // Exactly one assignment grant on this catalog, the group shape.
+    let grant_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment_group'",
+    )
+    .bind(base.catalog_id)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(grant_ids.len(), 1, "exactly one group-assignment grant");
+    let (origin, ows, kind, p_ref, mode) = grant_shape(&mut tx, grant_ids[0]).await;
+    assert_eq!(origin, "workspace_assignment_group");
+    assert_eq!(ows, Some(base.workspace_id));
+    assert_eq!(kind, "group");
+    assert_eq!(p_ref, ws_members_group_name(&base.slug));
+    assert_eq!(mode, "include");
+
+    // It ENFORCES: recompiling names the member in the compiled artifact the
+    // engine downloads. The member is username-less; the compiler mints it, so we
+    // read the minted name inside the tx and assert it is present.
+    recompile_service_in_tx(&mut tx, base.service_id)
+        .await
+        .expect("compile");
+    let bodies = compiled_bodies_in_tx(&mut tx, base.service_id).await;
+    assert!(
+        !bodies.as_array().unwrap().is_empty(),
+        "the group grant must compile to at least one policy: {bodies}"
+    );
+    let username: String = sqlx::query_scalar("SELECT username FROM public.users WHERE id = $1")
+        .bind(base.member)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("member username minted by compile");
+    assert!(
+        bodies.to_string().contains(&username),
+        "the workspace member must be named in the compiled policy (enforced): {bodies}"
+    );
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn re_binding_the_same_workspace_is_idempotent() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let base = seed_unbound_service_and_catalog(&db).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, base.catalog_id, &[base.workspace_id])
+        .await
+        .expect("bind");
+    let first: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment_group'",
+    )
+    .bind(base.catalog_id)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(first.len(), 1);
+
+    // Re-bind the SAME set: no accumulation, same grant id (not delete+reinsert).
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, base.catalog_id, &[base.workspace_id])
+        .await
+        .expect("re-bind");
+    let second: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment_group'",
+    )
+    .bind(base.catalog_id)
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        second, first,
+        "re-binding is idempotent: still exactly one grant, same id"
+    );
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn unbinding_removes_the_group_grant() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let base = seed_unbound_service_and_catalog(&db).await;
+
+    let mut tx = pool.begin().await.unwrap();
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, base.catalog_id, &[base.workspace_id])
+        .await
+        .expect("bind");
+    // Unbind: empty set removes the group grant.
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, base.catalog_id, &[])
+        .await
+        .expect("unbind");
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM perm.grants \
+          WHERE catalog_id = $1 \
+            AND origin IN ('workspace_assignment', 'workspace_assignment_group')",
+    )
+    .bind(base.catalog_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(left, 0, "unbinding removes the assignment grant");
+
+    tx.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_migrated_grant_and_a_freshly_authored_grant_have_the_same_shape() {
+    let Some(dsn) = egret_test_db::url().await else {
+        return;
+    };
+    let _g = SERIAL.lock().await;
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let pool = db.pool.clone();
+    let seeded = seed_service_with_ws_assignment_grant(&db).await;
+
+    let mut tx = pool.begin().await.unwrap();
+
+    // (1) Migrate the legacy grant (Task 4) and capture its resulting shape.
+    migrate_ws_assignments_in_tx(&mut tx, "tester")
+        .await
+        .expect("migrate");
+    let migrated = grant_shape(&mut tx, seeded.grant_id).await;
+
+    // (2) Delete it and RE-AUTHOR the SAME (catalog, workspace) through the real
+    // authoring path; capture that grant's shape.
+    sqlx::query("DELETE FROM perm.grants WHERE id = $1")
+        .bind(seeded.grant_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    egret_perm::sync_assignment_grants_in_tx(&mut tx, seeded.catalog_id, &[seeded.workspace_id])
+        .await
+        .expect("re-author");
+    let fresh_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM perm.grants WHERE catalog_id = $1 AND origin = 'workspace_assignment_group'",
+    )
+    .bind(seeded.catalog_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    let authored = grant_shape(&mut tx, fresh_id).await;
+
+    // Same shape in every column that is not the (minted) grant id: origin,
+    // origin_workspace_id, principal kind, ref and mode.
+    assert_eq!(
+        migrated, authored,
+        "Task 4's migrate output and Task 5's authoring output must be identical rows"
+    );
+    assert_eq!(migrated.0, "workspace_assignment_group");
+    assert_eq!(migrated.1, Some(seeded.workspace_id));
+    assert_eq!(migrated.2, "group");
+    assert_eq!(migrated.3, ws_members_group_name(&seeded.slug));
 
     tx.rollback().await.unwrap();
     cleanup(&pool, seeded.grant_id).await;
