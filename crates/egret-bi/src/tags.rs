@@ -776,9 +776,9 @@ impl ClassificationPolicyRepo {
     /// BOTH lists empty = NO gate (informational tag only).
     ///
     /// Returns whatever the accompanying recompile could NOT express — a
-    /// group-only gate, or a Trino profile with no usable tag service — so the
-    /// endpoint can tell the author, instead of answering `{"ok": true}` over a
-    /// clearance no engine will ever enforce.
+    /// Trino profile with no usable tag service — so the endpoint can tell the
+    /// author, instead of answering `{"ok": true}` over a clearance no engine
+    /// will ever enforce.
     pub async fn set_policy(
         &self,
         tag_id: Uuid,
@@ -923,8 +923,7 @@ impl ClassificationPolicyRepo {
     /// to keep in step with it.
     /// **The skips are RETURNED, not only logged (SP4c review I5).** A clearance
     /// authored on a Trino profile with no usable `tagService` compiles nothing
-    /// at all, and a group-only gate compiles nothing on any engine — and the
-    /// endpoint used to answer `{"ok": true}` either way, so the UI showed the
+    /// at all — and the endpoint used to answer `{"ok": true}` either way, so the UI showed the
     /// clearance as active while the data plane had never heard of it. That is
     /// the same failure the compiler already refuses elsewhere: `SkipReport` is
     /// on the perm mutation responses precisely because "a create that succeeded
@@ -941,7 +940,7 @@ impl ClassificationPolicyRepo {
             if !summary.skipped.is_empty() {
                 tracing::warn!(
                     skipped_count = summary.skipped.len(),
-                    "a clearance write's recompile skipped some items — a group-only gate, or a \
+                    "a clearance write's recompile skipped some items — e.g. a \
                      Trino profile with no tag service"
                 );
             }
@@ -950,8 +949,8 @@ impl ClassificationPolicyRepo {
             // once per profile in the affected set — and an author reading "3
             // skipped" for one gate would reasonably think three different
             // things went wrong. The triple is the identity: two profiles that
-            // skipped the same tag for DIFFERENT reasons (one group-only, one
-            // with no tag service) stay two entries, because those are two
+            // skipped the same tag for DIFFERENT reasons (e.g. no tag service on one profile, another
+            // reason on a second) stay two entries, because those are two
             // facts.
             for item in &summary.skipped {
                 if !skipped.iter().any(|s: &egret_perm_compile::SkippedItem| {

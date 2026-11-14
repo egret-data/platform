@@ -60,11 +60,19 @@ async fn insert_withhold(
 
 #[tokio::test]
 async fn a_withhold_rule_with_no_payload_is_accepted() {
+    // Under SERIAL: the committed tag-selected withhold rule is installation-wide
+    // and would show in a fingerprinting test's before/after window.
+    let _serial = SERIAL.lock().await;
     let Some(pool) = pool().await else { return };
     let tag = seed_tag(&pool).await;
     insert_withhold(&pool, &tag, None)
         .await
         .expect("a payload-free withhold rule is valid");
+    sqlx::query("DELETE FROM perm.rules WHERE kind = 'withhold' AND name = $1")
+        .bind(format!("withhold-{tag}"))
+        .execute(&pool)
+        .await
+        .expect("clean up the rule this test inserted");
 }
 
 /// SQLSTATE 23514 = check_violation.
@@ -76,6 +84,7 @@ fn is_check_violation(e: &sqlx::Error) -> bool {
 
 #[tokio::test]
 async fn a_withhold_rule_with_a_payload_is_rejected() {
+    let _serial = SERIAL.lock().await;
     let Some(pool) = pool().await else { return };
     let tag = seed_tag(&pool).await;
     let err = insert_withhold(&pool, &tag, Some("MASK_NULL"))
@@ -91,6 +100,7 @@ async fn a_withhold_rule_with_a_payload_is_rejected() {
 
 #[tokio::test]
 async fn a_withhold_rule_must_be_tag_selected() {
+    let _serial = SERIAL.lock().await;
     let Some(pool) = pool().await else { return };
     let catalog_id: Uuid = sqlx::query_scalar(
         "INSERT INTO registry.catalogs (name, kind, config) \
@@ -172,9 +182,9 @@ fn unique(prefix: &str) -> String {
 }
 
 /// Clear this binary's clearance state so a test starts from a known slate:
-/// every gate and every `clearance:*` withhold rule. The database is private to
-/// this process, and the `clearance:%` name scope leaves the CHECK-only tests'
-/// `withhold-*` rules untouched. Provenance rows are left alone — their id is a
+/// every gate and every withhold rule (`clearance:*`, and any `withhold-*` a
+/// CHECK-only test left behind). The database is private to this process.
+/// Provenance rows are left alone — their id is a
 /// serial so a stale one never collides, and deleting them would race the
 /// non-SERIAL `the_clearance_migration_table_records_a_run`. Call under
 /// [`SERIAL`].
@@ -185,15 +195,18 @@ async fn reset(pool: &PgPool) {
         .expect("reset gates");
     sqlx::query(
         "DELETE FROM perm.rule_exemptions WHERE rule_id IN \
-           (SELECT id FROM perm.rules WHERE kind = 'withhold' AND name LIKE 'clearance:%')",
+           (SELECT id FROM perm.rules WHERE kind = 'withhold' AND (name LIKE 'clearance:%' OR name LIKE 'withhold-%'))",
     )
     .execute(pool)
     .await
     .expect("reset exemptions");
-    sqlx::query("DELETE FROM perm.rules WHERE kind = 'withhold' AND name LIKE 'clearance:%'")
-        .execute(pool)
-        .await
-        .expect("reset rules");
+    sqlx::query(
+        "DELETE FROM perm.rules WHERE kind = 'withhold' \
+         AND (name LIKE 'clearance:%' OR name LIKE 'withhold-%')",
+    )
+    .execute(pool)
+    .await
+    .expect("reset rules");
 }
 
 struct RoleClearance {
