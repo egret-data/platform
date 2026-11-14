@@ -52,6 +52,8 @@ struct Seen {
 struct Flaky {
     fails: Mutex<HashMap<String, usize>>,
     seen: Mutex<Vec<Seen>>,
+    /// Fails the n-th (0-based) run this registry is handed of the task.
+    fail_nth: Mutex<HashMap<String, usize>>,
     inner: Option<egret_workflow::worker::Handlers>,
 }
 
@@ -60,8 +62,14 @@ impl Flaky {
         Self {
             fails: Mutex::new(fails.iter().map(|(t, n)| (t.to_string(), *n)).collect()),
             seen: Mutex::new(Vec::new()),
+            fail_nth: Mutex::new(HashMap::new()),
             inner: None,
         }
+    }
+
+    fn failing_nth_run_of(self, task: &str, nth: usize) -> Self {
+        self.fail_nth.lock().unwrap().insert(task.to_string(), nth);
+        self
     }
 
     fn over(mut self, inner: egret_workflow::worker::Handlers) -> Self {
@@ -89,6 +97,7 @@ impl Flaky {
 #[async_trait::async_trait]
 impl Registry for Flaky {
     async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        let earlier = self.seen_of(&task.task_id).len();
         self.seen.lock().unwrap().push(Seen {
             execution: task.execution_id,
             task: task.task_id.clone(),
@@ -98,7 +107,9 @@ impl Registry for Flaky {
         });
         let fail = {
             let mut fails = self.fails.lock().unwrap();
+            let nth = self.fail_nth.lock().unwrap().get(&task.task_id).copied();
             match fails.get_mut(&task.task_id) {
+                _ if nth == Some(earlier) => true,
                 Some(n) if *n > 0 => {
                     *n -= 1;
                     true
@@ -1376,4 +1387,257 @@ async fn a_replay_from_a_task_of_a_running_execution_is_refused(pool: sqlx::PgPo
     // Assert
     assert_eq!(out, Err(ReplayRefused::NotTerminal("RUNNING".into())));
     assert_eq!(execution_count(&pool).await, n);
+}
+
+// ── A4. Shapes 7a's in-place restart treats specially, now as copies ──────
+
+/// S4: a `Loop` whose second iteration failed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_copy_of_a_failed_loop_creates_new_iterations(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let source = format!(
+        "id: lp2\nnamespace: t\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n\
+         \x20   values: '[\"a\", \"b\"]'\n    tasks:\n      - id: item\n        type: {LOG}\n        \
+         message: \"{{{{ item.value }}}}\"\n"
+    );
+    let reg = Flaky::new(&[]).failing_nth_run_of("item", 1);
+    let old = start(&pool, ws, &source).await;
+    drive(&pool, &reg, old).await;
+    assert_eq!(exec_state(&pool, old).await, "FAILED");
+    let iterations = |pool: sqlx::PgPool, of: Uuid| async move {
+        sqlx::query_as::<_, (i32, Uuid, String, i32)>(
+            "SELECT loop_index, id, state, attempt_number FROM workflow.executions \
+              WHERE parent_execution_id = $1 AND loop_index IS NOT NULL ORDER BY loop_index",
+        )
+        .bind(of)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let before = iterations(pool.clone(), old).await;
+    assert_eq!(before.len(), 2, "{before:?}");
+    assert_eq!(before[1].2, "FAILED");
+
+    // Act
+    let new = replay(
+        &pool,
+        ws,
+        old,
+        &source,
+        ReplayKind::RestartOnSource,
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("restarted");
+    drive(&pool, &reg, new).await;
+
+    // Assert
+    assert_eq!(exec_state(&pool, new).await, "SUCCESS");
+    let fresh = iterations(pool.clone(), new).await;
+    assert_eq!(fresh.len(), 2, "every iteration is new: {fresh:?}");
+    assert!(fresh.iter().all(|i| i.2 == "SUCCESS"), "{fresh:?}");
+    assert_eq!(
+        iterations(pool.clone(), old).await,
+        before,
+        "no iteration is restarted in the old execution"
+    );
+    assert_eq!(reg.seen_of("item").len(), 2 + 2, "two old, two new");
+    assert_eq!(exec_state(&pool, old).await, "FAILED");
+}
+
+/// The old child is not restarted: a restart copy spawns a new one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_copy_of_a_failed_subflow_spawns_a_new_child(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    common::seed_flow(
+        &db,
+        ws,
+        user,
+        &format!("id: kid2\nnamespace: t\ntasks:\n{}", tasks(&["k"])),
+        "draft",
+    )
+    .await;
+    let parent = format!(
+        "id: parent2\nnamespace: t\ntasks:\n  - id: call\n    type: io.kestra.plugin.core.flow.Subflow\n\
+         \x20   namespace: t\n    flowId: kid2\n    wait: true\n    transmitFailed: true\n{}",
+        tasks(&["after"])
+    );
+    let reg = Flaky::new(&[("k", 1)]);
+    let old = start(&pool, ws, &parent).await;
+    drive(&pool, &reg, old).await;
+    assert_eq!(exec_state(&pool, old).await, "FAILED");
+    let kids = |pool: sqlx::PgPool| async move {
+        sqlx::query_as::<_, (Uuid, Option<Uuid>, String, i32)>(
+            "SELECT id, trigger_execution_id, state, attempt_number FROM workflow.executions \
+              WHERE flow_key = 'kid2' ORDER BY created_at, id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let before = kids(pool.clone()).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].2, "FAILED");
+
+    // Act
+    let new = replay(
+        &pool,
+        ws,
+        old,
+        &parent,
+        ReplayKind::RestartOnSource,
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("restarted");
+    drive(&pool, &reg, new).await;
+
+    // Assert
+    assert_eq!(exec_state(&pool, new).await, "SUCCESS");
+    let after = kids(pool.clone()).await;
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert_eq!(after[0], before[0], "the old child is not restarted");
+    assert_eq!(
+        after.iter().filter(|k| k.1 == Some(new)).count(),
+        1,
+        "a new child of the new execution: {after:?}"
+    );
+    assert_eq!(reg.seen_of("after").len(), 1);
+}
+
+/// Kestra-faithful: the copy is a new execution; the paused one stays paused
+/// and keeps its runs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_copy_of_a_paused_execution_leaves_the_old_one_paused(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let source = format!(
+        "id: pz\nnamespace: t\ntasks:\n{}  - id: wait\n    type: io.kestra.plugin.core.flow.Pause\n{}",
+        tasks(&["a"]),
+        tasks(&["z"])
+    );
+    let reg = Flaky::new(&[]);
+    let old = start(&pool, ws, &source).await;
+    for _ in 0..20 {
+        egret_workflow::worker::tick(&pool, 64, &reg).await.unwrap();
+    }
+    assert_eq!(exec_state(&pool, old).await, "PAUSED");
+    let runs = runs_of(&pool, old).await;
+
+    // Act
+    let out = replay(
+        &pool,
+        ws,
+        old,
+        &source,
+        ReplayKind::RestartOnSource,
+        ReplayInputs::Reuse,
+    )
+    .await;
+
+    // Assert
+    let new = out.expect("the copy is made");
+    assert_ne!(new, old);
+    assert_eq!(replayed_from(&pool, new).await, Some(old));
+    assert_eq!(exec_state(&pool, old).await, "PAUSED");
+    assert_eq!(
+        runs_of(&pool, old).await,
+        runs,
+        "the old runs are untouched"
+    );
+    assert_eq!(
+        reg.attempts_of("a").len(),
+        1,
+        "the finished task is kept, not run again"
+    );
+}
+
+/// D4, S5: the read rule is transitive over the replay chain.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_of_a_replay_reads_two_back(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let reg = Flaky::new(&[]);
+    let x = start(&pool, ws, &three("chain")).await;
+    drive(&pool, &reg, x).await;
+    let b = run_id(&runs_of(&pool, x).await, "b");
+    let y = replay(
+        &pool,
+        ws,
+        x,
+        &three("chain"),
+        ReplayKind::FromTaskRun(b),
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("Y");
+    drive(&pool, &reg, y).await;
+    let c = run_id(&runs_of(&pool, y).await, "c");
+    let z = replay(
+        &pool,
+        ws,
+        y,
+        &three("chain"),
+        ReplayKind::FromTaskRun(c),
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("Z");
+    drive(&pool, &reg, z).await;
+
+    // Act
+    let mut conn = pool.acquire().await.unwrap();
+    let readable = egret_workflow::storage::index::readable_executions(&mut conn, ws, z)
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(exec_state(&pool, z).await, "SUCCESS");
+    assert_eq!(replayed_from(&pool, z).await, Some(y));
+    assert!(readable.contains(&y), "{readable:?}");
+    assert!(readable.contains(&x), "{readable:?}");
+    assert_eq!(exec_meta(&pool, z).await.1, 3, "attempt 3");
+}
+
+/// The task is in `afterExecution:`; the replay re-runs it after the new
+/// execution ends, and the tasks before it are not run again.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_after_execution_task_can_be_replayed(pool: sqlx::PgPool) {
+    // Arrange
+    let (_db, ws, _) = setup(&pool).await;
+    let source = format!(
+        "id: ae\nnamespace: t\ntasks:\n{}afterExecution:\n  - id: x\n    type: {LOG}\n    \
+         message: after\n",
+        tasks(&["a", "b"])
+    );
+    let reg = Flaky::new(&[]);
+    let old = start(&pool, ws, &source).await;
+    drive(&pool, &reg, old).await;
+    assert_eq!(exec_state(&pool, old).await, "SUCCESS");
+    let runs = runs_of(&pool, old).await;
+    assert_eq!(run(&runs, "x").3, "SUCCESS", "{runs:?}");
+
+    // Act
+    let new = replay(
+        &pool,
+        ws,
+        old,
+        &source,
+        ReplayKind::FromTaskRun(run_id(&runs, "x")),
+        ReplayInputs::Reuse,
+    )
+    .await
+    .expect("replayed");
+    drive(&pool, &reg, new).await;
+
+    // Assert
+    assert_eq!(exec_state(&pool, new).await, "SUCCESS");
+    let fresh = runs_of(&pool, new).await;
+    assert_eq!(run(&fresh, "x").3, "SUCCESS", "{fresh:?}");
+    assert_eq!(reg.attempts_of("x").len(), 2, "x ran again");
+    assert_eq!(reg.attempts_of("a").len(), 1, "a is not run again");
+    assert_eq!(reg.attempts_of("b").len(), 1, "b is not run again");
+    assert_eq!(exec_state(&pool, old).await, "SUCCESS");
 }
