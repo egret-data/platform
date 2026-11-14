@@ -64,7 +64,10 @@ pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
     RetryBehavior, RetryDelay, RetryPolicy, TaskIx, TaskKind,
 };
-pub use replay::{replay_from, restart_copy, CopyRefusal, CopySelection, MatchFault};
+pub use replay::{
+    copy_onto, replay_from, reset_copied, restart_copy, shift_ticks, CopiedRuns, CopyRefusal,
+    CopySelection, MatchFault,
+};
 pub use restart::{mark_as, restart, RestartCommands, RestartRefusal};
 pub use state::{
     apply, Attempt, ExecutionMeta, ExecutionState, Resume, RunIx, RunState, TaskRun, Tick,

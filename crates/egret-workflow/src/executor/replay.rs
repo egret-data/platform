@@ -8,11 +8,12 @@
 //! The worker copies the kept runs (`worker::copy`) and runs the reset as
 //! 7a's restart job.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
+use super::command::Command;
 use super::plan::{Plan, TaskIx, TaskKind};
-use super::restart::{self, RestartRefusal};
-use super::state::{is_descendant_of, ExecutionState, RunIx, RunState};
+use super::restart::{self, RestartCommands, RestartRefusal};
+use super::state::{is_descendant_of, ExecutionState, RunIx, RunState, TaskRun, Tick};
 
 /// Why a copy cannot be made.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -406,11 +407,167 @@ fn scope_errors(plan: &Plan, state: &ExecutionState, chosen: RunIx) -> BTreeSet<
     out
 }
 
+/// The new execution's runs: the kept runs renumbered densely in order and
+/// mapped onto the target plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopiedRuns {
+    pub runs: Vec<TaskRun>,
+    /// `old_of[new] = old` run index.
+    pub old_of: Vec<RunIx>,
+    /// `selection.reset`, renumbered; ascending.
+    pub reset: Vec<RunIx>,
+}
+
+/// Spec D1, D5 (S3): copy `sel.keep`'s runs of `state` (run under `from`)
+/// onto `to`, the chosen source's plan.
+///
+/// Each kept run becomes the next dense index, in the old order, so parents
+/// still precede their children. Its task must be a task of `to` with the
+/// same id ([`MatchFault::Missing`]), under the same parent task and in the
+/// same list -- `tasks`, `errors`, `finally` or `afterExecution`
+/// ([`MatchFault::Moved`]) -- and of the same [`TaskKind`] variant
+/// ([`MatchFault::OtherKind`]). A reset run is a copied row too, so it is
+/// matched as well; only dropped runs need no match.
+pub fn copy_onto(
+    from: &Plan,
+    to: &Plan,
+    state: &ExecutionState,
+    sel: &CopySelection,
+) -> Result<CopiedRuns, CopyRefusal> {
+    let parent_task = parents(to);
+    let mut new_of: HashMap<RunIx, RunIx> = HashMap::new();
+    let mut runs: Vec<TaskRun> = Vec::with_capacity(sel.keep.len());
+    let mut old_of = Vec::with_capacity(sel.keep.len());
+    for &old in &sel.keep {
+        let r = &state.runs[old];
+        let id = &from.tasks[r.task].id;
+        let fault = |why| CopyRefusal::TaskNotInSource {
+            task_id: id.clone(),
+            why,
+        };
+        let t = to
+            .tasks
+            .iter()
+            .position(|t| &t.id == id)
+            .ok_or_else(|| fault(MatchFault::Missing))?;
+        // `keep` holds a run's parent whenever it holds the run, and parents
+        // precede their children, so the parent is already copied.
+        let parent = r.parent.map(|p| new_of[&p]);
+        let want_parent = parent.map(|p| runs[p].task);
+        if parent_task.get(&t).copied() != Some(want_parent)
+            || role_of(from, r.parent.map(|p| state.runs[p].task), r.task)
+                != role_of(to, want_parent, t)
+        {
+            return Err(fault(MatchFault::Moved));
+        }
+        if std::mem::discriminant(&from.tasks[r.task].kind)
+            != std::mem::discriminant(&to.tasks[t].kind)
+        {
+            return Err(fault(MatchFault::OtherKind));
+        }
+        new_of.insert(old, runs.len());
+        let mut copy = r.clone();
+        copy.task = t;
+        copy.parent = parent;
+        runs.push(copy);
+        old_of.push(old);
+    }
+    // `sel.reset` is a subset of `sel.keep`, and a `BTreeSet`: ascending, and
+    // the renumbering keeps the order.
+    let reset = sel.reset.iter().map(|o| new_of[o]).collect();
+    Ok(CopiedRuns {
+        runs,
+        old_of,
+        reset,
+    })
+}
+
+/// Every task's parent task in `plan`: `None` for the flow's own lists.
+fn parents(plan: &Plan) -> HashMap<TaskIx, Option<TaskIx>> {
+    let mut out = HashMap::new();
+    for &t in plan
+        .roots
+        .iter()
+        .chain(&plan.errors)
+        .chain(&plan.finally)
+        .chain(&plan.after_execution)
+    {
+        out.insert(t, None);
+    }
+    for p in 0..plan.tasks.len() {
+        for c in plan.children_of(p) {
+            out.insert(c, Some(p));
+        }
+    }
+    out
+}
+
+/// The list `task` sits in under `parent_task` (or the flow), from the lists
+/// [`slot`] reads.
+fn role_of(plan: &Plan, parent_task: Option<TaskIx>, task: TaskIx) -> Role {
+    let (errors, finally) = match parent_task {
+        None => (&plan.errors, &plan.finally),
+        Some(p) => (&plan.tasks[p].errors, &plan.tasks[p].finally),
+    };
+    if errors.contains(&task) {
+        Role::Errors
+    } else if finally.contains(&task) {
+        Role::Finally
+    } else if parent_task.is_none() && plan.after_execution.contains(&task) {
+        Role::AfterExecution
+    } else {
+        Role::Tasks
+    }
+}
+
+/// Move every tick of `runs` by `by` ms: the attempts' `started_at`/`ended_at`
+/// and `not_before`. A copy's ticks are measured from the NEW execution's
+/// `created_at`.
+pub fn shift_ticks(runs: &mut [TaskRun], by: i64) {
+    for r in runs {
+        for a in &mut r.attempts {
+            a.started_at = Tick(a.started_at.0 + by);
+            a.ended_at = a.ended_at.map(|t| Tick(t.0 + by));
+        }
+        r.not_before = r.not_before.map(|t| Tick(t.0 + by));
+    }
+}
+
+/// Reset the copied runs (new indexes). 7a's per-kind state (`restart::reset`),
+/// except a `Loop`, which goes `CREATED` and spawns its iterations anew (S4):
+/// its old iterations are the old execution's. Ends with
+/// `SetExecutionState { Restarted }`. `loops` is always empty.
+///
+/// A `LoopUntil` is reopened, as 7a has it, and keeps its iteration count:
+/// [`loop_iteration`](super::loop_iteration) is derived from the copied
+/// history and does not count the reopening `RUNNING`. Kestra's `mapTaskRun`
+/// keeps the run's `iteration` on a replay too
+/// (`RestartCaseTest.restartOrReplayLoopUntil`).
+pub fn reset_copied(
+    plan: &Plan,
+    state: &ExecutionState,
+    reset: &[RunIx],
+    now: Tick,
+) -> RestartCommands {
+    let mut out = RestartCommands::default();
+    for &run in reset {
+        match restart::kind(plan, state, run) {
+            // S4: the iterations are the old execution's; this one spawns its own.
+            Some(TaskKind::Loop { .. }) => restart::to_created(run, &mut out),
+            _ => restart::reset(plan, state, run, now, &mut out),
+        }
+    }
+    out.commands.push(Command::SetExecutionState {
+        state: RunState::Restarted,
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::test_support::{drive, drive_from, driven, flow, leaf, run, T0};
-    use crate::executor::{build_plan, ExecutionState, RunState};
+    use crate::executor::test_support::{drive, drive_from, driven, flow, leaf, run, NOW, T0};
+    use crate::executor::{apply, build_plan, Command, ExecutionState, RunState, Tick};
 
     const PAR: &str = "io.kestra.plugin.core.flow.Parallel";
     const SEQ: &str = "io.kestra.plugin.core.flow.Sequential";
@@ -858,5 +1015,322 @@ mod tests {
             restart_copy(&plan, &state),
             Err(CopyRefusal::NotRestartable(RunState::Success))
         );
+    }
+
+    // ---- A2: the pure copy ----
+
+    fn three(ids: &[&str]) -> String {
+        let body: String = ids.iter().map(|t| leaf(t, 2)).collect();
+        flow(&format!("tasks:\n{body}"))
+    }
+
+    /// Replay from `from` in `t1, t2, t3`, copied onto `target`.
+    fn copy_t123_onto(target: &str, from: &str) -> Result<(Plan, CopiedRuns), CopyRefusal> {
+        let (plan, state) = driven(&three(&["t1", "t2", "t3"]), &[]);
+        let sel = replay_from(&plan, &state, run(&plan, &state, from)).expect("replayable");
+        let to = build_plan(target).expect("the target plans");
+        copy_onto(&plan, &to, &state, &sel).map(|c| (to, c))
+    }
+
+    /// The new execution as the worker builds it: the copied runs, born `CREATED`.
+    fn copied_state(c: &CopiedRuns) -> ExecutionState {
+        ExecutionState {
+            runs: c.runs.clone(),
+            history: vec![RunState::Created],
+            metadata: Default::default(),
+        }
+    }
+
+    fn task_of(plan: &Plan, id: &str) -> TaskIx {
+        plan.tasks
+            .iter()
+            .position(|t| t.id == id)
+            .unwrap_or_else(|| panic!("no task {id}"))
+    }
+
+    // A2.1
+    #[test]
+    fn the_identity_copy_renumbers_densely() {
+        let src = flow(&format!(
+            "tasks:\n{}",
+            block(
+                "p",
+                PAR,
+                2,
+                &format!(
+                    "{}{}",
+                    block(
+                        "s",
+                        SEQ,
+                        6,
+                        &format!("{}{}", leaf("s1", 10), leaf("s2", 10))
+                    ),
+                    block(
+                        "y",
+                        SEQ,
+                        6,
+                        &format!("{}{}", leaf("y1", 10), leaf("y2", 10))
+                    )
+                )
+            )
+        ));
+        let (plan, state) = driven(&src, &[]);
+        let sel = replay_from(&plan, &state, run(&plan, &state, "s1")).expect("replayable");
+        assert!(
+            sel.keep.len() < state.runs.len(),
+            "s2 is dropped, so the copy must renumber"
+        );
+
+        let c = copy_onto(&plan, &plan, &state, &sel).expect("the same plan fits");
+
+        assert_eq!(c.runs.len(), sel.keep.len());
+        assert_eq!(c.old_of, sel.keep);
+        assert!(c.old_of.windows(2).all(|w| w[0] < w[1]));
+        let new_state = copied_state(&c);
+        let (y, y2) = (run(&plan, &new_state, "y"), run(&plan, &new_state, "y2"));
+        assert_eq!(c.runs[y2].parent, Some(y));
+        assert!(c
+            .runs
+            .iter()
+            .enumerate()
+            .all(|(ix, r)| r.parent.is_none_or(|p| p < ix)));
+        let want: Vec<RunIx> = sel
+            .reset
+            .iter()
+            .map(|o| c.old_of.iter().position(|x| x == o).expect("kept"))
+            .collect();
+        assert_eq!(c.reset, want);
+        assert!(c.reset.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    // A2.2
+    #[test]
+    fn a_task_missing_from_the_target_is_refused() {
+        let got = copy_t123_onto(&three(&["t1", "t3"]), "t2").map(|_| ());
+
+        assert_eq!(
+            got,
+            Err(CopyRefusal::TaskNotInSource {
+                task_id: "t2".into(),
+                why: MatchFault::Missing
+            })
+        );
+    }
+
+    // A2.3
+    #[test]
+    fn a_kept_task_moved_under_another_parent_is_refused() {
+        let target = flow(&format!(
+            "tasks:\n{}{}{}",
+            block("s", SEQ, 2, &leaf("t1", 6)),
+            leaf("t2", 2),
+            leaf("t3", 2)
+        ));
+
+        let got = copy_t123_onto(&target, "t2").map(|_| ());
+
+        assert_eq!(
+            got,
+            Err(CopyRefusal::TaskNotInSource {
+                task_id: "t1".into(),
+                why: MatchFault::Moved
+            })
+        );
+    }
+
+    // A2.3b: same parent (the flow), another list.
+    #[test]
+    fn a_kept_task_moved_into_another_list_is_refused() {
+        let target = flow(&format!(
+            "tasks:\n{}{}finally:\n{}",
+            leaf("t2", 2),
+            leaf("t3", 2),
+            leaf("t1", 2)
+        ));
+
+        let got = copy_t123_onto(&target, "t2").map(|_| ());
+
+        assert_eq!(
+            got,
+            Err(CopyRefusal::TaskNotInSource {
+                task_id: "t1".into(),
+                why: MatchFault::Moved
+            })
+        );
+    }
+
+    // A2.4
+    #[test]
+    fn a_kept_task_of_another_kind_is_refused() {
+        let target = flow(&format!(
+            "tasks:\n{}{}{}",
+            block("t1", SEQ, 2, &leaf("t1a", 6)),
+            leaf("t2", 2),
+            leaf("t3", 2)
+        ));
+
+        let got = copy_t123_onto(&target, "t2").map(|_| ());
+
+        assert_eq!(
+            got,
+            Err(CopyRefusal::TaskNotInSource {
+                task_id: "t1".into(),
+                why: MatchFault::OtherKind
+            })
+        );
+    }
+
+    // A2.5
+    #[test]
+    fn an_added_task_shifts_the_task_index() {
+        let (to, c) = copy_t123_onto(&three(&["t0", "t1", "t2", "t3", "t4", "t5"]), "t2")
+            .expect("t1 and t2 fit");
+
+        let tasks: Vec<&str> = c
+            .runs
+            .iter()
+            .map(|r| to.tasks[r.task].id.as_str())
+            .collect();
+        assert_eq!(tasks, ["t1", "t2"]);
+        assert_eq!(c.runs[0].task, task_of(&to, "t1"));
+        assert_ne!(c.runs[0].task, 0, "the source's index of t1 moved");
+    }
+
+    // A2.6
+    #[test]
+    fn shift_moves_every_tick() {
+        let (_, mut state) = driven(&three(&["t1", "t2"]), &[]);
+        state.runs[1].not_before = Some(Tick(70));
+        // The drive writes no `ended_at`; give one attempt an end so the field is moved too.
+        state.runs[0].attempts[0].ended_at = Some(Tick(40));
+        let before = state.runs.clone();
+
+        shift_ticks(&mut state.runs, 1_000);
+
+        for (b, a) in before.iter().zip(&state.runs) {
+            assert_eq!(a.not_before, b.not_before.map(|t| Tick(t.0 + 1_000)));
+            assert_eq!(a.attempts.len(), b.attempts.len());
+            for (ba, aa) in b.attempts.iter().zip(&a.attempts) {
+                assert_eq!(aa.started_at, Tick(ba.started_at.0 + 1_000));
+                assert_eq!(aa.ended_at, ba.ended_at.map(|t| Tick(t.0 + 1_000)));
+                assert_eq!(aa.history, ba.history);
+            }
+        }
+        assert!(state.runs.iter().any(|r| !r.attempts.is_empty()));
+        assert!(state
+            .runs
+            .iter()
+            .flat_map(|r| &r.attempts)
+            .any(|a| a.ended_at.is_some()));
+    }
+
+    // A2.7
+    #[test]
+    fn reset_copied_runs_on_from_the_chosen_task() {
+        let (plan, c) = copy_t123_onto(&three(&["t1", "t2", "t3"]), "t2").expect("fits");
+        let mut state = copied_state(&c);
+        assert_eq!(state.runs.len(), 2, "t3 is not copied");
+
+        let cmds = reset_copied(&plan, &state, &c.reset, NOW);
+        for cmd in &cmds.commands {
+            apply(&mut state, cmd);
+        }
+        drive_from(&plan, &mut state, NOW, false, &mut |_| RunState::Success);
+
+        assert_eq!(state.runs.len(), 3, "t3 was created after the reset");
+        assert_eq!(plan.tasks[state.runs[2].task].id, "t3");
+        assert!(state
+            .runs
+            .iter()
+            .all(|r| r.history.last() == Some(&RunState::Success)));
+        assert!(state.history.contains(&RunState::Restarted));
+        assert_eq!(state.history.last(), Some(&RunState::Success));
+    }
+
+    // A2.8 (S4)
+    #[test]
+    fn a_copied_loop_is_created_again() {
+        let src = flow(&format!(
+            "tasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    tasks:\n{}{}",
+            leaf("inner", 6),
+            leaf("after", 2)
+        ));
+        let (plan, state) = driven(&src, &[]);
+        let sel = replay_from(&plan, &state, run(&plan, &state, "l")).expect("replayable");
+        let c = copy_onto(&plan, &plan, &state, &sel).expect("fits");
+        let copied = copied_state(&c);
+        let l = run(&plan, &copied, "l");
+
+        let cmds = reset_copied(&plan, &copied, &c.reset, NOW);
+
+        assert!(cmds.commands.contains(&Command::SetRunState {
+            run: l,
+            state: RunState::Created
+        }));
+        assert!(!cmds
+            .commands
+            .iter()
+            .any(|c| matches!(c, Command::ReopenFlowable { .. })));
+        assert!(cmds.loops.is_empty());
+        assert_eq!(
+            cmds.commands.last(),
+            Some(&Command::SetExecutionState {
+                state: RunState::Restarted
+            })
+        );
+    }
+
+    // A2.9
+    #[test]
+    fn a_copied_sequential_ancestor_is_reopened() {
+        let src = flow(&format!(
+            "tasks:\n{}",
+            block("s", SEQ, 2, &format!("{}{}", leaf("s1", 6), leaf("s2", 6)))
+        ));
+        let (plan, state) = driven(&src, &[]);
+        let sel = replay_from(&plan, &state, run(&plan, &state, "s1")).expect("replayable");
+        let c = copy_onto(&plan, &plan, &state, &sel).expect("fits");
+        let copied = copied_state(&c);
+        let (s, s1) = (run(&plan, &copied, "s"), run(&plan, &copied, "s1"));
+
+        let cmds = reset_copied(&plan, &copied, &c.reset, NOW);
+
+        assert!(cmds
+            .commands
+            .contains(&Command::ReopenFlowable { run: s, at: NOW }));
+        assert!(cmds.commands.contains(&Command::SetRunState {
+            run: s1,
+            state: RunState::Created
+        }));
+    }
+
+    // A2.10 (A1 note 2; spec D9, S4). Kestra's `mapTaskRun` keeps a
+    // `LoopUntil` run's `iteration` and its outputs (`iterationCount`) on a
+    // replay (`RestartCaseTest.restartOrReplayLoopUntil`). egret derives the
+    // count from the run's history (`loop_until::iteration`), which the copy
+    // carries and `ReopenFlowable` does not count, so the count is kept.
+    #[test]
+    fn a_copied_loop_until_keeps_its_iteration_count() {
+        let src = flow(&format!(
+            "tasks:\n  - id: lu\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{{{ false }}}}\"\n    checkFrequency:\n      interval: PT1S\n      maxIterations: 2\n    tasks:\n{}",
+            leaf("c1", 6)
+        ));
+        let plan = build_plan(&src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        drive_from(&plan, &mut state, T0, true, &mut |_| RunState::Success);
+        let lu = run(&plan, &state, "lu");
+        let count = crate::executor::loop_iteration(&state, lu);
+        assert!(count > 1, "the loop iterated: {count}");
+        let sel = replay_from(&plan, &state, run(&plan, &state, "c1")).expect("replayable");
+        let c = copy_onto(&plan, &plan, &state, &sel).expect("fits");
+        let mut copied = copied_state(&c);
+
+        let cmds = reset_copied(&plan, &copied, &c.reset, NOW);
+        for cmd in &cmds.commands {
+            apply(&mut copied, cmd);
+        }
+
+        let new_lu = run(&plan, &copied, "lu");
+        assert_eq!(crate::executor::loop_iteration(&copied, new_lu), count);
     }
 }
