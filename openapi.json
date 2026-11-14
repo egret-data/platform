@@ -48584,9 +48584,28 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "workspace_id",
+              "type"
+            ],
+            "properties": {
+              "workspace_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace_assignment_group"
+                ]
+              }
+            }
           }
         ],
-        "description": "Why a grant exists. `WorkspaceAssignment` rows are written by the\nassignment path, not by a human, and are recreated from the assignment on\ndemand (D3) — `perm.grants` enforces at most one such row per\n`(catalog_id, workspace_id)` via `grants_one_per_assignment`."
+        "description": "Why a grant exists. `WorkspaceAssignment`/`WorkspaceAssignmentGroup` rows are\nwritten by the assignment path, not by a human, and are recreated from the\nassignment on demand (D3) — `perm.grants` enforces at most one such row per\n`(catalog_id, workspace_id)` via `grants_one_per_assignment` (the old shape)\nand `grants_one_per_assignment_group` (the SP3c-3 shape).\n\n`WorkspaceAssignmentGroup` is the SP3c-3 Task-5 authoring shape: an explicit\nREAD grant on the managed `ws:<slug> members` group. It is a distinct origin\nvalue (not folded into `Explicit`) so the two assignment shapes stay out of\nthe human `explicit` grants' way — view-exposure follow, which keys on\n`Explicit`, must NOT treat an assignment grant as a human one — while the\ndedicated origin keeps bind/unbind idempotent through its own partial unique\nindex. Task 4's reversible migration converges the old\n`WorkspaceAssignment` rows onto this exact shape."
       },
       "GrantView": {
         "allOf": [
