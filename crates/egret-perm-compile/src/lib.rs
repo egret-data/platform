@@ -130,6 +130,7 @@ pub mod lineage;
 mod lineage_compile_tests;
 pub(crate) mod members;
 pub mod role_holder_group;
+pub mod ws_members_group;
 // SP3c-1 Task 4: the reversible, equivalence-gated rewrite of role principals
 // into their managed `role:<name> holders` group, and its hash-guarded undo.
 pub mod role_principal_migrate;
