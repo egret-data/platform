@@ -1267,7 +1267,18 @@ async fn recompile_locked_service_in_tx(
     // DG #3: the profile's last compile, on this compile's transaction — every
     // compile path reaches this function, and a caller that rolls back takes
     // the row with it (nothing changed on the engine).
-    crate::compile_runs::record_compile_ok_in_tx(tx, service_id, &summary).await?;
+    // SP3d: the migration gate's verdict rides the same row. The compile has
+    // already succeeded, so a gate error is logged and stored as NULL; it
+    // must never abort the compile.
+    let migration_complete = match crate::ep_gate::ep_gate_via_tx(tx, service_id).await {
+        Ok(v) => Some(v.complete),
+        Err(e) => {
+            tracing::warn!(service_id, error = %e, "migration gate verdict skipped; compile stands");
+            None
+        }
+    };
+    crate::compile_runs::record_compile_ok_in_tx(tx, service_id, &summary, migration_complete)
+        .await?;
     Ok(summary)
 }
 
