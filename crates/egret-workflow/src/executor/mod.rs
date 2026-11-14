@@ -51,6 +51,8 @@ mod plan;
 pub mod restart;
 mod retry;
 mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod update;
 
 pub use after_execution::{
