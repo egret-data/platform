@@ -904,14 +904,14 @@ function gateRefusalText(r: GateRefusal): string {
   switch (r.kind) {
     case "operator_policies":
       return r.blocked > 0
-        ? `${r.pending} manual policies still to migrate, ${r.blocked} blocked`
-        : `${r.pending} manual policies still to migrate`;
+        ? `${plural(r.pending, "manual policy", "manual policies")} still to migrate, ${r.blocked} blocked`
+        : `${plural(r.pending, "manual policy", "manual policies")} still to migrate`;
     case "role_principals":
-      return `${r.count} role principals to migrate to managed groups`;
+      return `${plural(r.count, "role principal", "role principals")} to migrate to managed groups`;
     case "workspace_grants":
-      return `${r.count} workspace grants to migrate to managed groups`;
+      return `${plural(r.count, "workspace grant", "workspace grants")} to migrate to managed groups`;
     case "clearance_tags":
-      return `${r.tags.length} gated clearance tags without a withhold rule: ${r.tags.join(", ")}`;
+      return `${plural(r.tags.length, "gated clearance tag", "gated clearance tags")} without a withhold rule: ${r.tags.join(", ")}`;
   }
 }
 
@@ -926,7 +926,7 @@ function MigrationGateBadge({ verdict }: { verdict: GateVerdict }) {
   }
   return (
     <div className="space-y-2">
-      <StatusBadge tone="highlight">{`${verdict.refusals.length} steps remain`}</StatusBadge>
+      <StatusBadge tone="highlight">{plural(verdict.refusals.length, "step remains", "steps remain")}</StatusBadge>
       <ul className="space-y-1 text-sm text-muted-foreground">
         {verdict.refusals.map((r) => (
           <li key={r.kind}>{gateRefusalText(r)}</li>

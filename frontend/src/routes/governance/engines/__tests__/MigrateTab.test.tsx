@@ -246,6 +246,16 @@ describe("MigrateTab — migration gate badge", () => {
     expect(screen.getByText(/pii, phi/i)).toBeInTheDocument();
   });
 
+  it("uses singular copy for a single remaining step", async () => {
+    vi.mocked(serviceMigrationGate).mockResolvedValue({
+      complete: false,
+      refusals: [{ kind: "role_principals", count: 1 }],
+    });
+    renderPage();
+    expect(await screen.findByText(/1 step remains/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 role principal to migrate/i)).toBeInTheDocument();
+  });
+
   it("shows no gate badge when the verdict read fails", async () => {
     vi.mocked(serviceMigrationGate).mockRejectedValue(new Error("boom"));
     renderPage();
