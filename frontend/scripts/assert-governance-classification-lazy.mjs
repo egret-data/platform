@@ -41,7 +41,7 @@ const MARKERS = [
   // The Effect strip's missing-permission line for clearance (spec C2).
   ["src/routes/governance/classifications/EffectStrip.tsx", "Setting clearance needs the tag:manage permission."],
   // The Clearance tab's compile line (spec §5.2).
-  ["src/routes/governance/classifications/tabs/ClearanceTab.tsx", "Compiles to one deny tag policy in each Trino profile"],
+  ["src/routes/governance/classifications/tabs/ClearanceTab.tsx", "Compiles to one deny tag policy in each Trino enforcement point"],
   // The Rules tab without policy:read (spec §5.3).
   ["src/routes/governance/classifications/tabs/RulesTab.tsx", "Rules are read with the policy:read permission"],
   // The Manual policies tab's empty state (spec §5.5).

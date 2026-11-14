@@ -31,16 +31,16 @@ const MARKERS = [
   // The index's empty Engines section (spec §5).
   ["src/routes/governance/engines/EnginesIndex.tsx", "No engine is recorded. Engines are created in Control plane."],
   // The index's notice after an old URL named no profile.
-  ["src/routes/governance/engines/MissingProfileNotice.tsx", "No policy profile named "],
+  ["src/routes/governance/engines/MissingProfileNotice.tsx", "No enforcement point named "],
   // The engine page's not-found state.
   ["src/routes/governance/engines/EnginePage.tsx", "No engine with this id."],
   // The profile page's header for an unbound profile (EP13).
-  ["src/routes/governance/engines/ProfilePage.tsx", "No engine is bound to this profile."],
+  ["src/routes/governance/engines/ProfilePage.tsx", "No engine is bound to this enforcement point."],
   // The line for a reader without engine:read (EP19), and the shared-profile banner (EP14).
   ["src/routes/governance/engines/PageFrame.tsx", "Plugin state needs the engine:read permission."],
   ["src/routes/governance/engines/PageFrame.tsx", "Everything on this page applies to all of them."],
   // The Engine permissions tab on an engine with no profile (spec §6.1).
-  ["src/routes/governance/engines/tabs/EnginePermissionsTab.tsx", "so nothing can be granted on it. Bind a profile in Control plane."],
+  ["src/routes/governance/engines/tabs/EnginePermissionsTab.tsx", "so nothing can be granted on it. Bind an enforcement point in Control plane."],
   // The Engine permissions tab's skipped-compile report (Q4).
   ["src/routes/governance/engines/tabs/EnginePermissionsPanel.tsx", "Saved, but not compiled: "],
   // The grant dialog's principal check.
@@ -54,7 +54,7 @@ const MARKERS = [
   // The Policies tab's compiled-row sentence (spec §6.2).
   ["src/routes/governance/engines/tabs/PoliciesTab.tsx", "Compiled by egret; change its source"],
   // The Overlaps tab's empty state (spec §6.3).
-  ["src/routes/governance/engines/tabs/OverlapsTab.tsx", "No overlapping rules on this profile."],
+  ["src/routes/governance/engines/tabs/OverlapsTab.tsx", "No overlapping rules on this enforcement point."],
   // The Plugin tab's rule for a held version (spec §6.5).
   ["src/routes/governance/engines/tabs/PluginTab.tsx", "confirmation takes two polls, about a minute at the default 30 s poll."],
   // The Advanced tab's fixed warning (spec §6.6).
