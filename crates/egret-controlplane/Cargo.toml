@@ -19,6 +19,8 @@ egret-perm-compile.workspace = true
 # the plugin download use. Already in this crate's graph via egret-perm-compile.
 egret-policy.workspace = true
 egret-catalog-engine.workspace = true
+# SA2: the Data-API client store (mint/verify) is reused for the data-api audience.
+egret-dataapi.workspace = true
 egret-storage.workspace = true
 async-trait.workspace = true
 egret-secrets.workspace = true

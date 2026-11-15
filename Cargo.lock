@@ -3366,6 +3366,7 @@ dependencies = [
  "egret-bi",
  "egret-catalog-engine",
  "egret-core",
+ "egret-dataapi",
  "egret-events",
  "egret-metastore",
  "egret-perm",

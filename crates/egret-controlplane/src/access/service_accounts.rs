@@ -149,7 +149,7 @@ pub struct ListQuery {
     workspace_id: Option<Uuid>,
 }
 
-async fn require_sa(st: &CpState, id: Uuid) -> Result<ServiceAccount, CpError> {
+pub(super) async fn require_sa(st: &CpState, id: Uuid) -> Result<ServiceAccount, CpError> {
     repo(st).get(id).await?.ok_or(CpError::NotFound)
 }
 
