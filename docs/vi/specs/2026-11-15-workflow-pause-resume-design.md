@@ -21,23 +21,30 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
 - **Q1. `onResume` thuộc 7c.** 7c mô hình hoá `Pause.onResume`, bỏ cảnh báo, kiểm tra input resume theo nó và ghi hai output `onResume` và `resumed`. Phần còn lại của `Pause` vẫn thuộc dòng #9: `behavior`, `onPause`, `errors` và `finally` vẫn bị từ chối khi publish (`unsupported_pause_property`). Spec inputs và roadmap được ghi chú sửa có ngày.
 - **Q2. Pause bằng tay làm theo Kestra.** Nó chỉ chuyển execution sang `PAUSED` và không đổi task run nào. Các run đang `RUNNING` hoặc `SUBMITTED` chạy xong và ghi kết quả. Không run nào được tạo hay bắt đầu cho đến khi resume. Resume đặt lại `RUNNING`. Phương án bị loại: dừng các task đang chạy như kill rồi chạy lại khi resume, vì cách đó chạy lại những việc không idempotent và Kestra không làm vậy.
 - **Duyệt thiết kế, 2026-11-15:** người dùng đã duyệt phần 1 (engine và API, D1–D10 bên dưới) và phần 2 (giao diện, test, tài liệu, D11–D13).
+- **Q3–Q6 (2026-11-15, sau phần điều tra của plan; xem "Spec corrections" S1, S2, S3, S7 của plan).**
+  - **Q3 (S1): pause loop gốc không ngừng việc tạo iteration mới, như ở Kestra.** Khi một iteration kết thúc, `spawn::on_execution_terminal_inner` bắt đầu iteration kế tiếp dưới khoá của loop gốc, bất kể trạng thái của loop gốc (`worker/spawn.rs:735-746`). Kestra cũng làm vậy: `LoopExecutionEventMessageHandler.handleTerminated` (`LoopExecutionEventMessageHandler.java:94-182`) phát ra iteration kế tiếp mà không hỏi `canBeProcessed()`. Run `Loop` hoàn tất khi iteration cuối kết thúc; không có gì sau nó bắt đầu cho đến khi resume. D3 được sửa.
+  - **Q4 (S2): input `onResume` kiểu FILE được lưu dưới run `Pause`**, tại `tasks/{pause-task-slug}/{pause_run_id}/resume/{request_id}/{input}/{file}`, và được index trong `workflow.execution_files` dưới run đó. `resume/{task_run_id}/…` trong spec không phải là URI file của execution mà egret parse hay đọc được. D6 và §5 điểm khác 6 được sửa.
+  - **Q5 (S3): pause bằng tay bị từ chối khi còn bất kỳ run nào đang chờ.** Nếu trạng thái cuối của bất kỳ run nào là `PAUSED` (một `Pause` hay một `LoopUntil` đang chờ), pause trả 409 `not_running`, và thông báo nói rằng đã có một task đang chờ. Nhờ vậy D1 luôn đúng: một execution `PAUSED` bị pause bằng tay đúng khi không run nào đang chờ. Kestra thì chấp nhận. §5 điểm khác 8. D3 và D10 được sửa.
+  - **Q6 (S7): input `onResume` kiểu SECRET được che và seal**, như các giá trị SECRET hiện nay: `******` trong `outputs`, giá trị rõ được seal trong `task_runs.secret_outputs`, và chỉ được tiết lộ cho render surface. Khi không có `secrets.master_key`, resume bị từ chối với 400 nêu tên input. D5 có thêm điều này.
 
 ### 2.2 Quyết định thiết kế (mặc định, 2026-11-15)
 
 - **D1. "Pause bằng tay" là một sự kiện suy ra, không phải một cột mới.** Một execution bị pause bằng tay khi trạng thái cuối của nó là `PAUSED` và không run nào có trạng thái cuối là `PAUSED`. Đây chính là phép thử mà `ES.resume` của Kestra dùng (`findFirstByState(PAUSED)` rỗng, `ES:880-897`). Một task `Pause` hay một `LoopUntil` đang chờ luôn để lại một run `PAUSED`, nên hai trường hợp không thể lẫn nhau. Một hàm thuần duy nhất, `executor::paused_by_hand(&ExecutionState) -> bool`, giữ quy tắc này. Mọi nơi gọi (executor, route resume, `ExecutionDto`) đều dùng nó.
 - **D2. Execution bị pause bằng tay không được đẩy tiếp.** `executor::drives_forward` trả false với nó, như với execution đã kết thúc hoặc đang `KILLING`. Bước cập nhật của worker (`worker::render::render_updates`) cũng gác theo cùng hàm đó, nên hai nơi luôn khớp nhau. Các run đang sống vẫn tiếp tục chạy. Worker vẫn ghi trạng thái kết thúc và output của chúng. Executor không dùng chúng để tạo, bắt đầu hay hoàn tất run nào khác cho đến khi resume. Plan phải chứng minh bằng test rằng một run kết thúc trong lúc pause vẫn được ghi lại, còn run cha của nó không được hoàn tất và run anh em kế tiếp không được tạo.
+  - *Đã sửa 2026-11-15, điều tra của plan (S4, S5):* còn hai nơi nữa phải dừng cùng executor. Các lượt render khác của worker (`render_run_if`, `render_expressions`, được gọi từ `claim::drive`) cũng dừng khi execution bị pause bằng tay, nên một `LoopUntil` có body đã kết thúc được hỏi điều kiện lúc resume, không phải trong lúc pause. Waker (`claim::due_retries`) không đánh thức một execution bị pause bằng tay, nên một run `RETRYING` đến hạn trong đó không đánh thức nó mỗi tick một cách vô ích. Một iteration `Loop` kết thúc vẫn bắt đầu iteration kế tiếp (Q3).
 - **D3. Pause bằng tay.**
   - Route: `POST /api/ws/{ws}/workflows/executions/{id}/pause`, không có body.
   - Quyền: `workflow:manage`.
   - Trạng thái được nhận: `RUNNING` và `RESTARTED`. Mọi trạng thái khác trả 409 mã `not_running`.
+  - *Đã sửa 2026-11-15 (Q5):* nó cũng bị từ chối với 409 `not_running` khi trạng thái cuối của bất kỳ run nào là `PAUSED`; thông báo nói rằng một `Pause` hay `LoopUntil` đã đang chờ và hãy resume task đó thay vào. §5 điểm khác 8.
   - `KILLING` cũng trả 409. Ở Kestra, `isRunning()` đúng với cả `KILLING` (`State.java:304`), nên Kestra cho pause một execution đang bị kill. Trong egret, `PAUSED` ghi sau `KILLING` sẽ chặn `advance_killing`. Xem §5 điểm khác 1.
-  - Một iteration của loop bị từ chối với 400, không có mã; thông báo nêu loop gốc của nó để pause loop gốc thay thế, giống restart của 7a. Pause loop gốc sẽ ngừng tạo iteration mới. Các iteration đang chạy vẫn tiếp tục.
-  - Thao tác chạy trong khoá execution (`claim::load`), có kiểm tra lại trạng thái. Nó ghi một `SetExecutionState { PAUSED }` rồi gọi `settle`.
+  - Một iteration của loop bị từ chối với 400, không có mã; thông báo nêu loop gốc của nó để pause loop gốc thay thế, giống restart của 7a. Các iteration đang chạy vẫn tiếp tục. *Đã sửa 2026-11-15 (Q3):* pause loop gốc không ngừng tạo iteration mới: mỗi iteration kết thúc sẽ bắt đầu iteration kế tiếp, như ở Kestra (`worker/spawn.rs:735-746`; `LoopExecutionEventMessageHandler.java:94-182`). Run `Loop` hoàn tất khi iteration cuối kết thúc, và không có gì sau nó bắt đầu cho đến khi resume.
+  - Thao tác chạy trong khoá execution (`claim::load`), có kiểm tra lại trạng thái (và, từ Q5, cả các run). Nó ghi một `SetExecutionState { PAUSED }` rồi gọi `settle`.
   - Trả 200 kèm `ExecutionDto`.
   - Audit: `workflow_execution:pause`, entity `workflow_execution`, payload `{from_state}`.
 - **D4. `Pause.onResume`.**
   - `models::task::Pause` có thêm `on_resume: Option<Vec<Input>>`.
-  - Mỗi phần tử được kiểm tra lúc publish bằng chính đoạn code kiểm tra `inputs:` của flow (kiểu, id, giá trị mặc định, `dependsOn`), và lỗi mang đường dẫn `tasks[..].onResume[i]`.
+  - Mỗi phần tử được kiểm tra lúc publish bằng chính đoạn code kiểm tra `inputs:` của flow (kiểu, id, giá trị mặc định, `dependsOn`), và lỗi mang đường dẫn `tasks[..].onResume[i]`. *Đã sửa 2026-11-15, điều tra của plan (S8):* egret nêu tên input theo id trong đường dẫn finding, nên đường dẫn đọc là `tasks.<pause>.onResume.<input id>.<field>`.
   - `onResume` trong `afterExecution:` không thể xảy ra: `Pause` ở đó đã bị từ chối.
   - Các id phải khác nhau trong cùng một `onResume`. Chúng không cần khác id trong `inputs:` của flow, vì chúng nằm dưới `outputs.<pause>.onResume`.
   - Cảnh báo trong `keys.rs` và test của nó bị bỏ. Một test chứng minh `onResume` publish được mà không có cảnh báo.
@@ -45,19 +52,21 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
   - `POST …/resume` nhận: không có body, body JSON `{"inputs": {...}}`, hoặc `multipart/form-data` với mỗi input một part (tên part là id của input). Dạng này giống replay của 7b (`StartExecutionRequest`, `StartExecutionMultipart`).
   - **Pause bằng tay (D1):** gửi `inputs` khác rỗng thì trả 400 mã `resume_inputs_unexpected`. Ngược lại execution nhận `RUNNING`, lần `settle` kế tiếp đẩy nó tiếp, và payload audit ghi `by_hand: true`.
   - **Có một run `Pause` đang chờ:** run `Pause` `PAUSED` đầu tiên theo thứ tự run (không phải `LoopUntil`) là run mà `onResume` của nó được áp dụng, như `findFirstByState(PAUSED)` của Kestra.
-    - Các giá trị gửi lên được giải quyết bằng `inputs_check::resolve` theo `onResume` của run đó, render theo execution như khi bắt đầu chạy. Khoá không khai báo trả 400, như lúc bắt đầu chạy. Giá trị bị từ chối trả 400, thông báo nêu tên input.
+    - Các giá trị gửi lên được giải quyết bằng `inputs_check::resolve` theo `onResume` của run đó, render theo execution như khi bắt đầu chạy. Khoá không khai báo trả 400. Giá trị bị từ chối trả 400, thông báo nêu tên input. *Đã sửa 2026-11-15, điều tra của plan (S6):* lúc bắt đầu chạy, một khoá JSON không khai báo bị bỏ đi (`inputs_check.rs:175-195`, test ở `:1541`) và chỉ part multipart không khai báo mới bị từ chối, nên "như lúc bắt đầu chạy" là sai. Resume từ chối cả hai, đó là quy tắc không làm rơi dữ liệu âm thầm.
     - Output của run đó nhận `{"onResume": {...}, "resumed": {"by": null, "on": <now ISO-8601>, "to": "SUCCESS"}}`.
     - Mọi run `Pause` `PAUSED` khác được giải phóng như hiện nay, chỉ có `resumed`. Chúng nhận `onResume: {}` để template không lỗi.
     - Execution chuyển sang `RESTARTED` (quy tắc `pause_mark` hiện có).
     - `by` để null, như Kestra OSS (`Pause.Resumed.now()`). Ai đã resume được ghi trong dòng audit.
+    - *Thêm 2026-11-15 (Q6):* giá trị `onResume` kiểu SECRET là `******` trong `outputs` và được seal trong `task_runs.secret_outputs`; render surface tiết lộ nó cho các task sau và che nó trong log của chúng. Khi không có `secrets.master_key`, resume bị từ chối với 400 nêu tên input.
   - **`Pause` không có `onResume`** giữ hành vi hiện tại. Body rỗng hoặc không có body được nhận. `inputs` khác rỗng trả 400 `resume_inputs_unexpected`.
   - **Chỉ có `LoopUntil` đang chờ:** 409 "Nothing to resume" hiện nay giữ nguyên.
 - **D6. Input `onResume` kiểu FILE.**
-  - Mỗi part file được stream vào storage dưới prefix của execution, tại `resume/{task_run_id}/{input}/{file}`. Đường dẫn này khác `inputs/{input}/{file}`, nên không ghi đè lên input lúc bắt đầu chạy có cùng id.
+  - Mỗi part file được stream vào storage dưới task prefix của run `Pause`, tại `tasks/{pause-task-slug}/{pause_run_id}/resume/{request_id}/{input}/{file}` (*đã sửa 2026-11-15, Q4*; spec ghi `resume/{task_run_id}/{input}/{file}`, mà `storage::uri` không parse được, `storage/uri.rs:291-317`). Đường dẫn này khác `inputs/{input}/{file}`, nên không ghi đè lên input lúc bắt đầu chạy có cùng id. `{request_id}` mới cho mỗi request, nên một resume bị từ chối chỉ xoá file của chính nó.
+  - Các file được index trong `workflow.execution_files` dưới run `Pause`, trong transaction của resume; một file chỉ đọc được sau khi đã được index.
   - Giá trị lưu trong output là URI storage, như input lúc bắt đầu chạy.
   - Giới hạn kích thước và ngân sách header là của cổng multipart (`workflow.storage.max_file_bytes` + 1 MiB).
-  - Nếu sau đó resume bị từ chối (lỗi kiểm tra, cổng D7, thua cuộc đua giành khoá), các file đã upload bị xoá (`discard_uploads`, được tổng quát hoá để nhận một prefix).
-  - Quy tắc đọc storage đã cho phép đọc dưới prefix riêng của execution. Plan xác nhận `resume/` được bao phủ và thêm test.
+  - Nếu sau đó resume bị từ chối (lỗi kiểm tra, cổng D7, thua cuộc đua giành khoá), các file đã upload bị xoá (`discard_uploads`, được tổng quát hoá để nhận một prefix: chỉ prefix của request này).
+  - Quy tắc đọc storage cho phép đọc các file đã được index của chính execution. Plan thêm test rằng một task sau và file API đọc được file đã lưu.
 - **D7. Cổng người tạo `egret.sql` cho input (bảo mật).** Flow có thể chạy `egret.sql`, và task `Pause` đang chờ có thể khai báo `onResume` khác rỗng. Khi đó chỉ người tạo flow mới được resume (400, không có mã; thông báo nói rằng các task chạy dưới danh tính người tạo). Các giá trị gửi lên trở thành giá trị template mà câu SQL của người tạo đọc được; nếu không chặn, người có `workflow:manage` có thể định hình câu SQL chạy dưới danh tính của người khác. Đây là quy tắc D24 của 7a và 7b (`sql_principal::check_start`, door 2). Resume một `Pause` không có `onResume`, hay một execution bị pause bằng tay, không làm thay đổi những gì sẽ chạy, nên vẫn mở cho mọi người có `workflow:manage`, như hiện nay. Phép kiểm tra dùng source đã đóng băng của execution, vì đó là thứ sẽ chạy. Xem §5 điểm khác 2.
 - **D8. Kiểm tra input resume.**
   - Route: `POST …/resume/validate`, cùng các dạng body như D5.
@@ -71,7 +80,7 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
 - **D10. Tương tác.**
   - Kill một execution bị pause bằng tay hoạt động như với một execution đang chạy (`kill_leaves`). Các lá đang sống chuyển `KILLING`, và execution chuyển `KILLING`. `drives_forward` vốn đã dừng ở `KILLING`.
   - Restart của 7a cho một execution bị pause bằng tay theo nguyên các quy tắc của 7a. Nếu không có run `FAILED` hoặc `PAUSED`, nó trả 409 `nothing_to_restart`. Nếu có run đã fail trong lúc pause, nó reset run đó và execution chuyển `RESTARTED`, trạng thái này được đẩy tiếp. Đây là `ES.restart` của Kestra trên một execution `PAUSED`.
-  - Bộ hẹn giờ `pauseDuration` hoặc `timeout` của một run `Pause` không thể kích hoạt trên execution bị pause bằng tay, vì pause bằng tay đòi `RUNNING` hoặc `RESTARTED`, và khi đó không run nào ở `PAUSED`.
+  - Bộ hẹn giờ `pauseDuration` hoặc `timeout` của một run `Pause` không thể kích hoạt trên execution bị pause bằng tay, vì pause bằng tay đòi `RUNNING` hoặc `RESTARTED` và không có run nào đang chờ. *Đã sửa 2026-11-15 (Q5):* lý do ban đầu ("khi đó không run nào ở `PAUSED`") là sai: hai `Pause` kết thúc vào các thời điểm khác nhau để lại một execution `RUNNING` với một run `PAUSED` (`executor/mod.rs:8365-8445`). Việc từ chối ở Q5 làm câu này đúng.
   - Bộ hẹn giờ SLA vẫn kích hoạt. Vi phạm SLA trên một execution đang pause xử lý như hiện nay với một execution `PAUSED`.
 
 ### 2.3 Giao diện, test, tài liệu (phần 2 đã duyệt)
@@ -93,7 +102,7 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
 
 ## 3. Hình dạng thay đổi
 
-- **`executor`:** `paused_by_hand`; `drives_forward` hiểu nó; `resume_by_hand_commands` trả về `SetExecutionState { RUNNING }` cho trường hợp D1; và `release_now` nhận thêm payload output cho run được chọn.
+- **`executor`:** `paused_by_hand`; `drives_forward` hiểu nó; `resume_by_hand_commands` trả về `SetExecutionState { RUNNING }` cho trường hợp D1; và `release_now` nhận thêm payload output cho run được chọn. *Đã sửa 2026-11-15, điều tra của plan (S9):* `ExecutionState` không giữ output, nên `release_now` giữ nguyên; một hàm thuần `executor::resumed_outputs` dựng payload và worker ghi nó trong transaction của resume.
 - **`models::task::Pause`, `spec::validate`, `spec::keys`:** `onResume` (D4).
 - **`worker::claim`:**
   - `pause_by_hand(pool, ws, id)`, hàm mới (D3);
@@ -137,6 +146,7 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
   - cổng D7: người không phải người tạo bị từ chối khi có `onResume` và được phép khi không có;
   - 404 cho flow trong thùng rác;
   - iteration của loop trả 400 nêu loop gốc;
+  - pause khi một `Pause` hay `LoopUntil` đang chờ trả 409 `not_running` (Q5);
   - payload audit;
   - validate với body rỗng trả về giá trị mặc định;
   - validate với giá trị trả về lỗi từng input;
@@ -155,8 +165,14 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
 3. **Flow trong thùng rác hoặc đã xoá bị từ chối với 404** (D9). Đây là cổng mà 7a và 7b dùng. Flow bị tắt không bị từ chối, như Kestra.
 4. **Pause và resume cần `workflow:manage`.** Kestra OSS không kiểm tra quyền nào ở server; giao diện của nó kiểm tra `EXECUTION:UPDATE`.
 5. **Execution bị pause bằng tay trả 400 khi resume kèm input** (`resume_inputs_unexpected`). Kestra lặng lẽ bỏ qua chúng, vì không có `Pause` nào để kiểm tra theo. egret từ chối thay vì làm rơi dữ liệu (quy tắc không làm rơi dữ liệu âm thầm, `docs/en/specs/2026-10-19-workflow-no-silent-drops-design.md`).
-6. **Input `onResume` kiểu FILE được lưu dưới `resume/{task_run_id}/`.** Kestra lưu chúng cùng chỗ với input lúc bắt đầu chạy (`storageInterface.from(execution, inputId, …)`), nên một input resume có thể ghi đè input lúc bắt đầu chạy có cùng id.
+6. **Input `onResume` kiểu FILE được lưu dưới run `Pause`, tại `tasks/{pause}/{run}/resume/{request_id}/{input}/{file}` (Q4).** Kestra lưu chúng cùng chỗ với input lúc bắt đầu chạy (`storageInterface.from(execution, inputId, …)`), nên một input resume có thể ghi đè input lúc bắt đầu chạy có cùng id.
 7. **Giao diện đọc danh sách input từ `resume/validate`.** Giao diện Kestra đọc `task.inputs` của task đang dừng (`Resume.vue:72-81`), không phải `onResume`, và không bao giờ gọi `validateResume`. egret dùng câu trả lời của server, nên form khớp với những gì server kiểm tra.
+8. **Pause bằng tay bị từ chối khi còn run nào đang chờ (Q5).** Kestra pause một execution mà `Pause` hay `LoopUntil` của nó đã đang chờ (`ES.pause` chỉ kiểm tra `isRunning()`), và bộ hẹn giờ của run đang chờ khi đó có thể kết thúc pause bằng tay. egret trả 409 `not_running`, nên D1 luôn đúng và một pause bằng tay không thể bị bộ hẹn giờ huỷ.
+
+Ghi chú tương đương (không phải điểm khác), 2026-11-15:
+
+- **Các iteration của loop vẫn tiếp tục bắt đầu dưới một loop gốc bị pause (Q3)**, như ở Kestra (`LoopExecutionEventMessageHandler.java:94-182`; egret `worker/spawn.rs:735-746`).
+- **Giá trị `onResume` kiểu SECRET không bao giờ được lưu dạng rõ (Q6).** Kestra cũng mã hoá giá trị input SECRET.
 
 ## 6. Ngoài phạm vi
 

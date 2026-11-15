@@ -14,7 +14,7 @@
 
 **Tech Stack:** Rust (axum, sqlx 0.9, Postgres, utoipa) in `crates/egret-workflow`; React 18 + TypeScript + orval client + vitest in `frontend/`.
 
-Spec: `docs/en/specs/2026-11-15-workflow-pause-resume-design.md`. Its Q1, Q2 and D1–D13 are binding. Where this plan finds a spec premise wrong, it says so under "Spec corrections" and does **not** change the decision silently. Items S1, S2, S3 and S7 must be put to the user before T3 merges. Branch `feat/workflow-pause-resume`, one PR, base `origin/main` `7b19481b1` (spec commit `940b0f5fb`).
+Spec: `docs/en/specs/2026-11-15-workflow-pause-resume-design.md`. Its Q1, Q2 and D1–D13 are binding. Where this plan finds a spec premise wrong, it says so under "Spec corrections" and does **not** change the decision silently. The user decided S1, S2, S3 and S7 on 2026-11-15; the spec records them as Q3–Q6 and carries every correction below as a dated note (commit `docs(workflow): fold the plan's spec corrections into package 7c`). S3 was decided differently from this plan's first proposal: a manual pause is **refused** while any run waits. Branch `feat/workflow-pause-resume`, one PR, base `origin/main` `7b19481b1` (spec commit `940b0f5fb`).
 
 Tasks: T0 (baseline), T1–T5 (engine and API), T6 (client), T7 (frontend), T8 (docs in this repo). The user docs repo and the live check are the controller's (§"After the tasks").
 
@@ -24,26 +24,30 @@ Tasks: T0 (baseline), T1–T5 (engine and API), T6 (client), T7 (frontend), T8 (
 
 ## Spec corrections
 
-Each item says where the spec's premise is wrong or incomplete, gives the evidence, and names the narrowest fix. The plan implements the line marked **Plan**. Items marked **USER** need the user's confirmation; the others only inform.
+Each item says where the spec's premise is wrong or incomplete, gives the evidence, and names the narrowest fix. The plan implements the line marked **Plan**. Items marked **DECIDED** were put to the user on 2026-11-15 (spec Q3–Q6); the others inform and are folded into the spec as dated notes.
 
-- **S1 (D3: "Pausing the loop root stops it starting new iterations") — USER.**
+- **S1 (D3: "Pausing the loop root stops it starting new iterations") — DECIDED (spec Q3): follow Kestra.**
   - In egret a `Loop` starts its next iteration from the worker, not from `advance`. When an iteration ends, `spawn::on_execution_terminal_inner` loads the loop root under its lock and, on `Next::Start`, calls `spawn_one` directly (`worker/spawn.rs:735-746`). It never asks `drives_forward`. Only the first batch goes through `advance` (`executor/flowable/loop_.rs:21-36`, "only the FIRST batch is spawned").
   - Kestra does the same. `LoopExecutionEventMessageHandler.handleTerminated` (`executor/.../handler/LoopExecutionEventMessageHandler.java:94-182`) emits the next `loopExecution` under the parent's lock, whatever the parent's state. Only `ExecutorService.process` checks `canBeProcessed()` (`ExecutorService.java:171`, `ExecutorContext.java:67-70`), and this handler does not go through it.
   - **Plan:** follow Kestra. While the loop root is paused by hand, each iteration that ends starts the next one, up to the loop's values. The `Loop` run completes when the last iteration ends. Nothing after the `Loop` starts until resume. T3 test 6 pins this.
-  - If the user wants the spec's sentence instead: gate `Next::Start` in `on_execution_terminal_inner` on `executor::paused_by_hand(&state)`, and make `resume_with`'s by-hand branch start `min(concurrencyLimit − running, remaining)` iterations for each `RUNNING` `Loop` run. That is one more task with its own tests, and it is a recorded divergence from Kestra.
-- **S2 (D6: where FILE `onResume` inputs are stored) — USER.**
+  - Not a divergence: spec §5 lists it as a parity note. No code change in `spawn.rs`.
+- **S2 (D6: where FILE `onResume` inputs are stored) — DECIDED (spec Q4): under the `Pause` run, as planned.**
   - `resume/{task_run_id}/{input}/{file}` is not an execution file URI. `storage::uri::execution_file` accepts only `inputs/…`, `tasks/…`, `trigger/…` or a single file name (`storage/uri.rs:291-317`); anything else is "`'resume' is not an execution file tail`". An unparseable URI is `Unreadable::Malformed` in `storage::index::resolve_readable_many` (`storage/index.rs:228-250`). So no later task and no UI download could read the file.
   - A readable file must also have a row in `workflow.execution_files` (`index.rs:258-283`), which the spec does not plan.
   - **Plan:**
     - Store each file at `tasks/{pause-task-slug}/{pause_run_id}/resume/{request_id}/{input}/{file}`. That is a `Tail::Task` URI under the `Pause` run's own task prefix (`uri::task_prefix`, `uri.rs:393-418`). It cannot overwrite a start input, which is what D6 wants.
     - Index the files with `storage::index_task_files(conn, ws, pause_run_id, files)` inside the resume transaction (`storage/mod.rs:390-435`).
     - The `{request_id}` segment (a fresh UUID per request) means a refused or raced resume deletes only its own files, never a file a concurrent winning resume stored.
-    - Spec §5 divergence 6 is reworded at T8.
-- **S3 (D10: "a `Pause` run's timer cannot fire on a paused-by-hand execution, because … no run is then `PAUSED`") — USER.**
+    - Spec D6 and §5 divergence 6 already say so (Q4).
+- **S3 (D10: "a `Pause` run's timer cannot fire on a paused-by-hand execution, because … no run is then `PAUSED`") — DECIDED (spec Q5): refuse the pause.**
   - This is false for two `Pause`s that end at different times. In `two_pauses_in_one_parallel_resume_independently` (`executor/mod.rs:8365-8445`), after `quick` ends the execution reads `… PAUSED RESTARTED RUNNING` while `slow` is still `PAUSED` with a deadline. A manual pause is then accepted (the state is `RUNNING`), and D1 classifies the execution as **not** paused by hand, because a run is `PAUSED`.
   - What follows: `slow`'s timer fires, `pause_mark` moves the execution to `RESTARTED` and then `RUNNING` (`executor/mod.rs:387-424`), and the manual pause ends. A resume before that releases `slow`, with `slow`'s `onResume`.
-  - Kestra is the same: `ES.resume` finds the `PAUSED` task run and resumes it.
-  - **Plan:** no code change. T3 test 9 pins the behaviour, and the user docs say it. The alternative, if the user prefers: refuse a manual pause with 409 `not_running` while any run is `PAUSED`.
+  - Kestra accepts that pause (`ES.pause` checks only `isRunning()`), and `ES.resume` then resumes the `PAUSED` task run.
+  - **Plan (user decision, 2026-11-15):** a manual pause is **refused** with 409 `not_running` while any run's last state is `PAUSED` (a `Pause` or a `LoopUntil` waiting). The message says a task is already waiting and to resume that instead.
+    - The rule is pure: `executor::pause_by_hand_commands` answers `PauseRefusal::TaskWaiting` (T1).
+    - The worker applies it under the execution's lock, so a pause racing a `Pause` that has just started waiting is refused too (T3).
+    - The route maps it to 409 `not_running` (T5), and the UI disables Pause with a reason (T7).
+  - So D1 always holds: a `PAUSED` execution is paused by hand exactly when no run waits, and no timer can end a manual pause. Spec §5 divergence 8.
 - **S4 (D2: what else moves a paused execution) — inform.**
   - `claim::drive` (`worker/claim.rs:5234-5310`) runs `render::render_run_if` (`render.rs:1718-1751`) and `render::render_expressions` (`render.rs:1973-…`) between `advance` rounds, and neither is gated. Only `render_updates` is (`render.rs:1853`).
   - Under a manual pause, a `LoopUntil` whose body ended would have its condition rendered at pause time. A render failure would fail it (`render.rs` `fail`), which moves a run.
@@ -54,15 +58,13 @@ Each item says where the spec's premise is wrong or incomplete, gives the eviden
 - **S6 (D5: "Undeclared keys give 400, as on start") — inform.**
   - The start does **not** refuse an undeclared JSON key; it drops it (`inputs_check.rs:175-195`, test `undeclared_keys_are_dropped_and_order_decides_the_first_error`, `inputs_check.rs:1541`). Only a multipart part that names no declared input is refused (`routes.rs:3099-3103`).
   - **Plan:** keep D5's 400 for resume, for JSON and multipart alike, with the message naming the key. The words "as on start" are wrong. This is the no-silent-drops rule.
-- **S7 (SECRET `onResume` inputs; the spec is silent) — USER (confirm).**
+- **S7 (SECRET `onResume` inputs; the spec is silent) — DECIDED (spec Q6): mask and seal, as planned.**
   - The corpus declares one (`oracle-exec/corpus/valids/pause_on_resume.yaml`, `secret_pause: SECRET`). Writing it into `task_runs.outputs` would store a secret in clear text and show it in every `ExecutionDto`.
   - **Plan:**
     - Mask it to `******` in `outputs`.
     - Seal the clear values into `task_runs.secret_outputs` with `secret_inputs::split_outputs` (`secret_inputs.rs:337-363`), the seal SECRET outputs already use (migration 0214).
     - Reveal them in the render surface with a new `onResume` arm in `render::reveal_run_outputs` (`render.rs:2149-2167`), so a later task reads the clear value and its log masks it.
     - With no `secrets.master_key`, the resume is refused with 400 naming the input, as a SECRET start input is.
-
-    The alternative is to refuse SECRET in `onResume` at publish. That would move the corpus census (`pause_on_resume` stops publishing) and diverge from Kestra.
 - **S8 (D4: the path `tasks[..].onResume[i]`) — inform.** egret's finding paths name inputs by id: `inputs.<id>.<field>` (`spec/validate.rs:1418-1531`). `onResume` findings therefore read `tasks.<pause>.onResume.<id>.<field>` (`<pause>` is `spec::path::task_path`'s dotted path). Same intent, egret's spelling.
 - **S9 (§3: "`release_now` gains the outputs payload") — inform.** `ExecutionState` holds no outputs, and the writer never touches `outputs` (`claim.rs` `persist`). `release_now` (`executor/flowable/pause.rs:94-109`) stays as it is. The payload is the pure `executor::resumed_outputs`, written by the worker with one `UPDATE` in the resume's transaction, before the settle.
 
@@ -162,7 +164,7 @@ Each item says where the spec's premise is wrong or incomplete, gives the eviden
 
 ## Global Constraints
 
-- Spec Q1, Q2 and D1–D13 are binding, as amended only by the Spec corrections above once the user has confirmed S1, S2, S3 and S7. When the spec and egret's code disagree in a way not listed above, **stop and report**; do not improvise. Kestra's source is read-only.
+- Spec Q1–Q6 and D1–D13 are binding, with the spec's dated corrections (2026-11-15), which carry every Spec correction above. When the spec and egret's code disagree in a way not listed above, **stop and report**; do not improvise. Kestra's source is read-only.
 - **Code search:** CodeGraph first: `codegraph_explore` with `projectPath: /Users/1pro-l4r8/Documents/github/data-portal/egret-execops`. Use grep only for literal strings. `rg` is not installed.
 - **Worktree:** `/Users/1pro-l4r8/Documents/github/data-portal/egret-execops`, branch `feat/workflow-pause-resume`.
   - Never switch branches. Never use `git stash`.
@@ -217,7 +219,7 @@ Each item says where the spec's premise is wrong or incomplete, gives the eviden
 
 | File | Change | Task |
 |---|---|---|
-| `crates/egret-workflow/src/executor/manual_pause.rs` | **new**: `paused_by_hand`, `paused_by_hand_of`, `NotRunning`, `pause_by_hand_commands`, `resume_by_hand_commands`, `first_waiting_pause`, `resumed_outputs`; tests | T1 |
+| `crates/egret-workflow/src/executor/manual_pause.rs` | **new**: `paused_by_hand`, `paused_by_hand_of`, `PauseRefusal`, `pause_by_hand_commands`, `resume_by_hand_commands`, `first_waiting_pause`, `resumed_outputs`; tests | T1 |
 | `crates/egret-workflow/src/executor/mod.rs` | `pub mod manual_pause;`, re-exports; `drives_forward` learns D1 | T1 |
 | `crates/egret-workflow/src/models/task.rs` | `Pause.on_resume` | T2 |
 | `crates/egret-workflow/src/spec/validate.rs` | input checks take a path prefix; `onResume` checked in run and save passes | T2 |
@@ -272,8 +274,13 @@ pub fn paused_by_hand_of(
     runs: impl Iterator<Item = Option<RunState>>,
 ) -> bool;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotRunning(pub Option<RunState>);
-pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, NotRunning>;
+pub enum PauseRefusal {
+    /// Not `RUNNING` or `RESTARTED`; the last state.
+    NotRunning(Option<RunState>),
+    /// A run's last state is `PAUSED` (spec Q5).
+    TaskWaiting,
+}
+pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, PauseRefusal>;
 pub fn resume_by_hand_commands(state: &ExecutionState) -> Vec<Command>;
 pub fn first_waiting_pause(state: &ExecutionState) -> Option<RunIx>;
 pub fn resumed_outputs(
@@ -290,7 +297,7 @@ pub fn resumed_outputs(
   ```rust
   pub use manual_pause::{
       first_waiting_pause, pause_by_hand_commands, paused_by_hand, paused_by_hand_of,
-      resume_by_hand_commands, resumed_outputs, NotRunning,
+      resume_by_hand_commands, resumed_outputs, PauseRefusal,
   };
   ```
 - [ ] **`drives_forward`** (`executor/mod.rs:359-371`) becomes:
@@ -355,20 +362,33 @@ pub fn paused_by_hand_of(
     execution == Some(RunState::Paused) && !runs.any(|r| r == Some(RunState::Paused))
 }
 
-/// Why an execution cannot be paused by hand (D3): its last state.
+/// Why an execution cannot be paused by hand (D3, Q5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotRunning(pub Option<RunState>);
+pub enum PauseRefusal {
+    /// Not `RUNNING` or `RESTARTED`; the last state.
+    NotRunning(Option<RunState>),
+    /// A run's last state is `PAUSED`: a `Pause` or a `LoopUntil` is
+    /// already waiting (spec Q5, §5 divergence 8). Paused now, the
+    /// execution would not be "paused by hand" (D1), and that run's timer
+    /// could end the pause.
+    TaskWaiting,
+}
 
-/// **D3**: a `RUNNING` or `RESTARTED` execution takes `PAUSED`; no task run
-/// changes. Every other state is refused with itself -- `KILLING` too,
-/// which Kestra's `isRunning()` accepts (spec §5 divergence 1): `PAUSED`
-/// after `KILLING` would stop `advance_killing`.
-pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, NotRunning> {
+/// **D3**: a `RUNNING` or `RESTARTED` execution with no waiting run takes
+/// `PAUSED`; no task run changes. Every other state is refused with itself
+/// -- `KILLING` too, which Kestra's `isRunning()` accepts (spec §5
+/// divergence 1): `PAUSED` after `KILLING` would stop `advance_killing`.
+pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, PauseRefusal> {
     match state.history.last().copied() {
-        Some(RunState::Running | RunState::Restarted) => Ok(vec![Command::SetExecutionState {
-            state: RunState::Paused,
-        }]),
-        other => Err(NotRunning(other)),
+        Some(RunState::Running | RunState::Restarted) => {
+            if state.runs.iter().any(|r| r.history.last() == Some(&RunState::Paused)) {
+                return Err(PauseRefusal::TaskWaiting);
+            }
+            Ok(vec![Command::SetExecutionState {
+                state: RunState::Paused,
+            }])
+        }
+        other => Err(PauseRefusal::NotRunning(other)),
     }
 }
 
@@ -577,9 +597,27 @@ mod tests {
             let got = pause_by_hand_commands(&state);
             match s {
                 RunState::Running | RunState::Restarted => assert!(got.is_ok(), "{s:?}"),
-                other => assert_eq!(got, Err(NotRunning(Some(*other))), "{s:?}"),
+                other => assert_eq!(got, Err(PauseRefusal::NotRunning(Some(*other))), "{s:?}"),
             }
         }
+    }
+
+    // 5b. Q5 (S3): refused while a run waits, even when the execution is RUNNING.
+    #[test]
+    fn pause_by_hand_is_refused_while_a_pause_waits() {
+        // Two `Pause`s that end at different times: after `quick` ends the
+        // execution is RUNNING while `slow` is still PAUSED.
+        let plan = build_plan(&flow(&format!(
+            "tasks:\n  - id: both\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: quick\n        type: {PAUSE}\n        pauseDuration: PT1S\n      - id: slow\n        type: {PAUSE}\n        pauseDuration: PT1H\n"
+        )))
+        .expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        rest(&plan, &mut state, T0);
+        rest(&plan, &mut state, Tick(1_000));
+        assert_eq!(state.history.last(), Some(&RunState::Running), "{:?}", state.history);
+        assert_eq!(last(&state, run(&plan, &state, "slow")), Some(RunState::Paused));
+
+        assert_eq!(pause_by_hand_commands(&state), Err(PauseRefusal::TaskWaiting));
     }
 
     // 6. D5: the first PAUSED Pause in run order, never a LoopUntil; and the payload.
@@ -808,7 +846,7 @@ fn input(&mut self, list: &str, id: &str, input: &serde_json::Map<String, Value>
 
 ---
 
-## T3. Worker: pause by hand under the lock, and what still moves (spec D2, D3, D10; S1, S3, S4, S5)
+## T3. Worker: pause by hand under the lock, and what still moves (spec D2, D3, D10, Q3, Q5; S1, S3, S4, S5)
 
 **Files:**
 - Create: `crates/egret-workflow/src/worker/pause.rs`, `crates/egret-workflow/tests/pause_resume.rs`.
@@ -816,7 +854,7 @@ fn input(&mut self, list: &str, id: &str, input: &serde_json::Map<String, Value>
 
 **Interfaces.**
 
-Consumes: `claim::{load, settle, Stack}`, `txn::transaction`, `executor::{pause_by_hand_commands, NotRunning, paused_by_hand, apply}`.
+Consumes: `claim::{load, settle, Stack}`, `txn::transaction`, `executor::{pause_by_hand_commands, PauseRefusal, paused_by_hand, apply}`.
 
 Produces:
 ```rust
@@ -826,6 +864,8 @@ pub enum Paused {
     Done,
     /// D3: not `RUNNING` or `RESTARTED`; the state's wire name.
     NotRunning(String),
+    /// Q5: a `Pause` or `LoopUntil` is already waiting.
+    TaskWaiting,
 }
 /// D3. In the execution's lock; scoped by `workspace` (`NotFound` otherwise).
 pub async fn pause_by_hand(pool: &PgPool, workspace: Uuid, id: Uuid) -> Result<Paused>;
@@ -857,6 +897,8 @@ pub async fn pause_by_hand(pool: &PgPool, workspace: Uuid, id: Uuid) -> Result<P
       /// Nothing written: the execution is not `RUNNING` or `RESTARTED`; its
       /// state's wire name (D3).
       NotRunning(String),
+      /// Nothing written: a `Pause` or `LoopUntil` is already waiting (Q5).
+      TaskWaiting,
   }
 
   /// **Pause by hand** (D3; Kestra `ES.pause`, `ES:907-916`): one
@@ -873,11 +915,12 @@ pub async fn pause_by_hand(pool: &PgPool, workspace: Uuid, id: Uuid) -> Result<P
           }
           let cmds = match crate::executor::pause_by_hand_commands(&state) {
               Ok(cmds) => cmds,
-              Err(crate::executor::NotRunning(s)) => {
+              Err(crate::executor::PauseRefusal::NotRunning(s)) => {
                   return Ok(Paused::NotRunning(
                       s.map_or("UNKNOWN", |s| s.wire()).to_string(),
                   ));
               }
+              Err(crate::executor::PauseRefusal::TaskWaiting) => return Ok(Paused::TaskWaiting),
           };
           let before = state.clone();
           for c in &cmds {
@@ -997,7 +1040,6 @@ Each test is `#[sqlx::test(migrations = "../../migrations")]`. Arrange / Act / A
      - the `each` run is `SUCCESS`;
      - no `after` run; the root is `PAUSED`.
    - Then `resume_with` (T4) or, in T3, the by-hand resume through `egret_workflow::worker::resume_by_hand(&pool, ex)`, which T4 teaches the by-hand case. **In T3 this half is `#[ignore = "T4"]`; T4 removes the ignore.** After it and `settle_everything`, the root is `SUCCESS` and `after` ran.
-   - If the user rejects S1, this test flips: one iteration, and the second starts only after resume.
 7. `a_subflow_child_ending_during_the_pause_completes_its_run_and_nothing_after`:
    - Arrange: `file_flow(one_task("child"))`; parent `subflow_parent("parent", "child", "")`; start the parent and pause it before any tick.
    - Act: `settle_everything`.
@@ -1007,11 +1049,12 @@ Each test is `#[sqlx::test(migrations = "../../migrations")]`. Arrange / Act / A
    - Act: `settle_everything`.
    - Assert: `a` is `SUCCESS`; `SELECT rendered FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'lu'` is `NULL`; the execution is `PAUSED`.
    - Red before the `drive` gate: `rendered` is `"false"`.
-9. `s3_a_manual_pause_beside_a_waiting_pause_is_not_by_hand_and_its_timer_ends_it`:
-   - Arrange: a `Parallel` of `quick` (`Pause`, `pauseDuration: PT0S`) and `slow` (`Pause`, `pauseDuration: PT1H`), then `after` (Log). Start, `settle_everything` and `egret_workflow::worker::wake(&pool, 16)` until `quick` is `SUCCESS` and the execution is `RUNNING`.
-   - Act: pause (accepted, `Done`).
-   - Assert: the execution is `PAUSED`, and `executor::paused_by_hand_of(...)` over the rows is false (`slow` is `PAUSED`).
-   - Then `UPDATE workflow.task_runs SET not_before_ms = 0 WHERE task_id = 'slow'`, `wake`, `settle_everything`: the execution leaves `PAUSED` (`RESTARTED` then `RUNNING`, then `SUCCESS` after `after`). This pins S3.
+9. `s3_a_manual_pause_is_refused_while_a_pause_waits` (spec Q5):
+   - Arrange: a `Parallel` of `quick` (`Pause`, `pauseDuration: PT0S`) and `slow` (`Pause`, `pauseDuration: PT1H`), then `after` (Log). Start, then `settle_everything` and `egret_workflow::worker::wake(&pool, 16)` until `quick` is `SUCCESS` and the execution is `RUNNING`, with `slow` `PAUSED`.
+   - Act: `pause_by_hand(&pool, ws, ex)`.
+   - Assert: `Paused::TaskWaiting`; the execution is still `RUNNING` and its history is unchanged.
+   - Control: `UPDATE workflow.task_runs SET not_before_ms = 0 WHERE task_id = 'slow'`, `wake`, `settle_everything` (or stop at `after` `RUNNING` by not ticking): once `slow` has ended and `after` is `RUNNING`, the pause gives `Done`.
+   - Race: a `two_tasks` execution where `a` is replaced by an unbounded `Pause` that has not started yet cannot be built without a worker step, so the under-lock check is covered by the pure test (T1 5b) and this test's re-read: `pause_by_hand` decides on the state `claim::load` returned under the lock.
 10. `s5_a_manual_pause_with_a_due_retry_is_not_woken`:
     - Arrange: `one_task_with_retry("r", "PT0S")` (copy from `tests/worker.rs:2768-2774`) beside a second top-level task `b` in a `Parallel`, so that the execution stays `RUNNING` while `a` is `RETRYING`. Or simpler: start `two_tasks`, pause, then write a due `RETRYING` run by hand:
       ```sql
@@ -1623,6 +1666,16 @@ pub(crate) async fn check_resume_inputs(conn: &mut PgConnection, flow: &Flow,
                   format!("execution {id} is {state}; only a RUNNING or RESTARTED execution can be paused"),
               ));
           }
+          // Spec Q5: a waiting task would make this pause not "by hand" (D1).
+          crate::worker::Paused::TaskWaiting => {
+              return Err(ExecOpError::conflict(
+                  NOT_RUNNING_CODE,
+                  format!(
+                      "execution {id} has a Pause or LoopUntil task already waiting, so it cannot be \
+                       paused by hand; resume that task instead"
+                  ),
+              ));
+          }
       }
       st.audit.emit(egret_audit::mutation_for(
           &ctx.principal,
@@ -1704,7 +1757,7 @@ pub(crate) async fn check_resume_inputs(conn: &mut PgConnection, flow: &Flow,
   )
   ```
 - **OpenAPI.** Add `pause_execution` and `validate_resume_inputs` to `paths(...)` beside `resume_execution` (`routes.rs:4943`).
-  - **Pause:** 200 `ExecutionDto` ("The execution is `PAUSED`. Runs already running finish and record their results; no run is created or started until it is resumed."); 400 (loop iteration, names its root); 401; 403; 404 (no such execution; its flow is in the trash or deleted); 409 `not_running` (not `RUNNING` or `RESTARTED`, `KILLING` included; the message names the state); 500.
+  - **Pause:** 200 `ExecutionDto` ("The execution is `PAUSED`. Runs already running finish and record their results; no run is created or started until it is resumed."); 400 (loop iteration, names its root); 401; 403; 404 (no such execution; its flow is in the trash or deleted); 409 `not_running` (not `RUNNING` or `RESTARTED`, `KILLING` included, and the message names the state; or a `Pause` or `LoopUntil` task is already waiting, spec Q5); 500.
   - **Resume:**
     - `request_body(description = "Optional. No body, `{}`, or `\"inputs\": null` resumes with no inputs. With `inputs` (JSON, `StartExecutionRequest`, at most 2 MiB; no `Content-Type` is read as JSON) or `multipart/form-data` (`StartExecutionMultipart`; one part per input id, a file part stored under the Pause run, at most `workflow.storage.max_file_bytes` + 1 MiB), the values are checked against the first waiting Pause's `onResume` as a start checks the flow's `inputs:`, and written to its outputs as `onResume`.", content((StartExecutionRequest = "application/json"), (StartExecutionMultipart = "multipart/form-data")))`;
     - 200 (paused by hand: back to `RUNNING`; a `Pause`: it ends `SUCCESS` with `outputs.onResume` and `outputs.resumed`, every other waiting `Pause` ends `SUCCESS` with `onResume: {}`; the body is the detail afterwards);
@@ -1737,6 +1790,7 @@ pub(crate) async fn check_resume_inputs(conn: &mut PgConnection, flow: &Flow,
    - `PAUSED` (paused twice): 409 `not_running`;
    - `KILLING`: kill a `one_task` with its run `RUNNING` (a kill of a claimed run stays `KILLING`; claim it first with `egret_workflow::worker::claim(&pool, 10)`), then 409 `not_running`, with the message containing `KILLING`;
    - terminal: 409 `not_running`.
+   - a task waiting (spec Q5): T3 test 9's parallel flow brought to `RUNNING` with `slow` `PAUSED`: 409 `not_running`, the message contains "already waiting", and the state stays `RUNNING`.
 4. `resume_of_a_running_execution_is_409_not_paused` (and validate the same).
 5. `resume_by_hand_runs_on_and_inputs_are_refused`:
    - pause; `POST …/resume` with `{"inputs":{"x":1}}` gives 400 `resume_inputs_unexpected`, and the state stays `PAUSED`;
@@ -1821,7 +1875,8 @@ Produces:
 // actions.ts
 export function showsPause(execution: Pick<ExecutionDto, "state">): boolean; // RUNNING | RESTARTED | KILLING
 export const PAUSE_KILLING_REASON: string;
-export function canPause(execution: Pick<ExecutionDto, "state" | "parent_execution_id" | "loop_index">): Enablement;
+export const PAUSE_TASK_WAITING_REASON: string;
+export function canPause(execution: Pick<ExecutionDto, "state" | "runs" | "parent_execution_id" | "loop_index">): Enablement;
 export function canResume(execution: Pick<ExecutionDto, "runs" | "paused_by_hand">): Enablement; // changed
 export function pauseRefusal(code: string | undefined): string | null;
 export function resumeRefusal(code: string | undefined): string | null;
@@ -1847,9 +1902,13 @@ export function showsPause(execution: Pick<ExecutionDto, "state">): boolean {
 
 export const PAUSE_KILLING_REASON = "The execution is being killed, so it cannot be paused";
 
-/** Pause, for an execution that `showsPause`: not while it is killed, and not a loop iteration. */
-export function canPause(execution: Pick<ExecutionDto, "state"> & LoopFields): Enablement {
+/** Spec Q5: the server refuses a manual pause while a run waits. */
+export const PAUSE_TASK_WAITING_REASON = "A Pause or LoopUntil task is already waiting, so the execution cannot be paused by hand";
+
+/** Pause, for an execution that `showsPause`: not while it is killed, not while a task waits, and not a loop iteration. */
+export function canPause(execution: Pick<ExecutionDto, "state" | "runs"> & LoopFields): Enablement {
   if (execution.state === "KILLING") return { ok: false, reason: PAUSE_KILLING_REASON };
+  if (execution.runs.some((r) => r.state === "PAUSED")) return { ok: false, reason: PAUSE_TASK_WAITING_REASON };
   return isLoopIteration(execution) ? { ok: false, reason: iterationReason(execution, "Pause") } : { ok: true };
 }
 
@@ -2168,7 +2227,7 @@ Use the exact names T6 recorded. If orval names the raw function differently (fo
 **Tests** (vitest; Arrange / Act / Assert; every test can fail):
 - `actions.ops.test.ts`:
   - `showsPause` is true for `RUNNING`, `RESTARTED` and `KILLING`, false for `PAUSED`, `SUCCESS` and `CREATED`;
-  - `canPause` is disabled with `PAUSE_KILLING_REASON` on `KILLING`, disabled with a reason naming the parent on a loop iteration, and ok on `RUNNING`;
+  - `canPause` is disabled with `PAUSE_KILLING_REASON` on `KILLING`, disabled with `PAUSE_TASK_WAITING_REASON` on a `RUNNING` execution with a `PAUSED` run, disabled with a reason naming the parent on a loop iteration, and ok on `RUNNING`;
   - `canResume` is ok for `{paused_by_hand: true, runs: []}`, ok for a `NEVER` run, and gives `LOOP_WAIT_REASON` for only an `ITERATE` run;
   - `pauseRefusal("not_running")` and both `resumeRefusal` codes are distinct and non-null; an unknown code gives `null`.
 - `ResumeDialog.test.tsx`: copy the `Server` class pattern of `ReplayDialog.test.tsx:61-80`, with routes `POST …/resume/validate` → `this.validate` and `POST …/resume` → `this.resume`. Tests:
@@ -2205,8 +2264,7 @@ Use the exact names T6 recorded. If orval names the raw function differently (fo
   Appendix B `:425` (`flow.Pause`) and `:556` (`POST /{id}/actions/resume`) each get a trailing *Corrected 2026-11-15 (7c)* sentence: `onResume` and resume with inputs are supported; resume-validate exists; resume-from-breakpoint is still not. Number the notes after the highest existing note number (grep `^[0-9]*\. \*\*#` in that section).
 - [ ] **Inputs spec** `docs/en/specs/2026-10-28-workflow-inputs-design.md:43`: append *Corrected 2026-11-15: resume with `onResume` inputs and resume-validate moved to package 7c (`docs/en/specs/2026-11-15-workflow-pause-resume-design.md` Q1).*
 - [ ] **This package's spec:**
-  - §5 gains the divergences the user confirmed from S1, S2, S3 and S7 (each as a numbered item);
-  - divergence 6 is reworded for S2's path;
+  - Q3–Q6, the dated corrections and §5 (divergences 6 and 8, the parity notes) were folded in before T1 (commit `docs(workflow): fold the plan's spec corrections into package 7c`). Check them against what was built and add a dated note for any deviation;
   - §7 "As built" stays `(Filled in at the end of the implementation.)`; the controller fills it after the review.
 - [ ] **Vietnamese copies:** mirror every paragraph changed above in `docs/vi/plans/2026-10-18-workflow-kestra-parity-roadmap.md`, `docs/vi/specs/2026-10-28-workflow-inputs-design.md` and `docs/vi/specs/2026-11-15-workflow-pause-resume-design.md` (code, identifiers and commands untranslated).
 - [ ] **Gates**, one at a time, each read from a file in `$SCRATCH`:
@@ -2224,7 +2282,7 @@ Use the exact names T6 recorded. If orval names the raw function differently (fo
 ## After the tasks (controller, not implementers)
 
 - **User docs** (`egret-data/docs`, Platform → Workflows):
-  - Executions → Run actions: Pause, Resume with inputs, the codes `not_running`, `not_paused`, `resume_inputs_unexpected`, S1's loop behaviour and S3's note;
+  - Executions → Run actions: Pause, Resume with inputs, the codes `not_running`, `not_paused`, `resume_inputs_unexpected`, S1's loop behaviour (iterations keep starting, as in Kestra) and S3's refusal (no manual pause while a task waits);
   - the `Pause` task page: `onResume`, `outputs.<id>.onResume` and `outputs.<id>.resumed`, and SECRET masking;
   - new screenshots.
 
@@ -2244,6 +2302,7 @@ Use the exact names T6 recorded. If orval names the raw function differently (fo
 
 | Spec item | Where |
 |---|---|
+| Q3–Q6 (S1, S2, S3, S7) | see the Decided line below |
 | Q1 `onResume` in 7c; the other `Pause` gaps stay #9 | T2 (model, validate, keys; `pause_gap` untouched, test `on_resume_ids_may_repeat_a_flow_input_id_and_the_other_pause_gaps_stay`), T8 roadmap/inputs-spec notes |
 | Q2 pause flips state only; live runs finish | T1 `pause_by_hand_commands`, T3 tests 1–3 |
 | D1 derived, one helper, used by executor, route, DTO | T1 `paused_by_hand`/`_of`; T4 `resume_with`; T5 `waiting_of`, `ExecutionDto::new` |
@@ -2255,11 +2314,11 @@ Use the exact names T6 recorded. If orval names the raw function differently (fo
 | D7 creator gate only with non-empty `onResume`, frozen source | T5 `check_resume_inputs` + route test 10 |
 | D8 validate route, permission, `not_paused`, DTO, empty list, no file stored, no audit | T5 `validate_resume_inputs` + route tests 13, 14 |
 | D9 trash/deleted 404, disabled allowed | T5 `live_flow_of` + route test 11 |
-| D10 kill; 7a restart both cases; timer premise (S3); SLA as today | T3 tests 11, 12, 9; SLA untouched (`claim::sla_terminal` already acts on any non-terminal, non-`KILLING` execution) |
+| D10 kill; 7a restart both cases; timer premise (Q5: refused while a task waits); SLA as today | T3 tests 11, 12, 9; T1 test 5b; T5 route test 3; SLA untouched (`claim::sla_terminal` already acts on any non-terminal, non-`KILLING` execution) |
 | D11 Pause button, confirm text, `KILLING` reason; Resume dialog validate-on-open, form, JSON/multipart, per-input errors; `paused_by_hand`; `gen:api` | T5 DTO field; T6; T7 |
 | D12 no migration | Investigation record; Global Constraints |
 | D13 docs | T8; "After the tasks" |
 | §4 test list | executor T1; spec T2; worker T3/T4; routes T5; e2e T4 test 16; frontend T7; live check after |
 | §5 divergences 1–7 | 1: T1 test 5, T5 route test 3; 2: T5 route test 10; 3: route test 11; 4: route test 2; 5: route test 5; 6: S2; 7: T7 ResumeDialog |
 
-**Open points the controller must settle before T3 merges:** S1 (loop iterations under a paused root), S2 (the FILE path), S3 (a manual pause beside a waiting `Pause`), S7 (SECRET `onResume` sealed).
+**Decided 2026-11-15 (spec Q3–Q6):** S1 follow Kestra (T3 test 6); S2 the `Pause` run's prefix (T4, T5); S3 refuse the pause while a task waits (T1 5b, T3 test 9, T5 route test 3, T7 `canPause`); S7 mask and seal (T4 test 24). No open point remains.

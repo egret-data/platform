@@ -16,7 +16,7 @@
 
 **Tech stack:** Rust (axum, sqlx 0.9, Postgres, utoipa) trong `crates/egret-workflow`; React 18 + TypeScript + client orval + vitest trong `frontend/`.
 
-Spec: `docs/en/specs/2026-11-15-workflow-pause-resume-design.md`. Q1, Q2 và D1–D13 của nó có tính ràng buộc. Chỗ nào plan này thấy một giả định của spec là sai, nó nói rõ trong "Spec corrections" và **không** âm thầm đổi quyết định. Các mục S1, S2, S3 và S7 phải được trình người dùng trước khi T3 merge. Nhánh `feat/workflow-pause-resume`, một PR, base `origin/main` `7b19481b1` (commit spec `940b0f5fb`).
+Spec: `docs/en/specs/2026-11-15-workflow-pause-resume-design.md`. Q1, Q2 và D1–D13 của nó có tính ràng buộc. Chỗ nào plan này thấy một giả định của spec là sai, nó nói rõ trong "Spec corrections" và **không** âm thầm đổi quyết định. Người dùng đã quyết định S1, S2, S3 và S7 ngày 2026-11-15; spec ghi chúng thành Q3–Q6 và mang mọi bản sửa bên dưới dưới dạng ghi chú có ghi ngày (commit `docs(workflow): fold the plan's spec corrections into package 7c`). S3 được quyết định khác với đề xuất đầu tiên của plan này: một Pause thủ công bị **từ chối** khi bất kỳ run nào đang chờ. Nhánh `feat/workflow-pause-resume`, một PR, base `origin/main` `7b19481b1` (commit spec `940b0f5fb`).
 
 Các task: T0 (baseline), T1–T5 (engine và API), T6 (client), T7 (frontend), T8 (docs trong repo này). Repo docs người dùng và kiểm tra trực tiếp thuộc về controller (§"Sau các task").
 
@@ -26,26 +26,30 @@ Các task: T0 (baseline), T1–T5 (engine và API), T6 (client), T7 (frontend), 
 
 ## Spec corrections
 
-Mỗi mục nói giả định của spec sai hoặc thiếu ở đâu, đưa bằng chứng, và nêu cách sửa hẹp nhất. Plan thực hiện dòng được đánh dấu **Plan**. Các mục đánh dấu **USER** cần người dùng xác nhận; các mục còn lại chỉ để thông báo.
+Mỗi mục nói giả định của spec sai hoặc thiếu ở đâu, đưa bằng chứng, và nêu cách sửa hẹp nhất. Plan thực hiện dòng được đánh dấu **Plan**. Các mục đánh dấu **DECIDED** đã được trình người dùng ngày 2026-11-15 (spec Q3–Q6); các mục còn lại chỉ để thông báo và được gộp vào spec dưới dạng ghi chú có ghi ngày.
 
-- **S1 (D3: "Pausing the loop root stops it starting new iterations") — USER.**
+- **S1 (D3: "Pausing the loop root stops it starting new iterations") — DECIDED (spec Q3): theo Kestra.**
   - Trong egret, một `Loop` bắt đầu iteration kế tiếp của nó từ worker, không phải từ `advance`. Khi một iteration kết thúc, `spawn::on_execution_terminal_inner` nạp loop root dưới lock của nó và, với `Next::Start`, gọi thẳng `spawn_one` (`worker/spawn.rs:735-746`). Nó không bao giờ hỏi `drives_forward`. Chỉ batch đầu tiên đi qua `advance` (`executor/flowable/loop_.rs:21-36`, "only the FIRST batch is spawned").
   - Kestra làm như vậy. `LoopExecutionEventMessageHandler.handleTerminated` (`executor/.../handler/LoopExecutionEventMessageHandler.java:94-182`) phát ra `loopExecution` kế tiếp dưới lock của parent, bất kể state của parent. Chỉ `ExecutorService.process` kiểm tra `canBeProcessed()` (`ExecutorService.java:171`, `ExecutorContext.java:67-70`), và handler này không đi qua nó.
   - **Plan:** theo Kestra. Khi loop root đang bị Pause thủ công, mỗi iteration kết thúc sẽ bắt đầu iteration kế tiếp, cho tới hết các giá trị của loop. Run `Loop` hoàn thành khi iteration cuối kết thúc. Không có gì sau `Loop` bắt đầu cho tới khi resume. Test 6 của T3 ghim điều này.
-  - Nếu người dùng muốn đúng câu của spec: chặn `Next::Start` trong `on_execution_terminal_inner` bằng `executor::paused_by_hand(&state)`, và cho nhánh by-hand của `resume_with` bắt đầu `min(concurrencyLimit − running, remaining)` iteration cho mỗi run `Loop` đang `RUNNING`. Đó là thêm một task với test riêng, và là một điểm khác biệt được ghi nhận so với Kestra.
-- **S2 (D6: nơi lưu các input FILE của `onResume`) — USER.**
+  - Không phải một điểm khác biệt: §5 của spec liệt kê nó như một parity note. Không đổi code trong `spawn.rs`.
+- **S2 (D6: nơi lưu các input FILE của `onResume`) — DECIDED (spec Q4): dưới run `Pause`, như đã lên kế hoạch.**
   - `resume/{task_run_id}/{input}/{file}` không phải là URI file của execution. `storage::uri::execution_file` chỉ nhận `inputs/…`, `tasks/…`, `trigger/…` hoặc một tên file đơn (`storage/uri.rs:291-317`); bất kỳ thứ gì khác là "`'resume' is not an execution file tail`". Một URI không parse được là `Unreadable::Malformed` trong `storage::index::resolve_readable_many` (`storage/index.rs:228-250`). Vì vậy không task nào về sau và không lượt tải xuống nào từ UI đọc được file.
   - Một file đọc được còn phải có một dòng trong `workflow.execution_files` (`index.rs:258-283`), mà spec không lên kế hoạch.
   - **Plan:**
     - Lưu mỗi file tại `tasks/{pause-task-slug}/{pause_run_id}/resume/{request_id}/{input}/{file}`. Đó là một URI `Tail::Task` dưới task prefix riêng của run `Pause` (`uri::task_prefix`, `uri.rs:393-418`). Nó không thể ghi đè một input của start, đúng như D6 muốn.
     - Index các file bằng `storage::index_task_files(conn, ws, pause_run_id, files)` bên trong transaction của resume (`storage/mod.rs:390-435`).
     - Đoạn `{request_id}` (một UUID mới cho mỗi request) nghĩa là một resume bị từ chối hoặc thua race chỉ xoá file của chính nó, không bao giờ xoá file mà một resume thắng đồng thời đã lưu.
-    - Điểm khác biệt số 6 ở §5 của spec được viết lại ở T8.
-- **S3 (D10: "a `Pause` run's timer cannot fire on a paused-by-hand execution, because … no run is then `PAUSED`") — USER.**
+    - D6 và điểm khác biệt số 6 ở §5 của spec đã nói đúng như vậy (Q4).
+- **S3 (D10: "a `Pause` run's timer cannot fire on a paused-by-hand execution, because … no run is then `PAUSED`") — DECIDED (spec Q5): từ chối pause.**
   - Điều này sai với hai `Pause` kết thúc vào các thời điểm khác nhau. Trong `two_pauses_in_one_parallel_resume_independently` (`executor/mod.rs:8365-8445`), sau khi `quick` kết thúc, execution đọc là `… PAUSED RESTARTED RUNNING` trong khi `slow` vẫn `PAUSED` với một deadline. Khi đó một Pause thủ công được chấp nhận (state là `RUNNING`), và D1 phân loại execution là **không** bị Pause thủ công, vì có một run `PAUSED`.
   - Điều xảy ra tiếp theo: timer của `slow` nổ, `pause_mark` chuyển execution sang `RESTARTED` rồi `RUNNING` (`executor/mod.rs:387-424`), và Pause thủ công kết thúc. Một resume trước đó sẽ giải phóng `slow`, cùng với `onResume` của `slow`.
-  - Kestra cũng vậy: `ES.resume` tìm run `PAUSED` và resume nó.
-  - **Plan:** không đổi code. Test 9 của T3 ghim hành vi này, và docs người dùng nêu nó. Phương án thay thế, nếu người dùng thích: từ chối Pause thủ công bằng 409 `not_running` khi bất kỳ run nào đang `PAUSED`.
+  - Kestra chấp nhận pause đó (`ES.pause` chỉ kiểm tra `isRunning()`), và `ES.resume` khi đó resume run task `PAUSED`.
+  - **Plan (quyết định của người dùng, 2026-11-15):** một Pause thủ công bị **từ chối** bằng 409 `not_running` khi state cuối của bất kỳ run nào là `PAUSED` (một `Pause` hoặc một `LoopUntil` đang chờ). Message nói rằng một task đang chờ và hãy resume task đó thay vào.
+    - Quy tắc là thuần: `executor::pause_by_hand_commands` trả `PauseRefusal::TaskWaiting` (T1).
+    - Worker áp dụng nó dưới lock của execution, nên một Pause chạy đua với một `Pause` vừa bắt đầu chờ cũng bị từ chối (T3).
+    - Route ánh xạ nó thành 409 `not_running` (T5), và UI disable Pause kèm một lý do (T7).
+  - Vậy D1 luôn đúng: một execution `PAUSED` bị Pause thủ công đúng khi không run nào đang chờ, và không timer nào có thể kết thúc một Pause thủ công. Điểm khác biệt số 8 ở §5 của spec.
 - **S4 (D2: còn gì khác làm một execution đang Pause chuyển động) — inform.**
   - `claim::drive` (`worker/claim.rs:5234-5310`) chạy `render::render_run_if` (`render.rs:1718-1751`) và `render::render_expressions` (`render.rs:1973-…`) giữa các vòng `advance`, và cả hai đều không bị chặn. Chỉ `render_updates` bị chặn (`render.rs:1853`).
   - Dưới một Pause thủ công, một `LoopUntil` mà body đã kết thúc sẽ bị render điều kiện ngay lúc Pause. Một lỗi render sẽ làm nó fail (`render.rs` `fail`), điều này làm một run chuyển state.
@@ -56,15 +60,13 @@ Mỗi mục nói giả định của spec sai hoặc thiếu ở đâu, đưa b�
 - **S6 (D5: "Undeclared keys give 400, as on start") — inform.**
   - Start **không** từ chối một key JSON không khai báo; nó bỏ đi (`inputs_check.rs:175-195`, test `undeclared_keys_are_dropped_and_order_decides_the_first_error`, `inputs_check.rs:1541`). Chỉ một part multipart không nêu input nào đã khai báo mới bị từ chối (`routes.rs:3099-3103`).
   - **Plan:** giữ 400 của D5 cho resume, cho cả JSON và multipart, với message nêu tên key. Cụm "as on start" là sai. Đây là quy tắc không bỏ âm thầm.
-- **S7 (input SECRET của `onResume`; spec không nói) — USER (xác nhận).**
+- **S7 (input SECRET của `onResume`; spec không nói) — DECIDED (spec Q6): che và seal, như đã lên kế hoạch.**
   - Corpus khai báo một input như vậy (`oracle-exec/corpus/valids/pause_on_resume.yaml`, `secret_pause: SECRET`). Ghi nó vào `task_runs.outputs` sẽ lưu một secret dạng văn bản rõ và hiển thị nó trong mọi `ExecutionDto`.
   - **Plan:**
     - Che nó thành `******` trong `outputs`.
     - Seal các giá trị rõ vào `task_runs.secret_outputs` bằng `secret_inputs::split_outputs` (`secret_inputs.rs:337-363`), cùng cách seal mà output SECRET đã dùng (migration 0214).
     - Reveal chúng trong render surface bằng một nhánh `onResume` mới trong `render::reveal_run_outputs` (`render.rs:2149-2167`), để một task về sau đọc được giá trị rõ và log của nó che đi.
     - Khi không có `secrets.master_key`, resume bị từ chối bằng 400 nêu tên input, như một input start kiểu SECRET.
-
-    Phương án thay thế là từ chối SECRET trong `onResume` lúc publish. Điều đó sẽ làm dịch chuyển census corpus (`pause_on_resume` thôi publish) và khác với Kestra.
 - **S8 (D4: đường dẫn `tasks[..].onResume[i]`) — inform.** Các path finding của egret nêu tên input theo id: `inputs.<id>.<field>` (`spec/validate.rs:1418-1531`). Vì vậy các finding của `onResume` đọc là `tasks.<pause>.onResume.<id>.<field>` (`<pause>` là path có dấu chấm của `spec::path::task_path`). Cùng ý định, cách viết của egret.
 - **S9 (§3: "`release_now` gains the outputs payload") — inform.** `ExecutionState` không giữ outputs, và writer không bao giờ đụng `outputs` (`claim.rs` `persist`). `release_now` (`executor/flowable/pause.rs:94-109`) giữ nguyên. Payload là hàm thuần `executor::resumed_outputs`, do worker ghi bằng một `UPDATE` trong transaction của resume, trước settle.
 
@@ -164,7 +166,7 @@ Mỗi mục nói giả định của spec sai hoặc thiếu ở đâu, đưa b�
 
 ## Global Constraints
 
-- Q1, Q2 và D1–D13 của spec có tính ràng buộc, chỉ được sửa bởi các Spec corrections ở trên sau khi người dùng đã xác nhận S1, S2, S3 và S7. Khi spec và code của egret không khớp theo cách không được liệt kê ở trên, **dừng và báo cáo**; không tự ứng biến. Source của Kestra là chỉ đọc.
+- Q1–Q6 và D1–D13 của spec có tính ràng buộc, cùng các bản sửa có ghi ngày của spec (2026-11-15), mang mọi Spec correction ở trên. Khi spec và code của egret không khớp theo cách không được liệt kê ở trên, **dừng và báo cáo**; không tự ứng biến. Source của Kestra là chỉ đọc.
 - **Tìm code:** CodeGraph trước: `codegraph_explore` với `projectPath: /Users/1pro-l4r8/Documents/github/data-portal/egret-execops`. Chỉ dùng grep cho chuỗi literal. `rg` chưa được cài.
 - **Worktree:** `/Users/1pro-l4r8/Documents/github/data-portal/egret-execops`, nhánh `feat/workflow-pause-resume`.
   - Không bao giờ chuyển nhánh. Không bao giờ dùng `git stash`.
@@ -219,7 +221,7 @@ Mỗi mục nói giả định của spec sai hoặc thiếu ở đâu, đưa b�
 
 | File | Thay đổi | Task |
 |---|---|---|
-| `crates/egret-workflow/src/executor/manual_pause.rs` | **mới**: `paused_by_hand`, `paused_by_hand_of`, `NotRunning`, `pause_by_hand_commands`, `resume_by_hand_commands`, `first_waiting_pause`, `resumed_outputs`; test | T1 |
+| `crates/egret-workflow/src/executor/manual_pause.rs` | **mới**: `paused_by_hand`, `paused_by_hand_of`, `PauseRefusal`, `pause_by_hand_commands`, `resume_by_hand_commands`, `first_waiting_pause`, `resumed_outputs`; test | T1 |
 | `crates/egret-workflow/src/executor/mod.rs` | `pub mod manual_pause;`, re-export; `drives_forward` học D1 | T1 |
 | `crates/egret-workflow/src/models/task.rs` | `Pause.on_resume` | T2 |
 | `crates/egret-workflow/src/spec/validate.rs` | các kiểm tra input nhận một path prefix; `onResume` được kiểm tra trong lượt run và save | T2 |
@@ -274,8 +276,13 @@ pub fn paused_by_hand_of(
     runs: impl Iterator<Item = Option<RunState>>,
 ) -> bool;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotRunning(pub Option<RunState>);
-pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, NotRunning>;
+pub enum PauseRefusal {
+    /// Not `RUNNING` or `RESTARTED`; the last state.
+    NotRunning(Option<RunState>),
+    /// A run's last state is `PAUSED` (spec Q5).
+    TaskWaiting,
+}
+pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, PauseRefusal>;
 pub fn resume_by_hand_commands(state: &ExecutionState) -> Vec<Command>;
 pub fn first_waiting_pause(state: &ExecutionState) -> Option<RunIx>;
 pub fn resumed_outputs(
@@ -292,7 +299,7 @@ pub fn resumed_outputs(
   ```rust
   pub use manual_pause::{
       first_waiting_pause, pause_by_hand_commands, paused_by_hand, paused_by_hand_of,
-      resume_by_hand_commands, resumed_outputs, NotRunning,
+      resume_by_hand_commands, resumed_outputs, PauseRefusal,
   };
   ```
 - [ ] **`drives_forward`** (`executor/mod.rs:359-371`) trở thành:
@@ -357,20 +364,33 @@ pub fn paused_by_hand_of(
     execution == Some(RunState::Paused) && !runs.any(|r| r == Some(RunState::Paused))
 }
 
-/// Why an execution cannot be paused by hand (D3): its last state.
+/// Why an execution cannot be paused by hand (D3, Q5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotRunning(pub Option<RunState>);
+pub enum PauseRefusal {
+    /// Not `RUNNING` or `RESTARTED`; the last state.
+    NotRunning(Option<RunState>),
+    /// A run's last state is `PAUSED`: a `Pause` or a `LoopUntil` is
+    /// already waiting (spec Q5, §5 divergence 8). Paused now, the
+    /// execution would not be "paused by hand" (D1), and that run's timer
+    /// could end the pause.
+    TaskWaiting,
+}
 
-/// **D3**: a `RUNNING` or `RESTARTED` execution takes `PAUSED`; no task run
-/// changes. Every other state is refused with itself -- `KILLING` too,
-/// which Kestra's `isRunning()` accepts (spec §5 divergence 1): `PAUSED`
-/// after `KILLING` would stop `advance_killing`.
-pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, NotRunning> {
+/// **D3**: a `RUNNING` or `RESTARTED` execution with no waiting run takes
+/// `PAUSED`; no task run changes. Every other state is refused with itself
+/// -- `KILLING` too, which Kestra's `isRunning()` accepts (spec §5
+/// divergence 1): `PAUSED` after `KILLING` would stop `advance_killing`.
+pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, PauseRefusal> {
     match state.history.last().copied() {
-        Some(RunState::Running | RunState::Restarted) => Ok(vec![Command::SetExecutionState {
-            state: RunState::Paused,
-        }]),
-        other => Err(NotRunning(other)),
+        Some(RunState::Running | RunState::Restarted) => {
+            if state.runs.iter().any(|r| r.history.last() == Some(&RunState::Paused)) {
+                return Err(PauseRefusal::TaskWaiting);
+            }
+            Ok(vec![Command::SetExecutionState {
+                state: RunState::Paused,
+            }])
+        }
+        other => Err(PauseRefusal::NotRunning(other)),
     }
 }
 
@@ -579,9 +599,27 @@ mod tests {
             let got = pause_by_hand_commands(&state);
             match s {
                 RunState::Running | RunState::Restarted => assert!(got.is_ok(), "{s:?}"),
-                other => assert_eq!(got, Err(NotRunning(Some(*other))), "{s:?}"),
+                other => assert_eq!(got, Err(PauseRefusal::NotRunning(Some(*other))), "{s:?}"),
             }
         }
+    }
+
+    // 5b. Q5 (S3): refused while a run waits, even when the execution is RUNNING.
+    #[test]
+    fn pause_by_hand_is_refused_while_a_pause_waits() {
+        // Two `Pause`s that end at different times: after `quick` ends the
+        // execution is RUNNING while `slow` is still PAUSED.
+        let plan = build_plan(&flow(&format!(
+            "tasks:\n  - id: both\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: quick\n        type: {PAUSE}\n        pauseDuration: PT1S\n      - id: slow\n        type: {PAUSE}\n        pauseDuration: PT1H\n"
+        )))
+        .expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        rest(&plan, &mut state, T0);
+        rest(&plan, &mut state, Tick(1_000));
+        assert_eq!(state.history.last(), Some(&RunState::Running), "{:?}", state.history);
+        assert_eq!(last(&state, run(&plan, &state, "slow")), Some(RunState::Paused));
+
+        assert_eq!(pause_by_hand_commands(&state), Err(PauseRefusal::TaskWaiting));
     }
 
     // 6. D5: the first PAUSED Pause in run order, never a LoopUntil; and the payload.
@@ -810,7 +848,7 @@ fn input(&mut self, list: &str, id: &str, input: &serde_json::Map<String, Value>
 
 ---
 
-## T3. Worker: Pause thủ công dưới lock, và những gì vẫn chuyển động (spec D2, D3, D10; S1, S3, S4, S5)
+## T3. Worker: Pause thủ công dưới lock, và những gì vẫn chuyển động (spec D2, D3, D10, Q3, Q5; S1, S3, S4, S5)
 
 **File:**
 - Tạo: `crates/egret-workflow/src/worker/pause.rs`, `crates/egret-workflow/tests/pause_resume.rs`.
@@ -818,7 +856,7 @@ fn input(&mut self, list: &str, id: &str, input: &serde_json::Map<String, Value>
 
 **Interface.**
 
-Dùng: `claim::{load, settle, Stack}`, `txn::transaction`, `executor::{pause_by_hand_commands, NotRunning, paused_by_hand, apply}`.
+Dùng: `claim::{load, settle, Stack}`, `txn::transaction`, `executor::{pause_by_hand_commands, PauseRefusal, paused_by_hand, apply}`.
 
 Sinh ra:
 ```rust
@@ -828,6 +866,8 @@ pub enum Paused {
     Done,
     /// D3: not `RUNNING` or `RESTARTED`; the state's wire name.
     NotRunning(String),
+    /// Q5: a `Pause` or `LoopUntil` is already waiting.
+    TaskWaiting,
 }
 /// D3. In the execution's lock; scoped by `workspace` (`NotFound` otherwise).
 pub async fn pause_by_hand(pool: &PgPool, workspace: Uuid, id: Uuid) -> Result<Paused>;
@@ -859,6 +899,8 @@ pub async fn pause_by_hand(pool: &PgPool, workspace: Uuid, id: Uuid) -> Result<P
       /// Nothing written: the execution is not `RUNNING` or `RESTARTED`; its
       /// state's wire name (D3).
       NotRunning(String),
+      /// Nothing written: a `Pause` or `LoopUntil` is already waiting (Q5).
+      TaskWaiting,
   }
 
   /// **Pause by hand** (D3; Kestra `ES.pause`, `ES:907-916`): one
@@ -875,11 +917,12 @@ pub async fn pause_by_hand(pool: &PgPool, workspace: Uuid, id: Uuid) -> Result<P
           }
           let cmds = match crate::executor::pause_by_hand_commands(&state) {
               Ok(cmds) => cmds,
-              Err(crate::executor::NotRunning(s)) => {
+              Err(crate::executor::PauseRefusal::NotRunning(s)) => {
                   return Ok(Paused::NotRunning(
                       s.map_or("UNKNOWN", |s| s.wire()).to_string(),
                   ));
               }
+              Err(crate::executor::PauseRefusal::TaskWaiting) => return Ok(Paused::TaskWaiting),
           };
           let before = state.clone();
           for c in &cmds {
@@ -999,7 +1042,6 @@ Mỗi test là `#[sqlx::test(migrations = "../../migrations")]`. Arrange / Act /
      - run `each` là `SUCCESS`;
      - không có run `after`; root là `PAUSED`.
    - Sau đó `resume_with` (T4) hoặc, ở T3, resume thủ công qua `egret_workflow::worker::resume_by_hand(&pool, ex)`, mà T4 dạy trường hợp by-hand. **Ở T3 nửa này là `#[ignore = "T4"]`; T4 bỏ ignore.** Sau đó và `settle_everything`, root là `SUCCESS` và `after` đã chạy.
-   - Nếu người dùng bác bỏ S1, test này lật: một iteration, và iteration thứ hai chỉ bắt đầu sau resume.
 7. `a_subflow_child_ending_during_the_pause_completes_its_run_and_nothing_after`:
    - Arrange: `file_flow(one_task("child"))`; parent `subflow_parent("parent", "child", "")`; start parent và pause nó trước bất kỳ tick nào.
    - Act: `settle_everything`.
@@ -1009,11 +1051,12 @@ Mỗi test là `#[sqlx::test(migrations = "../../migrations")]`. Arrange / Act /
    - Act: `settle_everything`.
    - Assert: `a` là `SUCCESS`; `SELECT rendered FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'lu'` là `NULL`; execution là `PAUSED`.
    - Red trước cổng `drive`: `rendered` là `"false"`.
-9. `s3_a_manual_pause_beside_a_waiting_pause_is_not_by_hand_and_its_timer_ends_it`:
-   - Arrange: một `Parallel` gồm `quick` (`Pause`, `pauseDuration: PT0S`) và `slow` (`Pause`, `pauseDuration: PT1H`), rồi `after` (Log). Start, `settle_everything` và `egret_workflow::worker::wake(&pool, 16)` cho tới khi `quick` là `SUCCESS` và execution là `RUNNING`.
-   - Act: pause (được chấp nhận, `Done`).
-   - Assert: execution là `PAUSED`, và `executor::paused_by_hand_of(...)` trên các row là false (`slow` là `PAUSED`).
-   - Sau đó `UPDATE workflow.task_runs SET not_before_ms = 0 WHERE task_id = 'slow'`, `wake`, `settle_everything`: execution rời `PAUSED` (`RESTARTED` rồi `RUNNING`, rồi `SUCCESS` sau `after`). Điều này ghim S3.
+9. `s3_a_manual_pause_is_refused_while_a_pause_waits` (spec Q5):
+   - Arrange: một `Parallel` gồm `quick` (`Pause`, `pauseDuration: PT0S`) và `slow` (`Pause`, `pauseDuration: PT1H`), rồi `after` (Log). Start, rồi `settle_everything` và `egret_workflow::worker::wake(&pool, 16)` cho tới khi `quick` là `SUCCESS` và execution là `RUNNING`, với `slow` là `PAUSED`.
+   - Act: `pause_by_hand(&pool, ws, ex)`.
+   - Assert: `Paused::TaskWaiting`; execution vẫn là `RUNNING` và history của nó không đổi.
+   - Đối chứng: `UPDATE workflow.task_runs SET not_before_ms = 0 WHERE task_id = 'slow'`, `wake`, `settle_everything` (hoặc dừng ở `after` `RUNNING` bằng cách không tick): khi `slow` đã kết thúc và `after` là `RUNNING`, pause cho `Done`.
+   - Race: một execution `two_tasks` mà `a` được thay bằng một `Pause` không giới hạn chưa bắt đầu thì không thể dựng mà không có một bước worker, nên kiểm tra dưới lock được phủ bởi test thuần (T1 5b) và lần đọc lại của test này: `pause_by_hand` quyết định trên state mà `claim::load` trả về dưới lock.
 10. `s5_a_manual_pause_with_a_due_retry_is_not_woken`:
     - Arrange: `one_task_with_retry("r", "PT0S")` (copy từ `tests/worker.rs:2768-2774`) cạnh một task top-level thứ hai `b` trong một `Parallel`, để execution vẫn `RUNNING` trong khi `a` là `RETRYING`. Hoặc đơn giản hơn: start `two_tasks`, pause, rồi ghi tay một run `RETRYING` đến hạn:
       ```sql
@@ -1625,6 +1668,16 @@ pub(crate) async fn check_resume_inputs(conn: &mut PgConnection, flow: &Flow,
                   format!("execution {id} is {state}; only a RUNNING or RESTARTED execution can be paused"),
               ));
           }
+          // Spec Q5: a waiting task would make this pause not "by hand" (D1).
+          crate::worker::Paused::TaskWaiting => {
+              return Err(ExecOpError::conflict(
+                  NOT_RUNNING_CODE,
+                  format!(
+                      "execution {id} has a Pause or LoopUntil task already waiting, so it cannot be \
+                       paused by hand; resume that task instead"
+                  ),
+              ));
+          }
       }
       st.audit.emit(egret_audit::mutation_for(
           &ctx.principal,
@@ -1706,7 +1759,7 @@ pub(crate) async fn check_resume_inputs(conn: &mut PgConnection, flow: &Flow,
   )
   ```
 - **OpenAPI.** Thêm `pause_execution` và `validate_resume_inputs` vào `paths(...)` cạnh `resume_execution` (`routes.rs:4943`).
-  - **Pause:** 200 `ExecutionDto` ("The execution is `PAUSED`. Runs already running finish and record their results; no run is created or started until it is resumed."); 400 (iteration loop, nêu tên root của nó); 401; 403; 404 (không có execution như vậy; flow của nó ở trash hoặc đã xoá); 409 `not_running` (không phải `RUNNING` hay `RESTARTED`, kể cả `KILLING`; message nêu tên state); 500.
+  - **Pause:** 200 `ExecutionDto` ("The execution is `PAUSED`. Runs already running finish and record their results; no run is created or started until it is resumed."); 400 (iteration loop, nêu tên root của nó); 401; 403; 404 (không có execution như vậy; flow của nó ở trash hoặc đã xoá); 409 `not_running` (không phải `RUNNING` hay `RESTARTED`, kể cả `KILLING`, và message nêu tên state; hoặc một task `Pause` hay `LoopUntil` đang chờ, spec Q5); 500.
   - **Resume:**
     - `request_body(description = "Optional. No body, `{}`, or `\"inputs\": null` resumes with no inputs. With `inputs` (JSON, `StartExecutionRequest`, at most 2 MiB; no `Content-Type` is read as JSON) or `multipart/form-data` (`StartExecutionMultipart`; one part per input id, a file part stored under the Pause run, at most `workflow.storage.max_file_bytes` + 1 MiB), the values are checked against the first waiting Pause's `onResume` as a start checks the flow's `inputs:`, and written to its outputs as `onResume`.", content((StartExecutionRequest = "application/json"), (StartExecutionMultipart = "multipart/form-data")))`;
     - 200 (bị Pause thủ công: về lại `RUNNING`; một `Pause`: nó kết thúc `SUCCESS` với `outputs.onResume` và `outputs.resumed`, mọi `Pause` đang chờ khác kết thúc `SUCCESS` với `onResume: {}`; body là detail sau đó);
@@ -1739,6 +1792,7 @@ pub(crate) async fn check_resume_inputs(conn: &mut PgConnection, flow: &Flow,
    - `PAUSED` (pause hai lần): 409 `not_running`;
    - `KILLING`: kill một `one_task` mà run của nó `RUNNING` (một lần kill một run đã claim giữ `KILLING`; claim nó trước bằng `egret_workflow::worker::claim(&pool, 10)`), rồi 409 `not_running`, với message chứa `KILLING`;
    - terminal: 409 `not_running`.
+   - một task đang chờ (spec Q5): flow parallel của test 9 ở T3 được đẩy tới `RUNNING` với `slow` `PAUSED`: 409 `not_running`, message chứa "already waiting", và state vẫn `RUNNING`.
 4. `resume_of_a_running_execution_is_409_not_paused` (và validate tương tự).
 5. `resume_by_hand_runs_on_and_inputs_are_refused`:
    - pause; `POST …/resume` với `{"inputs":{"x":1}}` cho 400 `resume_inputs_unexpected`, và state vẫn `PAUSED`;
@@ -1823,7 +1877,8 @@ Sinh ra:
 // actions.ts
 export function showsPause(execution: Pick<ExecutionDto, "state">): boolean; // RUNNING | RESTARTED | KILLING
 export const PAUSE_KILLING_REASON: string;
-export function canPause(execution: Pick<ExecutionDto, "state" | "parent_execution_id" | "loop_index">): Enablement;
+export const PAUSE_TASK_WAITING_REASON: string;
+export function canPause(execution: Pick<ExecutionDto, "state" | "runs" | "parent_execution_id" | "loop_index">): Enablement;
 export function canResume(execution: Pick<ExecutionDto, "runs" | "paused_by_hand">): Enablement; // changed
 export function pauseRefusal(code: string | undefined): string | null;
 export function resumeRefusal(code: string | undefined): string | null;
@@ -1849,9 +1904,13 @@ export function showsPause(execution: Pick<ExecutionDto, "state">): boolean {
 
 export const PAUSE_KILLING_REASON = "The execution is being killed, so it cannot be paused";
 
-/** Pause, for an execution that `showsPause`: not while it is killed, and not a loop iteration. */
-export function canPause(execution: Pick<ExecutionDto, "state"> & LoopFields): Enablement {
+/** Spec Q5: the server refuses a manual pause while a run waits. */
+export const PAUSE_TASK_WAITING_REASON = "A Pause or LoopUntil task is already waiting, so the execution cannot be paused by hand";
+
+/** Pause, for an execution that `showsPause`: not while it is killed, not while a task waits, and not a loop iteration. */
+export function canPause(execution: Pick<ExecutionDto, "state" | "runs"> & LoopFields): Enablement {
   if (execution.state === "KILLING") return { ok: false, reason: PAUSE_KILLING_REASON };
+  if (execution.runs.some((r) => r.state === "PAUSED")) return { ok: false, reason: PAUSE_TASK_WAITING_REASON };
   return isLoopIteration(execution) ? { ok: false, reason: iterationReason(execution, "Pause") } : { ok: true };
 }
 
@@ -2170,7 +2229,7 @@ Dùng đúng tên mà T6 đã ghi. Nếu orval đặt tên hàm raw khác (ví d
 **Test** (vitest; Arrange / Act / Assert; mỗi test đều có thể fail):
 - `actions.ops.test.ts`:
   - `showsPause` là true với `RUNNING`, `RESTARTED` và `KILLING`, false với `PAUSED`, `SUCCESS` và `CREATED`;
-  - `canPause` bị disable với `PAUSE_KILLING_REASON` trên `KILLING`, bị disable với một lý do nêu tên parent trên một iteration loop, và ok trên `RUNNING`;
+  - `canPause` bị disable với `PAUSE_KILLING_REASON` trên `KILLING`, bị disable với `PAUSE_TASK_WAITING_REASON` trên một execution `RUNNING` có một run `PAUSED`, bị disable với một lý do nêu tên parent trên một iteration loop, và ok trên `RUNNING`;
   - `canResume` ok với `{paused_by_hand: true, runs: []}`, ok với một run `NEVER`, và cho `LOOP_WAIT_REASON` với chỉ một run `ITERATE`;
   - `pauseRefusal("not_running")` và cả hai code của `resumeRefusal` đều khác nhau và không null; một code lạ cho `null`.
 - `ResumeDialog.test.tsx`: copy mẫu class `Server` của `ReplayDialog.test.tsx:61-80`, với các route `POST …/resume/validate` → `this.validate` và `POST …/resume` → `this.resume`. Các test:
@@ -2207,8 +2266,7 @@ Dùng đúng tên mà T6 đã ghi. Nếu orval đặt tên hàm raw khác (ví d
   Phụ lục B `:425` (`flow.Pause`) và `:556` (`POST /{id}/actions/resume`) mỗi chỗ nhận thêm một câu cuối *Corrected 2026-11-15 (7c)*: `onResume` và resume với input được hỗ trợ; resume-validate tồn tại; resume-from-breakpoint vẫn chưa. Đánh số các ghi chú sau số ghi chú hiện có cao nhất (grep `^[0-9]*\. \*\*#` trong phần đó).
 - [ ] **Spec inputs** `docs/en/specs/2026-10-28-workflow-inputs-design.md:43`: thêm vào cuối *Corrected 2026-11-15: resume with `onResume` inputs and resume-validate moved to package 7c (`docs/en/specs/2026-11-15-workflow-pause-resume-design.md` Q1).*
 - [ ] **Spec của package này:**
-  - §5 nhận thêm các điểm khác biệt mà người dùng đã xác nhận từ S1, S2, S3 và S7 (mỗi cái là một mục đánh số);
-  - điểm khác biệt số 6 được viết lại cho path của S2;
+  - Q3–Q6, các bản sửa có ghi ngày và §5 (điểm khác biệt 6 và 8, các parity note) đã được gộp vào trước T1 (commit `docs(workflow): fold the plan's spec corrections into package 7c`). Đối chiếu chúng với những gì đã xây và thêm một ghi chú có ghi ngày cho mọi chỗ lệch;
   - §7 "As built" giữ là `(Filled in at the end of the implementation.)`; controller điền nó sau review.
 - [ ] **Bản tiếng Việt:** phản chiếu mọi đoạn đã đổi ở trên trong `docs/vi/plans/2026-10-18-workflow-kestra-parity-roadmap.md`, `docs/vi/specs/2026-10-28-workflow-inputs-design.md` và `docs/vi/specs/2026-11-15-workflow-pause-resume-design.md` (code, identifier và lệnh không dịch).
 - [ ] **Gate**, từng cái một, mỗi cái đọc từ một file trong `$SCRATCH`:
@@ -2226,7 +2284,7 @@ Dùng đúng tên mà T6 đã ghi. Nếu orval đặt tên hàm raw khác (ví d
 ## Sau các task (controller, không phải implementer)
 
 - **Docs người dùng** (`egret-data/docs`, Platform → Workflows):
-  - Executions → Run actions: Pause, Resume với input, các code `not_running`, `not_paused`, `resume_inputs_unexpected`, hành vi loop của S1 và ghi chú của S3;
+  - Executions → Run actions: Pause, Resume với input, các code `not_running`, `not_paused`, `resume_inputs_unexpected`, hành vi loop của S1 (các iteration vẫn tiếp tục bắt đầu, như ở Kestra) và việc từ chối của S3 (không Pause thủ công khi một task đang chờ);
   - trang task `Pause`: `onResume`, `outputs.<id>.onResume` và `outputs.<id>.resumed`, và việc che SECRET;
   - screenshot mới.
 
@@ -2246,6 +2304,7 @@ Dùng đúng tên mà T6 đã ghi. Nếu orval đặt tên hàm raw khác (ví d
 
 | Mục spec | Ở đâu |
 |---|---|
+| Q3–Q6 (S1, S2, S3, S7) | xem dòng Decided bên dưới |
 | Q1 `onResume` ở 7c; các gap `Pause` khác ở lại #9 | T2 (model, validate, keys; `pause_gap` không đụng, test `on_resume_ids_may_repeat_a_flow_input_id_and_the_other_pause_gaps_stay`), ghi chú roadmap/inputs-spec ở T8 |
 | Q2 pause chỉ lật state; các run đang chạy kết thúc | T1 `pause_by_hand_commands`, test 1–3 của T3 |
 | D1 suy ra, một helper, dùng bởi executor, route, DTO | T1 `paused_by_hand`/`_of`; T4 `resume_with`; T5 `waiting_of`, `ExecutionDto::new` |
@@ -2257,11 +2316,11 @@ Dùng đúng tên mà T6 đã ghi. Nếu orval đặt tên hàm raw khác (ví d
 | D7 gate creator chỉ khi `onResume` không rỗng, source đã đóng băng | T5 `check_resume_inputs` + route test 10 |
 | D8 route validate, quyền, `not_paused`, DTO, list rỗng, không lưu file, không audit | T5 `validate_resume_inputs` + route test 13, 14 |
 | D9 trash/đã xoá 404, disabled được phép | T5 `live_flow_of` + route test 11 |
-| D10 kill; restart 7a cả hai trường hợp; giả định timer (S3); SLA như hiện nay | T3 test 11, 12, 9; SLA không đụng (`claim::sla_terminal` đã tác động lên bất kỳ execution non-terminal, không `KILLING` nào) |
+| D10 kill; restart 7a cả hai trường hợp; giả định timer (Q5: bị từ chối khi một task đang chờ); SLA như hiện nay | T3 test 11, 12, 9; T1 test 5b; T5 route test 3; SLA không đụng (`claim::sla_terminal` đã tác động lên bất kỳ execution non-terminal, không `KILLING` nào) |
 | D11 nút Pause, text confirm, lý do `KILLING`; dialog Resume validate-khi-mở, form, JSON/multipart, lỗi theo input; `paused_by_hand`; `gen:api` | T5 field DTO; T6; T7 |
 | D12 không migration | Investigation record; Global Constraints |
 | D13 docs | T8; "Sau các task" |
 | Danh sách test §4 | executor T1; spec T2; worker T3/T4; route T5; e2e test 16 ở T4; frontend T7; kiểm tra trực tiếp sau đó |
 | §5 điểm khác biệt 1–7 | 1: T1 test 5, T5 route test 3; 2: T5 route test 10; 3: route test 11; 4: route test 2; 5: route test 5; 6: S2; 7: T7 ResumeDialog |
 
-**Các điểm mở mà controller phải chốt trước khi T3 merge:** S1 (iteration loop dưới một root bị Pause), S2 (path FILE), S3 (một Pause thủ công cạnh một `Pause` đang chờ), S7 (`onResume` SECRET được seal).
+**Đã quyết định 2026-11-15 (spec Q3–Q6):** S1 theo Kestra (test 6 ở T3); S2 prefix của run `Pause` (T4, T5); S3 từ chối pause khi một task đang chờ (T1 5b, test 9 ở T3, route test 3 ở T5, `canPause` ở T7); S7 che và seal (test 24 ở T4). Không còn điểm mở nào.

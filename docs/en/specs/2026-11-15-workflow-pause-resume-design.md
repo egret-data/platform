@@ -19,23 +19,30 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
 - **Q1. `onResume` is in 7c.** 7c models `Pause.onResume`, lifts its warning, validates resume inputs against it and writes the `onResume` and `resumed` outputs. The rest of `Pause` stays in row #9: `behavior`, `onPause`, `errors` and `finally` are still refused at publish (`unsupported_pause_property`). The inputs spec and the roadmap get a dated correction.
 - **Q2. Pause by hand follows Kestra.** It flips the execution to `PAUSED` and changes no task run. Runs already `RUNNING` or `SUBMITTED` finish and record their results. No run is created or started until resume. Resume sets `RUNNING`. Rejected: stopping running tasks the way kill does and re-running them on resume, because it re-runs work that is not idempotent and Kestra does not do it.
 - **Design approval, 2026-11-15:** the user approved part 1 (engine and API, D1–D10 below) and part 2 (UI, tests, docs, D11–D13).
+- **Q3–Q6 (2026-11-15, after the plan's investigation; see the plan's "Spec corrections" S1, S2, S3, S7).**
+  - **Q3 (S1): pausing a loop root does not stop new iterations, as in Kestra.** When an iteration ends, `spawn::on_execution_terminal_inner` starts the next one under the root's lock, whatever the root's state (`worker/spawn.rs:735-746`). Kestra does the same: `LoopExecutionEventMessageHandler.handleTerminated` (`LoopExecutionEventMessageHandler.java:94-182`) emits the next iteration without asking `canBeProcessed()`. The `Loop` run completes when its last iteration ends; nothing after it starts until resume. D3 is corrected.
+  - **Q4 (S2): FILE `onResume` inputs are stored under the `Pause` run**, at `tasks/{pause-task-slug}/{pause_run_id}/resume/{request_id}/{input}/{file}`, and indexed in `workflow.execution_files` under that run. The spec's `resume/{task_run_id}/…` is not an execution file URI egret can parse or read. D6 and §5 divergence 6 are corrected.
+  - **Q5 (S3): a manual pause is refused while any run waits.** If any run's last state is `PAUSED` (a `Pause` or a `LoopUntil` waiting), the pause answers 409 `not_running`, and the message says a task is already waiting. So D1 always holds: a `PAUSED` execution is paused by hand exactly when no run waits. Kestra accepts it. §5 divergence 8. D3 and D10 are corrected.
+  - **Q6 (S7): SECRET `onResume` inputs are masked and sealed**, as SECRET values already are: `******` in `outputs`, the clear values sealed in `task_runs.secret_outputs`, and revealed only to the render surface. With no `secrets.master_key`, the resume is refused with 400 naming the input. D5 gains this.
 
 ### 2.2 Design decisions (default decisions, 2026-11-15)
 
 - **D1. "Paused by hand" is a derived fact, not a new column.** An execution is paused by hand when its last state is `PAUSED` and no run's last state is `PAUSED`. This is the test Kestra's `ES.resume` uses (`findFirstByState(PAUSED)` empty, `ES:880-897`). A `Pause` task or a waiting `LoopUntil` always leaves a `PAUSED` run, so the two cases cannot be confused. One pure helper, `executor::paused_by_hand(&ExecutionState) -> bool`, owns the rule. Every caller (the executor, the resume route, `ExecutionDto`) uses it.
 - **D2. A paused-by-hand execution does not drive forward.** `executor::drives_forward` returns false for it, as it does for terminal and `KILLING` executions. The worker's update pass (`worker::render::render_updates`) gates on the same function, so the two stay in step. Runs that are live keep running. A worker still writes their terminal state and outputs. The executor does not use them to create, start or complete any other run until resume. The plan must show by test that a run ending during the pause is recorded, and that its parent is not completed and its next sibling is not created.
+  - *Corrected 2026-11-15, plan investigation (S4, S5):* two more places must stop with the executor. The worker's other render passes (`render_run_if`, `render_expressions`, called from `claim::drive`) also stop while the execution is paused by hand, so a `LoopUntil` whose body ended is asked its condition at resume, not during the pause. The waker (`claim::due_retries`) does not wake a paused-by-hand execution, so a due `RETRYING` run in it does not wake it every tick for nothing. A `Loop` iteration that ends still starts the next one (Q3).
 - **D3. Pause by hand.**
   - Route: `POST /api/ws/{ws}/workflows/executions/{id}/pause`, no body.
   - Permission: `workflow:manage`.
   - Accepted states: `RUNNING` and `RESTARTED`. Any other state gives 409 code `not_running`.
+  - *Corrected 2026-11-15 (Q5):* it is also refused with 409 `not_running` while any run's last state is `PAUSED`; the message says a `Pause` or `LoopUntil` is already waiting and to resume that instead. §5 divergence 8.
   - `KILLING` gives 409 too. Kestra's `isRunning()` is true for `KILLING` (`State.java:304`), so Kestra pauses a killing execution. In egret, `PAUSED` after `KILLING` would stop `advance_killing`. §5 divergence 1.
-  - A loop iteration is refused with 400 and no code; the message names its loop root, which is paused instead, as 7a's restart does. Pausing the loop root stops it starting new iterations. Iterations already running carry on.
-  - Done inside the execution lock (`claim::load`), with a re-check of the state. It writes one `SetExecutionState { PAUSED }` and calls `settle`.
+  - A loop iteration is refused with 400 and no code; the message names its loop root, which is paused instead, as 7a's restart does. Iterations already running carry on. *Corrected 2026-11-15 (Q3):* pausing the loop root does not stop new iterations: each iteration that ends starts the next one, as in Kestra (`worker/spawn.rs:735-746`; `LoopExecutionEventMessageHandler.java:94-182`). The `Loop` run completes when its last iteration ends, and nothing after it starts until resume.
+  - Done inside the execution lock (`claim::load`), with a re-check of the state (and, since Q5, of the runs). It writes one `SetExecutionState { PAUSED }` and calls `settle`.
   - Answers 200 with the `ExecutionDto`.
   - Audit: `workflow_execution:pause`, entity `workflow_execution`, payload `{from_state}`.
 - **D4. `Pause.onResume`.**
   - `models::task::Pause` gains `on_resume: Option<Vec<Input>>`.
-  - Each entry is checked at publish by the same code that checks a flow's `inputs:` (types, ids, defaults, `dependsOn`), and the errors carry the path `tasks[..].onResume[i]`.
+  - Each entry is checked at publish by the same code that checks a flow's `inputs:` (types, ids, defaults, `dependsOn`), and the errors carry the path `tasks[..].onResume[i]`. *Corrected 2026-11-15, plan investigation (S8):* egret names inputs by id in finding paths, so the path reads `tasks.<pause>.onResume.<input id>.<field>`.
   - `onResume` inside `afterExecution:` cannot occur: a `Pause` there is already refused.
   - Ids must be unique within one `onResume`. They do not have to differ from the flow's `inputs:` ids, because they live under `outputs.<pause>.onResume`.
   - The `keys.rs` warning and its test are removed. A test proves `onResume` publishes without a warning.
@@ -43,19 +50,21 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
   - `POST …/resume` accepts no body, a JSON body `{"inputs": {...}}`, or `multipart/form-data` with one part per input (part name = input id). The shape is the same as 7b's replay (`StartExecutionRequest`, `StartExecutionMultipart`).
   - **Paused by hand (D1):** any non-empty `inputs` gives 400 code `resume_inputs_unexpected`. Otherwise the execution gets `RUNNING`, the next `settle` drives it forward, and the audit payload says `by_hand: true`.
   - **A `Pause` run waiting:** the first `PAUSED` `Pause` run in run order (not a `LoopUntil`) is the one whose `onResume` applies, as Kestra's `findFirstByState(PAUSED)`.
-    - The posted values are resolved with `inputs_check::resolve` against its `onResume`, rendered against the execution as for a start. Undeclared keys give 400, as on start. A refused value gives 400 with the input named.
+    - The posted values are resolved with `inputs_check::resolve` against its `onResume`, rendered against the execution as for a start. Undeclared keys give 400. A refused value gives 400 with the input named. *Corrected 2026-11-15, plan investigation (S6):* the start drops an undeclared JSON key (`inputs_check.rs:175-195`, test at `:1541`) and refuses only an undeclared multipart part, so "as on start" was wrong. A resume refuses both, which is the no-silent-drops rule.
     - That run's outputs get `{"onResume": {...}, "resumed": {"by": null, "on": <now ISO-8601>, "to": "SUCCESS"}}`.
     - Every other `PAUSED` `Pause` run is released as today, with `resumed` only. They get `onResume: {}` so templates do not fail.
     - The execution goes to `RESTARTED` (the existing `pause_mark` rule).
     - `by` stays null, as in Kestra OSS (`Pause.Resumed.now()`). Who resumed is in the audit row.
+    - *Added 2026-11-15 (Q6):* a SECRET `onResume` value is `******` in `outputs` and sealed in `task_runs.secret_outputs`; the render surface reveals it to later tasks and masks it in their logs. With no `secrets.master_key`, the resume is refused with 400 naming the input.
   - **A `Pause` without `onResume`** keeps today's behaviour. An empty or absent body is accepted. Non-empty `inputs` gives 400 `resume_inputs_unexpected`.
   - **Only a `LoopUntil` waiting:** today's 409 "Nothing to resume" is unchanged.
 - **D6. FILE `onResume` inputs.**
-  - Each file part streams to storage under the execution prefix at `resume/{task_run_id}/{input}/{file}`. This is not `inputs/{input}/{file}`, so it cannot overwrite a start input with the same id.
+  - Each file part streams to storage under the `Pause` run's task prefix at `tasks/{pause-task-slug}/{pause_run_id}/resume/{request_id}/{input}/{file}` (*corrected 2026-11-15, Q4*; the spec said `resume/{task_run_id}/{input}/{file}`, which `storage::uri` does not parse, `storage/uri.rs:291-317`). This is not `inputs/{input}/{file}`, so it cannot overwrite a start input with the same id. `{request_id}` is fresh per request, so a refused resume deletes only its own files.
+  - The files are indexed in `workflow.execution_files` under the `Pause` run, in the resume's transaction; a file is readable only once indexed.
   - The value stored in outputs is the storage URI, as for a start input.
   - The size limit and the header budget are the multipart gate's (`workflow.storage.max_file_bytes` + 1 MiB).
-  - If the resume is then refused (a validation error, the D7 gate, a lost race on the lock), the uploaded files are deleted (`discard_uploads`, generalised to take a prefix).
-  - The storage read rule already allows reads under the execution's own prefix. The plan confirms `resume/` is covered and adds a test.
+  - If the resume is then refused (a validation error, the D7 gate, a lost race on the lock), the uploaded files are deleted (`discard_uploads`, generalised to take a prefix: this request's prefix only).
+  - The storage read rule allows reads of the execution's own indexed files. The plan adds a test that a later task and the file API read the stored file.
 - **D7. The `egret.sql` creator gate on inputs (security).** The flow may run `egret.sql`, and the waiting `Pause` may declare a non-empty `onResume`. In that case only the flow's creator may resume (400, no code; the message says the tasks run as the creator). The posted values become template values the creator's SQL can read, so a `workflow:manage` holder could otherwise shape SQL run under someone else's identity. This is the D24 rule of 7a and 7b (`sql_principal::check_start`, door 2). A resume of a `Pause` with no `onResume`, or of an execution paused by hand, does not change what runs, and stays open to any `workflow:manage` holder, as today. The check uses the execution's frozen source, which is what runs. §5 divergence 2.
 - **D8. Validate resume inputs.**
   - Route: `POST …/resume/validate`, same body shapes as D5.
@@ -69,7 +78,7 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
 - **D10. Interplay.**
   - Kill on a paused-by-hand execution works as on a running one (`kill_leaves`). Live leaves go `KILLING`, and the execution goes `KILLING`. `drives_forward` already stops at `KILLING`.
   - 7a's restart of a paused-by-hand execution follows 7a's rules unchanged. With no `FAILED` or `PAUSED` run it answers 409 `nothing_to_restart`. With a run that failed during the pause, it resets that run and the execution goes `RESTARTED`, which drives forward again. This is Kestra's `ES.restart` on a `PAUSED` execution.
-  - A `Pause` run's `pauseDuration` or `timeout` timer cannot fire on a paused-by-hand execution, because a manual pause needs `RUNNING` or `RESTARTED`, and no run is then `PAUSED`.
+  - A `Pause` run's `pauseDuration` or `timeout` timer cannot fire on a paused-by-hand execution, because a manual pause needs `RUNNING` or `RESTARTED` and no waiting run. *Corrected 2026-11-15 (Q5):* the original reason ("no run is then `PAUSED`") was false: two `Pause`s that end at different times leave a `RUNNING` execution with one `PAUSED` run (`executor/mod.rs:8365-8445`). Q5's refusal makes the sentence true.
   - SLA timers still fire. An SLA breach on a paused execution behaves as today on a `PAUSED` execution.
 
 ### 2.3 UI, tests, docs (approved part 2)
@@ -91,7 +100,7 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
 
 ## 3. Shape of the change
 
-- **`executor`:** `paused_by_hand`; `drives_forward` learns it; a `resume_by_hand_commands` that returns `SetExecutionState { RUNNING }` for the D1 case; and `release_now` gains the outputs payload for the chosen run.
+- **`executor`:** `paused_by_hand`; `drives_forward` learns it; a `resume_by_hand_commands` that returns `SetExecutionState { RUNNING }` for the D1 case; and `release_now` gains the outputs payload for the chosen run. *Corrected 2026-11-15, plan investigation (S9):* `ExecutionState` holds no outputs, so `release_now` stays as it is; a pure `executor::resumed_outputs` builds the payload and the worker writes it in the resume's transaction.
 - **`models::task::Pause`, `spec::validate`, `spec::keys`:** `onResume` (D4).
 - **`worker::claim`:**
   - `pause_by_hand(pool, ws, id)`, a new function (D3);
@@ -135,6 +144,7 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
   - the D7 gate: a non-creator is refused with `onResume` and allowed without it;
   - 404 for a flow in the trash;
   - a loop iteration gets 400 naming its root;
+  - a pause while a `Pause` or `LoopUntil` waits gets 409 `not_running` (Q5);
   - audit payloads;
   - validate with an empty body answers defaults;
   - validate with values answers per-input errors;
@@ -153,8 +163,14 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
 3. **Trash and deleted flows are refused with 404** (D9). This is the gate 7a and 7b use. A disabled flow is not refused, as in Kestra.
 4. **Pause and resume need `workflow:manage`.** Kestra OSS checks no permission on the server; its UI checks `EXECUTION:UPDATE`.
 5. **A paused-by-hand execution answers 400 to resume inputs** (`resume_inputs_unexpected`). Kestra silently ignores them, because there is no `Pause` to read them against. egret refuses rather than drop data (the no-silent-drops rule, `docs/en/specs/2026-10-19-workflow-no-silent-drops-design.md`).
-6. **FILE `onResume` inputs are stored under `resume/{task_run_id}/`.** Kestra stores them where start inputs go (`storageInterface.from(execution, inputId, …)`), so a resume input can overwrite a start input with the same id.
+6. **FILE `onResume` inputs are stored under the `Pause` run, at `tasks/{pause}/{run}/resume/{request_id}/{input}/{file}` (Q4).** Kestra stores them where start inputs go (`storageInterface.from(execution, inputId, …)`), so a resume input can overwrite a start input with the same id.
 7. **The UI reads the inputs from `resume/validate`.** Kestra's UI reads `task.inputs` of the paused task (`Resume.vue:72-81`), not `onResume`, and never calls `validateResume`. egret uses the server's answer, so the form matches what the server checks.
+8. **A manual pause is refused while any run waits (Q5).** Kestra pauses an execution whose `Pause` or `LoopUntil` is already waiting (`ES.pause` checks only `isRunning()`), and the waiting run's timer can then end the manual pause. egret answers 409 `not_running`, so D1 always holds and a manual pause cannot be undone by a timer.
+
+Parity notes (not divergences), 2026-11-15:
+
+- **Loop iterations keep starting under a paused loop root (Q3)**, as in Kestra (`LoopExecutionEventMessageHandler.java:94-182`; egret `worker/spawn.rs:735-746`).
+- **SECRET `onResume` values are never stored in clear (Q6).** Kestra encrypts SECRET input values too.
 
 ## 6. Out of scope
 
