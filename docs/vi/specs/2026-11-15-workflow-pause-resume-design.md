@@ -189,4 +189,53 @@ Ghi chú tương đương (không phải điểm khác), 2026-11-15:
 
 ## 7. Kết quả thực hiện
 
-(Điền vào khi hoàn tất phần cài đặt.)
+Xây dựng ngày 2026-11-15/16 trên `feat/workflow-pause-resume`, từ origin/main `7b19481b1`. Không có migration (D12 đúng; migration cao nhất vẫn là 0228).
+
+- **Engine:** `executor::manual_pause` giữ các quy tắc thuần: điều kiện "pause bằng tay", các lệnh pause và resume, `Pause` đầu tiên đang chờ và payload output. `drives_forward` trả false với execution bị pause bằng tay. Worker chặn các bước render runIf/biểu thức (S4) và loại execution đó khỏi `due_retries` (S5).
+- **Pause bằng tay:** `pause_by_hand` của worker chạy dưới khoá execution. Nó từ chối `TaskWaiting` khi còn run nào `PAUSED` (Q5).
+- **Resume:** `resume_with` của worker nhận input `onResume`, ghi output `{onResume, resumed}`, niêm phong input SECRET, và lưu input FILE dưới run `Pause` kèm index `execution_files`. Nó trả `Moved` khi những gì nó thấy dưới khoá khác với những gì route đã đọc, kể cả mọi trường hợp `Pause` đang chờ có khai báo `onResume` mà route không đọc thấy `Pause` nào (review cuối, I1).
+- **Route:**
+  - `POST …/pause`, body của `resume` (JSON hoặc multipart) và `POST …/resume/validate`;
+  - các mã `not_running`, `not_paused` và `resume_inputs_unexpected`;
+  - sự kiện audit `workflow_execution:pause` (`{from_state}`) và `:resume` (`{from_state, by_hand, task_run_id, inputs_given}`); `inputs_given` là bool, nên không bao giờ ghi giá trị input nào;
+  - `ExecutionDto.paused_by_hand`.
+- **Frontend:**
+  - nút và hộp thoại Pause;
+  - một `ResumeDialog` đọc danh sách input một lần từ `resume/validate` và hiện form input của "Run flow";
+  - nhãn "Paused by hand".
+- **Cổng kiểm tra (2026-11-16):**
+  - `cargo fmt --check` và clippy `-D warnings` sạch, `cargo check -p egret-bin` pass.
+  - `cargo test -p egret-workflow`: mọi target pass trừ 7 test `sql_starrocks_live` (máy test không có engine StarRocks, như trên main).
+  - egret-config, egret-server và egret-metastore: 179 pass.
+  - Ratchet giữ 301 / 25 / 25 / 0 và census 295 / 25 / 21. Bảng phân loại thuộc tính đổi từ 1210 / 4 / 362 / 126 sang 1211 / 4 / 361 / 126 (`Pause.onResume` chuyển từ bị bỏ qua sang được hỗ trợ).
+  - Frontend: lint 0 lỗi; typecheck, build và `test:bundle:workflows` pass. Vitest pass, chỉ trừ các lần hết thời gian chờ 5 s khi máy bận ở những file gói này không đụng tới (ScheduleDetail, TriggersList); cả hai file đều pass khi chạy riêng.
+- **Kiểm tra thực tế (2026-11-16)**, thao tác bằng tay trên trình duyệt với `egret serve` chạy native, trên database và bucket RustFS dùng một lần, ở chế độ sáng và tối:
+  - Pause bằng tay khi `Sleep PT25S` đang chạy: Sleep chạy xong, task kế tiếp không được tạo, execution giữ `PAUSED` kèm nhãn "Paused by hand".
+  - Resume: task kế tiếp chạy và execution kết thúc `SUCCESS`. Validate được gửi với body `{}` và trả 200.
+  - Resume một `Pause` có `onResume` (STRING bắt buộc, INT có mặc định, FILE): để trống giá trị bắt buộc thì form hiện lỗi. Sau đó output của `Pause` có `onResume` và `resumed`, file FILE được lưu dưới `tasks/approve/{run}/resume/{request}/note/note.txt`, và task `Log` kế tiếp in ra đúng các giá trị.
+  - Các trường hợp từ chối:
+    - INT sai kiểu và key không khai báo trả 400, nêu tên input;
+    - pause một execution đang `PAUSED` trả 409 `not_running`;
+    - validate trả lỗi theo từng input.
+  - Các dòng audit không chứa giá trị input nào.
+
+### Điểm lệch và lý do
+
+- Các ghi chú có ngày "plan investigation" và "As built" ở trên ghi lại từng điểm: S1–S9, mã 400 của D5 khi chỉ có `LoopUntil`, quy tắc "moved" cho race, I1, và các điểm khác Kestra số 8 và 9 ở §5.
+
+### Các vòng review
+
+- **Review theo task:** một lần review sau mỗi task T1–T7.
+  - T5 cần hai vòng sửa. Vòng đầu đóng lỗ hổng vượt D7 qua một resume JSON được đọc là pause bằng tay. Vòng hai sửa một test bị cũ đi do vòng đầu.
+  - T4 cũng sửa một test thư viện về cổng render mà T1 đã làm đỏ.
+- **Review cuối:** review toàn branch tìm ra 0 lỗi Critical và 2 lỗi Important (I1, "trường hợp giữ lại" của race D7; I2, chú thích FE-DATA-2) cùng các mục khuyên sửa. Tiếp theo là một đợt sửa gồm 4 commit, và lần review lại phần sửa không còn lỗi.
+
+### Các phát hiện để sau
+
+Đây là các lỗi nhỏ mà phần phân loại của review cuối cho phép để lại:
+- `from_state` trong audit của pause được đọc trước khi lấy khoá;
+- validate và resume trả lời một số body khác nhau (validate bỏ qua key JSON không khai báo);
+- `due_retries` viết lại quy tắc "pause bằng tay" bằng SQL;
+- chưa có test trên trang render cho `PAUSE_TASK_WAITING_REASON`;
+- một test worker phụ thuộc đồng hồ;
+- ba kiểm tra nhỏ trong `worker/pause.rs`: danh sách file rỗng ở nhánh pause bằng tay, run được chọn có nằm trong các run được giải phóng, và số dòng mà lệnh UPDATE output đã đổi.

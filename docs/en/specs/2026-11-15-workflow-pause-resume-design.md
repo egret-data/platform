@@ -187,4 +187,53 @@ Parity notes (not divergences), 2026-11-15:
 
 ## 7. As built
 
-(Filled in at the end of the implementation.)
+Built 2026-11-15/16 on `feat/workflow-pause-resume`, from origin/main `7b19481b1`. No migration (D12 held; the top migration stays 0228).
+
+- **Engine:** `executor::manual_pause` holds the pure rules: the paused-by-hand predicate, the pause and resume commands, the first waiting Pause and the outputs payload. `drives_forward` is false for a paused-by-hand execution. The worker gates the runIf/expression renders (S4) and leaves it out of `due_retries` (S5).
+- **Pause by hand:** the worker's `pause_by_hand` runs under the execution lock. It refuses `TaskWaiting` while any run is `PAUSED` (Q5).
+- **Resume:** the worker's `resume_with` takes the `onResume` inputs, writes the `{onResume, resumed}` outputs, seals SECRET inputs, and stores FILE inputs under the Pause run with their `execution_files` index. It answers `Moved` when what it finds under the lock differs from what the route read, including whenever the waiting Pause declares any `onResume` and the route read no Pause (final review I1).
+- **Routes:**
+  - `POST …/pause`, the `resume` body (JSON or multipart) and `POST …/resume/validate`;
+  - the codes `not_running`, `not_paused` and `resume_inputs_unexpected`;
+  - audit events `workflow_execution:pause` (`{from_state}`) and `:resume` (`{from_state, by_hand, task_run_id, inputs_given}`); `inputs_given` is a bool, so no input value is ever logged;
+  - `ExecutionDto.paused_by_hand`.
+- **Frontend:**
+  - a Pause button and dialog;
+  - a `ResumeDialog` that reads the inputs once from `resume/validate` and shows the "Run flow" inputs form;
+  - a "Paused by hand" note.
+- **Gates (2026-11-16):**
+  - `cargo fmt --check` and clippy `-D warnings` are clean, and `cargo check -p egret-bin` passes.
+  - `cargo test -p egret-workflow`: every target passes except the 7 `sql_starrocks_live` tests (no StarRocks engine on the test host, as on main).
+  - egret-config, egret-server and egret-metastore: 179 passed.
+  - The ratchet stays at 301 / 25 / 25 / 0 and the census at 295 / 25 / 21. Property treatment moves from 1210 / 4 / 362 / 126 to 1211 / 4 / 361 / 126 (`Pause.onResume` goes from ignored to honoured).
+  - Frontend: lint shows 0 errors; typecheck, build and `test:bundle:workflows` pass. Vitest passes apart from 5 s timeouts under load in files this package does not touch (ScheduleDetail, TriggersList), and both pass alone.
+- **Live check (2026-11-16)**, driven by hand in a browser against a native `egret serve`, on a throwaway database and RustFS bucket, light and dark:
+  - Pause by hand while `Sleep PT25S` ran: the Sleep finished, the next task was not created, and the execution stayed `PAUSED` with "Paused by hand".
+  - Resume: the next task ran and the execution ended `SUCCESS`. Validate was posted with body `{}` and answered 200.
+  - Resume of a `Pause` with `onResume` (STRING required, INT default, FILE): an empty required value showed its error in the form. The Pause outputs then held `onResume` and `resumed`, the FILE was stored under `tasks/approve/{run}/resume/{request}/note/note.txt`, and the next `Log` printed the values.
+  - Refusals:
+    - a bad INT and an undeclared key gave 400, naming the input;
+    - pausing a `PAUSED` execution gave 409 `not_running`;
+    - validate answered per-input errors.
+  - The audit rows held no input value.
+
+### Deviations and their reasons
+
+- The dated "plan investigation" and "As built" notes above record each one: S1–S9, D5's LoopUntil-only 400, the moved race rule, I1, and the §5 divergences 8 and 9.
+
+### Review rounds
+
+- **Per-task reviews:** a task review after each of T1–T7.
+  - T5 needed two fix rounds. The first closed a D7 bypass through a JSON resume read as paused by hand. The second fixed a test made stale by the first.
+  - T4 also fixed a render-gate lib test that T1 had turned red.
+- **Final review:** a whole-branch final review found 0 Critical and 2 Important findings (I1, the D7 race "kept case"; I2, the FE-DATA-2 comment) and recommended fixes. One fix wave of 4 commits followed, and a scoped re-review came back clean.
+
+### Deferred findings
+
+These are minor and were left by the final review's triage:
+- the pause audit's `from_state` is read before the lock;
+- validate and resume answer some bodies differently (undeclared JSON keys are dropped by validate);
+- `due_retries` restates the paused-by-hand rule in SQL;
+- no rendered-page test for the `PAUSE_TASK_WAITING_REASON`;
+- a clock-dependent worker test;
+- three small checks in `worker/pause.rs`: an empty files list on the by-hand path, the chosen run being released, and the outputs UPDATE row count.
