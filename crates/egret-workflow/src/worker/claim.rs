@@ -787,6 +787,15 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// `RunState::ALL`; going through [`wake`] would resume each one and
 /// `claim::persist` recomputes `state` from `history.last()`, so the fixture
 /// would erase the very column under test before the next read.
+///
+/// # A manual pause is not woken
+///
+/// **Package 7c (S5):** an execution paused by hand
+/// (`executor::paused_by_hand`: `PAUSED` with no `PAUSED` run) is not woken.
+/// `advance` answers nothing for it until resume, so a due `RETRYING` run in
+/// it would wake it every tick for nothing.
+/// `s5_a_manual_pause_with_a_due_retry_is_not_woken` (`tests/pause_resume.rs`)
+/// is the test.
 pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
     sqlx::query_scalar(
         "SELECT r.execution_id \
@@ -801,6 +810,9 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
                                         AND c.parent_run_ix IS NULL))) \
             AND (r.state = ANY($2) OR NOT (e.state = ANY($2))) \
             AND e.state <> $3 \
+            AND NOT (e.state = 'PAUSED' \
+                     AND NOT EXISTS (SELECT 1 FROM workflow.task_runs p \
+                                      WHERE p.execution_id = e.id AND p.state = 'PAUSED')) \
             AND r.not_before_ms IS NOT NULL \
             AND r.not_before_ms <= \
                 (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint \
@@ -5277,6 +5289,14 @@ fn drive(
             }
             marks.observe(&snapshot, state, *seq);
             continue;
+        }
+
+        // Package 7c D2 (S4): a manual pause stops the render passes too. A
+        // `LoopUntil` whose body ended during the pause is asked its condition
+        // at resume, not now, and no `runIf:` or expression render can fail a
+        // run while nothing drives the execution (Kestra: `canBeProcessed()`).
+        if crate::executor::paused_by_hand(state) {
+            return Ok((spawns, subflows, exit_killed));
         }
 
         // W9c Task 9: a render that missed rendered a placeholder and carried

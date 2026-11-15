@@ -86,6 +86,7 @@ mod force_close;
 pub mod handlers;
 pub mod k8s;
 mod kill;
+mod pause;
 mod reaper;
 mod registry;
 mod render;
@@ -150,6 +151,7 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
 }
 pub use copy::{replay_execution, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest};
 pub use kill::{kill_execution, kill_execution_reporting, KillOutcome};
+pub use pause::{pause_by_hand, Paused};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;
