@@ -163,12 +163,16 @@ async fn disable_enable_and_delete() {
         .await
         .unwrap();
 
-    repo.disable(sa.user_id).await.unwrap();
+    repo.set_status_without_recompile_or_revoke_for_tests(sa.user_id, "disabled")
+        .await
+        .unwrap();
     assert_ne!(
         repo.get(sa.user_id).await.unwrap().unwrap().status,
         "active"
     );
-    repo.enable(sa.user_id).await.unwrap();
+    repo.set_status_without_recompile_or_revoke_for_tests(sa.user_id, "active")
+        .await
+        .unwrap();
     assert_eq!(
         repo.get(sa.user_id).await.unwrap().unwrap().status,
         "active"

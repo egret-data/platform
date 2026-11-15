@@ -278,13 +278,13 @@ pub(super) async fn disable_service_account(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ServiceAccountDetailDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
-    require_sa(&st, id).await?;
+    let sa = require_sa(&st, id).await?;
     // The same kill-switch path as the `status` branch of `PATCH /users/{id}`.
     disable_user_guarded(&st, UserId(id)).await?;
     st.sessions.revoke_all_for_user(UserId(id)).await?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
-        None,
+        sa.workspace_id,
         "service_account:disable",
         "service_account",
         Some(id.to_string()),
@@ -312,13 +312,13 @@ pub(super) async fn enable_service_account(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ServiceAccountDetailDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
-    require_sa(&st, id).await?;
+    let sa = require_sa(&st, id).await?;
     egret_perm_compile::set_user_status_and_recompile(st.roles.pool(), id, "active")
         .await
         .map_err(CpError::from)?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
-        None,
+        sa.workspace_id,
         "service_account:enable",
         "service_account",
         Some(id.to_string()),
@@ -347,6 +347,7 @@ pub(super) async fn delete_service_account(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:delete").await?;
+    let sa = require_sa(&st, id).await?;
     let deleted = repo(&st)
         .delete(id, &p, &egret_perm_compile::PermGroupRecompiler)
         .await?;
@@ -355,7 +356,7 @@ pub(super) async fn delete_service_account(
     }
     st.audit.emit(egret_audit::mutation_for(
         &p,
-        None,
+        sa.workspace_id,
         "service_account:delete",
         "service_account",
         Some(id.to_string()),
@@ -423,7 +424,7 @@ pub(super) async fn add_service_account_group(
     responses(
         (status = 200, description = "Removed from the group", body = ServiceAccountDetailDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing user:update permission", body = ErrorBody),
+        (status = 403, description = "Missing group:manage_members permission", body = ErrorBody),
         (status = 404, description = "No such service account", body = ErrorBody),
         (status = 409, description = "Would remove the last active platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -456,7 +457,7 @@ pub(super) async fn remove_service_account_group(
         (status = 200, description = "Role granted", body = ServiceAccountDetailDto),
         (status = 400, description = "platform_admin may not be granted to a service account, or the scope is unsupported", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing user:update permission", body = ErrorBody),
+        (status = 403, description = "Missing user:assign_role permission", body = ErrorBody),
         (status = 404, description = "No such service account or role", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -468,7 +469,7 @@ pub(super) async fn add_service_account_role(
     Json(body): Json<AddRoleBody>,
 ) -> Result<Json<ServiceAccountDetailDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
-    require_sa(&st, id).await?;
+    let sa = require_sa(&st, id).await?;
     if body.scope_type != "platform" || body.workspace_id.is_some() {
         return Err(CpError::BadRequest(
             "only platform-scoped role grants are supported for a service account here".into(),
@@ -490,7 +491,7 @@ pub(super) async fn add_service_account_role(
     .map_err(CpError::from)?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
-        None,
+        sa.workspace_id,
         "role:assign",
         "grant",
         Some(body.role_id.to_string()),
@@ -514,7 +515,7 @@ pub(super) async fn add_service_account_role(
     responses(
         (status = 200, description = "Role revoked", body = ServiceAccountDetailDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing user:update permission", body = ErrorBody),
+        (status = 403, description = "Missing user:assign_role permission", body = ErrorBody),
         (status = 404, description = "No such service account or role", body = ErrorBody),
         (status = 409, description = "Would remove the last active platform admin", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -526,11 +527,11 @@ pub(super) async fn remove_service_account_role(
     Path((id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ServiceAccountDetailDto>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
-    require_sa(&st, id).await?;
+    let sa = require_sa(&st, id).await?;
     unassign_role_guarded(&st, "user", id, role_id).await?;
     st.audit.emit(egret_audit::mutation_for(
         &p,
-        None,
+        sa.workspace_id,
         "role:unassign",
         "grant",
         Some(role_id.to_string()),

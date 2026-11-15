@@ -14156,7 +14156,7 @@
             }
           },
           "403": {
-            "description": "Missing user:update permission",
+            "description": "Missing group:manage_members permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -14258,7 +14258,7 @@
             }
           },
           "403": {
-            "description": "Missing user:update permission",
+            "description": "Missing user:assign_role permission",
             "content": {
               "application/json": {
                 "schema": {
@@ -14340,7 +14340,7 @@
             }
           },
           "403": {
-            "description": "Missing user:update permission",
+            "description": "Missing user:assign_role permission",
             "content": {
               "application/json": {
                 "schema": {

@@ -249,15 +249,19 @@ impl ServiceAccountRepo {
             .is_some())
     }
 
-    pub async fn disable(&self, user_id: Uuid) -> Result<()> {
-        self.set_status(user_id, "disabled").await
+    /// TEST SUPPORT ONLY: flips `users.status` and nothing else. It does NOT
+    /// recompile engine profiles and does NOT revoke sessions, so it is not a
+    /// kill switch; production code must use the control-plane guarded path.
+    #[doc(hidden)]
+    pub async fn set_status_without_recompile_or_revoke_for_tests(
+        &self,
+        user_id: Uuid,
+        status: &str,
+    ) -> Result<()> {
+        self.set_status_raw(user_id, status).await
     }
 
-    pub async fn enable(&self, user_id: Uuid) -> Result<()> {
-        self.set_status(user_id, "active").await
-    }
-
-    async fn set_status(&self, user_id: Uuid, status: &str) -> Result<()> {
+    async fn set_status_raw(&self, user_id: Uuid, status: &str) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(db_err)?;
         UserRepo::set_status_in_tx(&mut conn, UserId(user_id), status).await
     }
