@@ -76,6 +76,16 @@ async fn a_secret_on_resume_value_without_a_master_key_is_refused(pool: sqlx::Pg
         _ => unreachable!(),
     };
 
+    // The waiting Pause run, which the route passes with any inputs (a
+    // resume with inputs and no expected run is `Moved`, T5 review C1).
+    let run: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'p'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
     // Act
     let resumed = egret_workflow::worker::resume_with(
         &pool,
@@ -83,7 +93,7 @@ async fn a_secret_on_resume_value_without_a_master_key_is_refused(pool: sqlx::Pg
             id: ex,
             inputs: Some(&inputs),
             files: &[],
-            expected: None,
+            expected: Some(run),
         },
     )
     .await
