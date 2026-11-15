@@ -1500,24 +1500,58 @@ mod tests {
     const ONE_SET: &str = "id: u\nnamespace: t\ntasks:\n  - id: set\n    \
          type: io.kestra.plugin.core.execution.SetVariables\n    variables:\n      a: 1\n";
 
+    /// The update beside a `Pause` task, for the row where that `Pause`
+    /// waits.
+    const SET_BESIDE_A_PAUSE: &str = "id: u\nnamespace: t\ntasks:\n  - id: set\n    \
+         type: io.kestra.plugin.core.execution.SetVariables\n    variables:\n      a: 1\n  \
+         - id: w\n    type: io.kestra.plugin.core.flow.Pause\n";
+
     /// **An update is computed whenever `advance()` still drives the
-    /// execution** (ruling D9): `RUNNING`, `PAUSED` and `RETRYING` compute; a
-    /// `KILLING` execution creates and starts nothing, and a terminal one is
-    /// done, so neither computes -- an update computed then would still be
-    /// written by `settle`. The computing rows are the control that stops the
-    /// refusing ones passing against a pass that computes nothing.
+    /// execution** (ruling D9): `RUNNING`, `PAUSED` by a waiting `Pause` task
+    /// and `RETRYING` compute; a `KILLING` execution creates and starts
+    /// nothing, and a terminal one is done, so neither computes -- an update
+    /// computed then would still be written by `settle`. Nor does an
+    /// execution paused by hand (package 7c D1, D2, S4: `PAUSED` with no
+    /// `PAUSED` run): nothing drives it until resume. The computing rows are
+    /// the control that stops the refusing ones passing against a pass that
+    /// computes nothing.
     #[test]
     fn render_updates_computes_while_advance_drives_the_execution() {
         let ran = |last: RunState| vec![RunState::Created, RunState::Running, last];
-        for (history, computes) in [
-            (vec![RunState::Created, RunState::Running], true),
-            (ran(RunState::Paused), true),
-            (ran(RunState::Retrying), true),
-            (ran(RunState::Killing), false),
-            (ran(RunState::Failed), false),
+        // (execution history, a `Pause` run waits beside the update, computes)
+        for (history, pause_waits, computes) in [
+            (vec![RunState::Created, RunState::Running], false, true),
+            (ran(RunState::Paused), true, true),
+            (ran(RunState::Paused), false, false),
+            (ran(RunState::Retrying), false, true),
+            (ran(RunState::Killing), false, false),
+            (ran(RunState::Failed), false, false),
         ] {
             // Arrange
-            let (plan, mut state) = one_created_update(ONE_SET, history.clone());
+            let (plan, mut state) = if pause_waits {
+                let (plan, mut state) = one_created_update(SET_BESIDE_A_PAUSE, history.clone());
+                assert_eq!(plan.tasks[1].id, "w");
+                state.runs.push(crate::executor::TaskRun {
+                    task: 1,
+                    parent: None,
+                    value: None,
+                    rendered: None,
+                    rendered_run_if: None,
+                    history: vec![RunState::Created, RunState::Running, RunState::Paused],
+                    attempts: Vec::new(),
+                    not_before: None,
+                    resume_with: Some(crate::executor::Resume::Never),
+                    working_dir: None,
+                });
+                (plan, state)
+            } else {
+                one_created_update(ONE_SET, history.clone())
+            };
+            assert_eq!(
+                crate::executor::paused_by_hand(&state),
+                history.last() == Some(&RunState::Paused) && !pause_waits,
+                "{history:?}"
+            );
             let mut surface = bare_surface();
             let mut side = RenderSide::default();
 
@@ -1526,13 +1560,21 @@ mod tests {
 
             // Assert
             if computes {
-                assert_eq!(pass, Pass::Rendered, "{history:?}");
+                assert_eq!(
+                    pass,
+                    Pass::Rendered,
+                    "{history:?}, pause waits: {pause_waits}"
+                );
                 assert_eq!(state.runs[0].rendered.as_deref(), Some(""));
                 assert_eq!(side.variables, Some(json!({"a": 1})));
                 assert_eq!(surface.vars(), &json!({"a": 1}), "the surface moved");
                 assert_eq!(side.run_ids.len(), 1, "a fresh id was reserved");
             } else {
-                assert_eq!(pass, Pass::Nothing, "{history:?}");
+                assert_eq!(
+                    pass,
+                    Pass::Nothing,
+                    "{history:?}, pause waits: {pause_waits}"
+                );
                 assert_eq!(state.runs[0].rendered, None);
                 assert!(side.is_empty(), "{history:?}: {side:?}");
                 assert_eq!(surface.vars(), &Value::Null);
