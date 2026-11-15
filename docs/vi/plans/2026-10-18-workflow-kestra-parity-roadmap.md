@@ -151,6 +151,10 @@ Mỗi gói đi qua quy trình thường lệ: spec (hoặc một mục spec) →
 - **Giới hạn và khác biệt riêng của egret** (spec §6): outputs của `Loop` có trần 1 MiB mỗi vòng lặp và 16 MiB mỗi `Loop`, outputs của flow 16 MiB mỗi execution; output FILE giới hạn trong họ `Loop` của execution (§3.1); output SECRET bị từ chối dưới STORE; id output trùng bị từ chối trong `Loop`; file STORE tên `outputs.ion`; `outputs:` của flow cha không được tính trong một vòng lặp `Loop`.
 - **Sửa lỗi ngoài các bank:** một flowable thất bại dưới `retry:` của tổ tiên hoặc của flow không còn để cha của nó `RUNNING` mãi mãi (`retry::is_retried_kind`).
 
+**Ghi chú, 2026-11-15 (gói 7c, `docs/en/specs/2026-11-15-workflow-pause-resume-design.md` Q1; các dòng ở trên không bị sửa).**
+16. **#7:** 7c xây pause thủ công (`POST …/pause`), resume với inputs `onResume` và resume-validate (`POST …/resume/validate`). "pause" và "Resume với inputs `onResume`, và resume-validate" ở dòng #7 thuộc 7c.
+17. **#9:** `onResume` của `Pause` chuyển sang 7c (quyết định của người dùng Q1, 2026-11-15). #9 giữ `behavior:`, `onPause:`, `errors:` và `finally:` của `Pause` (vẫn bị từ chối, `unsupported_pause_property`) và `retry:` của block `AllowFailure`.
+
 **Ghi chú, 2026-10-29 (gói #6, spec §5 và §7; các dòng ở trên không bị sửa).**
 13. **#11 thêm: gắn `trigger` trong render các task của flow được kích hoạt.** #6 chỉ gắn `trigger.outputs` trong `inputs:` của Flow trigger; `worker::render` không gắn root `trigger` cho loại trigger nào, nên `{{ trigger.outputs.x }}` (hoặc `{{ trigger.date }}`) trong một task của flow được kích hoạt vẫn render thất bại.
 14. **Việc tiếp theo của KI-112:** input SECRET vẫn bị lộ trong ngữ cảnh render của Flow trigger (#6 che các output SECRET ở đó).

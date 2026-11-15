@@ -58,6 +58,9 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
     - *Added 2026-11-15 (Q6):* a SECRET `onResume` value is `******` in `outputs` and sealed in `task_runs.secret_outputs`; the render surface reveals it to later tasks and masks it in their logs. With no `secrets.master_key`, the resume is refused with 400 naming the input.
   - **A `Pause` without `onResume`** keeps today's behaviour. An empty or absent body is accepted. Non-empty `inputs` gives 400 `resume_inputs_unexpected`.
   - **Only a `LoopUntil` waiting:** today's 409 "Nothing to resume" is unchanged.
+  - *As built, 2026-11-16 (D5):* a resume carrying inputs or file parts when only a `LoopUntil` waits answers 400 `resume_inputs_unexpected`, not the 409 (`routes.rs`, `resume_inputs_unexpected`); with no body it still answers the 409 "Nothing to resume". More generally, non-empty JSON inputs (and any multipart part) when no `onResume` applies are refused at the route, before the worker; the worker refuses them again under the lock.
+  - *As built, 2026-11-16 (D5, D7, race):* the worker answers `Moved` (409) when what it finds under the lock differs from what the route read: the route chose a `Pause` run but the execution is now paused by hand, or another `Pause` run is now the first waiting one, or the route saw no `Pause` but one now waits and inputs or files were sent (`worker/pause.rs`, `ResumeRefused::Moved`). An empty-input resume where the route saw no `Pause` but one now waits still releases it: no caller value reaches the SQL, only the author's defaults.
+  - *As built, 2026-11-16 (audit):* the audit record `workflow_execution:resume` carries `from_state`, `by_hand`, `task_run_id` (null when paused by hand) and `inputs_given: bool`, never the values (a SECRET may be among them).
 - **D6. FILE `onResume` inputs.**
   - Each file part streams to storage under the `Pause` run's task prefix at `tasks/{pause-task-slug}/{pause_run_id}/resume/{request_id}/{input}/{file}` (*corrected 2026-11-15, Q4*; the spec said `resume/{task_run_id}/{input}/{file}`, which `storage::uri` does not parse, `storage/uri.rs:291-317`). This is not `inputs/{input}/{file}`, so it cannot overwrite a start input with the same id. `{request_id}` is fresh per request, so a refused resume deletes only its own files.
   - The files are indexed in `workflow.execution_files` under the `Pause` run, in the resume's transaction; a file is readable only once indexed.
@@ -74,6 +77,7 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
   - **Paused by hand, or a `Pause` with no `onResume`:** it answers an empty input list.
   - Multipart file parts are read and discarded, never stored, as Kestra's `uploadFiles=false`. The answer carries the would-be value, not a URI.
   - No audit row: it changes nothing.
+  - *As built, 2026-11-16 (D8):* `resume/validate` runs the same refusal as resume for a file part sent for a non-`FILE` input (400), through the shared `receive_parts` with a discarding sink.
 - **D9. Flow gates.** Pause, resume and validate refuse a flow in the trash or deleted permanently with 404, as 7a does. A disabled flow does not block pause or resume: Kestra checks neither, and stopping or finishing a run of a disabled flow is safe. §5 divergence 3.
 - **D10. Interplay.**
   - Kill on a paused-by-hand execution works as on a running one (`kill_leaves`). Live leaves go `KILLING`, and the execution goes `KILLING`. `drives_forward` already stops at `KILLING`.

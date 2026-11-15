@@ -60,6 +60,9 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
     - *Thêm 2026-11-15 (Q6):* giá trị `onResume` kiểu SECRET là `******` trong `outputs` và được seal trong `task_runs.secret_outputs`; render surface tiết lộ nó cho các task sau và che nó trong log của chúng. Khi không có `secrets.master_key`, resume bị từ chối với 400 nêu tên input.
   - **`Pause` không có `onResume`** giữ hành vi hiện tại. Body rỗng hoặc không có body được nhận. `inputs` khác rỗng trả 400 `resume_inputs_unexpected`.
   - **Chỉ có `LoopUntil` đang chờ:** 409 "Nothing to resume" hiện nay giữ nguyên.
+  - *Như đã xây, 2026-11-16 (D5):* resume có kèm inputs hoặc phần file khi chỉ có một `LoopUntil` đang chờ trả 400 `resume_inputs_unexpected`, không phải 409 (`routes.rs`, `resume_inputs_unexpected`); không có body thì vẫn trả 409 "Nothing to resume". Nói rộng hơn, inputs JSON không rỗng (và mọi phần multipart) khi không có `onResume` nào áp dụng bị từ chối ngay tại route, trước worker; worker từ chối lại lần nữa dưới lock.
+  - *Như đã xây, 2026-11-16 (D5, D7, race):* worker trả `Moved` (409) khi cái nó thấy dưới lock khác cái route đã đọc: route chọn một run `Pause` nhưng execution nay đã bị pause thủ công, hoặc một run `Pause` khác nay là run đầu tiên đang chờ, hoặc route không thấy `Pause` nhưng nay có một `Pause` đang chờ và inputs hoặc file đã được gửi (`worker/pause.rs`, `ResumeRefused::Moved`). Resume với inputs rỗng mà route không thấy `Pause` còn nay có một `Pause` đang chờ vẫn giải phóng nó: không giá trị nào của người gọi tới được SQL, chỉ có default của tác giả.
+  - *Như đã xây, 2026-11-16 (audit):* bản ghi audit `workflow_execution:resume` mang `from_state`, `by_hand`, `task_run_id` (null khi pause thủ công) và `inputs_given: bool`, không bao giờ mang giá trị (có thể có SECRET trong đó).
 - **D6. Input `onResume` kiểu FILE.**
   - Mỗi part file được stream vào storage dưới task prefix của run `Pause`, tại `tasks/{pause-task-slug}/{pause_run_id}/resume/{request_id}/{input}/{file}` (*đã sửa 2026-11-15, Q4*; spec ghi `resume/{task_run_id}/{input}/{file}`, mà `storage::uri` không parse được, `storage/uri.rs:291-317`). Đường dẫn này khác `inputs/{input}/{file}`, nên không ghi đè lên input lúc bắt đầu chạy có cùng id. `{request_id}` mới cho mỗi request, nên một resume bị từ chối chỉ xoá file của chính nó.
   - Các file được index trong `workflow.execution_files` dưới run `Pause`, trong transaction của resume; một file chỉ đọc được sau khi đã được index.
@@ -76,6 +79,7 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
   - **Pause bằng tay, hoặc `Pause` không có `onResume`:** trả về danh sách input rỗng.
   - Các part file multipart được đọc rồi bỏ đi, không bao giờ được lưu, như `uploadFiles=false` của Kestra. Kết quả mang giá trị dự kiến, không phải URI.
   - Không ghi audit: nó không thay đổi gì.
+  - *Như đã xây, 2026-11-16 (D8):* `resume/validate` chạy cùng phép từ chối như resume cho phần file gửi tới một input không phải `FILE` (400), qua `receive_parts` dùng chung với sink bỏ đi.
 - **D9. Cổng theo flow.** Pause, resume và validate từ chối flow trong thùng rác hoặc đã xoá hẳn với 404, như 7a. Flow bị tắt không chặn pause hay resume: Kestra không kiểm tra điều nào, và dừng hay cho chạy nốt một run của flow bị tắt là an toàn. Xem §5 điểm khác 3.
 - **D10. Tương tác.**
   - Kill một execution bị pause bằng tay hoạt động như với một execution đang chạy (`kill_leaves`). Các lá đang sống chuyển `KILLING`, và execution chuyển `KILLING`. `drives_forward` vốn đã dừng ở `KILLING`.

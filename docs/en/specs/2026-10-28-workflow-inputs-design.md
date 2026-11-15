@@ -40,7 +40,7 @@ egret stores the inputs as posted and coerces them at every render. No start pat
 
 ## 3. Out of scope (named, with the package that lifts it)
 
-Resume with `onResume` inputs and resume-validate (#9). Replay with new inputs (#7). `checks:` (#16). Templated defaults validated at start (follow-up, §6). FORM / REUSABLE_INPUTS. Local-path FILE inputs (deliberately not ported: they read the server's disk).
+Resume with `onResume` inputs and resume-validate (#9). Replay with new inputs (#7). `checks:` (#16). Templated defaults validated at start (follow-up, §6). FORM / REUSABLE_INPUTS. Local-path FILE inputs (deliberately not ported: they read the server's disk). *Corrected 2026-11-15: resume with `onResume` inputs and resume-validate moved to package 7c (`docs/en/specs/2026-11-15-workflow-pause-resume-design.md` Q1).*
 
 ## 4. Expected ratchet
 

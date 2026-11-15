@@ -42,7 +42,7 @@ egret lưu inputs đúng như được post và ép kiểu ở mỗi lần rende
 
 ## 3. Ngoài phạm vi (nêu tên, kèm gói gỡ nó)
 
-Resume với inputs `onResume` và resume-validate (#9). Replay với inputs mới (#7). `checks:` (#16). Default có template được kiểm lúc start (việc theo sau, §6). FORM / REUSABLE_INPUTS. FILE với đường dẫn local (cố ý không port: chúng đọc đĩa của server).
+Resume với inputs `onResume` và resume-validate (#9). Replay với inputs mới (#7). `checks:` (#16). Default có template được kiểm lúc start (việc theo sau, §6). FORM / REUSABLE_INPUTS. FILE với đường dẫn local (cố ý không port: chúng đọc đĩa của server). *Đính chính 2026-11-15: resume với inputs `onResume` và resume-validate chuyển sang gói 7c (`docs/en/specs/2026-11-15-workflow-pause-resume-design.md` Q1).*
 
 ## 4. Ratchet kỳ vọng
 
