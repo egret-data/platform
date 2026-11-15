@@ -437,3 +437,41 @@ async fn disable_enable_delete_and_human_route_unchanged() {
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn adding_to_a_group_holding_platform_admin_is_refused() {
+    let Some(f) = setup().await else {
+        return;
+    };
+    let t = session_for(&f, "sa_admin", true).await;
+    let id = create_platform_sa(&f, &t).await;
+    let admin = role_id(&f, "platform_admin").await;
+    let g: Uuid =
+        sqlx::query_scalar("INSERT INTO groups (name, source) VALUES ($1, 'local') RETURNING id")
+            .bind(format!("adm-{}", Uuid::new_v4().simple()))
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('group', $1, $2, 'platform', NULL)",
+    )
+    .bind(g)
+    .bind(admin)
+    .execute(&f.db.pool)
+    .await
+    .unwrap();
+    let (s, j) = call(
+        &f,
+        "POST",
+        &format!("/service-accounts/{id}/groups"),
+        &t,
+        Some(serde_json::json!({ "group_id": g })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{j}");
+    assert!(j["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("platform_admin"));
+}

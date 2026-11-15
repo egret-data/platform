@@ -373,7 +373,7 @@ pub(super) async fn delete_service_account(
     responses(
         (status = 200, description = "Added to the group", body = ServiceAccountDetailDto),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing user:update permission", body = ErrorBody),
+        (status = 403, description = "Missing group:manage_members permission", body = ErrorBody),
         (status = 404, description = "No such service account or group", body = ErrorBody),
         (status = 409, description = "OIDC-synced groups are IdP-owned; a service account cannot join one", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -385,8 +385,21 @@ pub(super) async fn add_service_account_group(
     Path(id): Path<Uuid>,
     Json(body): Json<AddGroupBody>,
 ) -> Result<Json<ServiceAccountDetailDto>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "group:manage_members").await?;
     require_sa(&st, id).await?;
+    // A group holding platform_admin would hand the account admin through
+    // membership, bypassing the direct-grant refusal in the role route.
+    if st
+        .roles
+        .roles_of("group", body.group_id)
+        .await?
+        .iter()
+        .any(|r| r.name == "platform_admin")
+    {
+        return Err(CpError::BadRequest(
+            "this group holds platform_admin; a service account cannot join it".into(),
+        ));
+    }
     // `GroupRepo::add_member` refuses an OIDC-synced group with a 409 ("its
     // membership is owned by the identity provider"), before any write.
     st.groups
@@ -421,7 +434,7 @@ pub(super) async fn remove_service_account_group(
     Auth(p): Auth,
     Path((id, group_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ServiceAccountDetailDto>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "group:manage_members").await?;
     require_sa(&st, id).await?;
     st.groups
         .remove_member(
@@ -454,7 +467,7 @@ pub(super) async fn add_service_account_role(
     Path(id): Path<Uuid>,
     Json(body): Json<AddRoleBody>,
 ) -> Result<Json<ServiceAccountDetailDto>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     require_sa(&st, id).await?;
     if body.scope_type != "platform" || body.workspace_id.is_some() {
         return Err(CpError::BadRequest(
@@ -512,7 +525,7 @@ pub(super) async fn remove_service_account_role(
     Auth(p): Auth,
     Path((id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<ServiceAccountDetailDto>, CpError> {
-    egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
+    egret_core::authz::require(&*st.pdp, &p, "user:assign_role").await?;
     require_sa(&st, id).await?;
     unassign_role_guarded(&st, "user", id, role_id).await?;
     st.audit.emit(egret_audit::mutation_for(
