@@ -2145,7 +2145,9 @@ fn renders_at(plan: &Plan, task: usize) -> RunState {
 /// - a `Loop` run (Task A4): `outputs` is the LIST, sealed as append-only
 ///   frames `{position: {id: value}}` ([`crate::secret_inputs::open_loop_outputs`]);
 /// - a `Subflow` run (Task B3): `outputs` is the child's MAP, sealed `{id:
-///   value}`, the child's own object copied as it is.
+///   value}`, the child's own object copied as it is;
+/// - a `Pause` run resumed with a SECRET `onResume` value (package 7c S7):
+///   `onResume` is the MAP, sealed `{id: value}`.
 fn reveal_run_outputs(
     outputs: Option<Value>,
     sealed: Option<&[u8]>,
@@ -2153,11 +2155,13 @@ fn reveal_run_outputs(
 ) -> Result<Option<Value>> {
     match (outputs, sealed) {
         (Some(o), Some(sealed)) => {
-            let (o, values) = match o.get("outputs") {
-                Some(Value::Object(_)) => {
-                    crate::secret_inputs::reveal_subflow_outputs(o, Some(sealed))?
-                }
-                _ => crate::secret_inputs::reveal_loop_outputs(o, Some(sealed))?,
+            let (o, values) = if matches!(o.get("outputs"), Some(Value::Object(_))) {
+                crate::secret_inputs::reveal_subflow_outputs(o, Some(sealed))?
+            } else if matches!(o.get("onResume"), Some(Value::Object(_))) {
+                // Package 7c (S7): a `Pause` run's SECRET `onResume` values.
+                crate::secret_inputs::reveal_keyed_outputs(o, "onResume", Some(sealed))?
+            } else {
+                crate::secret_inputs::reveal_loop_outputs(o, Some(sealed))?
             };
             secrets.extend(values);
             Ok(Some(o))

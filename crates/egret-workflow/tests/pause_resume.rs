@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use egret_metastore::Db;
 use egret_workflow::worker::{
-    kill_execution, pause_by_hand, restart_execution, Handlers, Outcome, Paused, Registry,
-    RestartRefused, Restarted, TaskInput,
+    kill_execution, pause_by_hand, restart_execution, resume_with, Handlers, Outcome, Paused,
+    Registry, RestartRefused, Restarted, ResumeRefused, ResumeRequest, Resumed, TaskInput,
 };
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -382,18 +382,18 @@ async fn s1_a_loop_iteration_ending_during_the_pause_starts_the_next_and_the_flo
 /// The second half of test 6: the by-hand resume (T4 teaches
 /// `resume_by_hand` the paused-by-hand case).
 #[sqlx::test(migrations = "../../migrations")]
-#[ignore = "T4"]
 async fn s1_after_the_loop_a_resume_runs_the_rest(pool: sqlx::PgPool) {
     // Arrange
     let (_ws, ex) = loopy_paused_and_settled(&pool).await;
 
     // Act
-    egret_workflow::worker::resume_by_hand(&pool, ex)
+    let resumed = egret_workflow::worker::resume_by_hand(&pool, ex)
         .await
         .expect("resume");
     settle_everything(&pool, &handlers()).await;
 
     // Assert
+    assert_eq!(resumed, Resumed::ByHand);
     assert_eq!(exec_state(&pool, ex).await, "SUCCESS");
     assert_eq!(
         state_of(&runs(&pool, ex).await, "after").as_deref(),
@@ -463,6 +463,23 @@ async fn s4_a_loop_until_condition_is_not_rendered_during_the_pause(pool: sqlx::
     .unwrap();
     assert_eq!(rendered, None, "the condition waits for the resume");
     assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+
+    // The resume ends in a settle, which renders what the pause deferred.
+    let resumed = egret_workflow::worker::resume_by_hand(&pool, ex)
+        .await
+        .expect("resume");
+    assert_eq!(resumed, Resumed::ByHand);
+    let rendered: Option<String> = sqlx::query_scalar(
+        "SELECT rendered FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'lu'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        rendered.is_some(),
+        "the resume's settle renders the condition"
+    );
 }
 
 // ── 9: S3 / Q5, a manual pause is refused while a `Pause` waits ─────────────
@@ -619,6 +636,468 @@ async fn restart_of_a_manual_pause_follows_7a(pool: sqlx::PgPool) {
         state_of(&runs(&pool, ex).await, "b").as_deref(),
         Some("SUCCESS")
     );
+    assert_eq!(exec_state(&pool, ex).await, "SUCCESS");
+}
+
+// ── 14-25: resume, by hand and with `onResume` inputs (T4) ──────────────────
+
+fn req(id: Uuid, inputs: Option<&serde_json::Map<String, Value>>) -> ResumeRequest<'_> {
+    ResumeRequest {
+        id,
+        inputs,
+        files: &[],
+        expected: None,
+    }
+}
+
+fn obj(v: Value) -> serde_json::Map<String, Value> {
+    match v {
+        Value::Object(m) => m,
+        other => panic!("not an object: {other}"),
+    }
+}
+
+/// `outputs` of `task`'s run.
+async fn outputs_of(pool: &sqlx::PgPool, ex: Uuid, task: &str) -> Option<Value> {
+    sqlx::query_scalar(
+        "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(ex)
+    .bind(task)
+    .fetch_one(pool)
+    .await
+    .expect("outputs")
+}
+
+async fn run_id_of(pool: &sqlx::PgPool, ex: Uuid, task: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2")
+        .bind(ex)
+        .bind(task)
+        .fetch_one(pool)
+        .await
+        .expect("run id")
+}
+
+/// [`settle_everything`] with a log sink, so a `Log` task's line reaches
+/// `workflow.task_logs` (the harness of `tests/http_request.rs`).
+async fn settle_with_logs(pool: &sqlx::PgPool) {
+    use egret_workflow::logs::{spawn_writer, LogLimits, LogRepo, WriterConfig};
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let (sink, writer) = spawn_writer(
+        LogRepo::new(pool.clone()),
+        WriterConfig::default(),
+        cancel.clone(),
+    );
+    let reg = handlers().with_log_sink(std::sync::Arc::new(sink), LogLimits::default());
+    settle_everything(pool, &reg).await;
+    drop(reg);
+    cancel.cancel();
+    writer.await.expect("the log writer ends");
+}
+
+async fn log_lines(pool: &sqlx::PgPool, ex: Uuid) -> Vec<String> {
+    sqlx::query_scalar("SELECT message FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id")
+        .bind(ex)
+        .fetch_all(pool)
+        .await
+        .expect("logs")
+}
+
+/// Spec §4's flow: a `Pause` asking who approves, a count and an optional
+/// file, then a `Log` reading them.
+const APPROVE: &str = r#"id: approve
+namespace: t
+tasks:
+  - id: p
+    type: io.kestra.plugin.core.flow.Pause
+    onResume:
+      - id: who
+        type: STRING
+      - id: n
+        type: INT
+      - id: doc
+        type: FILE
+        required: false
+  - id: log
+    type: io.kestra.plugin.core.log.Log
+    message: "who={{ outputs.p.onResume.who }} n={{ outputs.p.onResume.n }} by={{ outputs.p.resumed.to }}"
+"#;
+
+async fn approve_waiting(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
+    let (db, ws, user) = setup(pool).await;
+    let ex = start(pool, &db, ws, user, APPROVE).await;
+    settle_everything(pool, &handlers()).await;
+    assert_eq!(exec_state(pool, ex).await, "PAUSED");
+    assert_eq!(
+        state_of(&runs(pool, ex).await, "p").as_deref(),
+        Some("PAUSED")
+    );
+    (ws, ex)
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn resume_by_hand_runs_on_and_the_flow_finishes(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    let ex = start(&pool, &db, ws, user, &two_tasks("p")).await;
+    assert_eq!(pause_by_hand(&pool, ws, ex).await.unwrap(), Paused::Done);
+    settle_everything(&pool, &handlers()).await;
+    assert_eq!(runs(&pool, ex).await, pairs(&[("a", "SUCCESS")]));
+
+    // Act
+    let resumed = resume_with(&pool, &req(ex, None)).await.expect("resume");
+    settle_everything(&pool, &handlers()).await;
+
+    // Assert
+    assert_eq!(resumed, Resumed::ByHand);
+    assert_eq!(
+        runs(&pool, ex).await,
+        pairs(&[("a", "SUCCESS"), ("b", "SUCCESS")])
+    );
+    assert_eq!(exec_state(&pool, ex).await, "SUCCESS");
+    let history = exec_history(&pool, ex).await;
+    let h = history.as_array().unwrap();
+    let paused = h.iter().position(|s| s == "PAUSED").expect("PAUSED");
+    assert_eq!(h[paused + 1], json!("RUNNING"), "{history}");
+    assert!(!h.contains(&json!("RESTARTED")), "{history}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn resume_by_hand_with_inputs_is_refused_and_writes_nothing(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    let ex = start(&pool, &db, ws, user, &two_tasks("p")).await;
+    assert_eq!(pause_by_hand(&pool, ws, ex).await.unwrap(), Paused::Done);
+    let history = exec_history(&pool, ex).await;
+    let inputs = obj(json!({"x": 1}));
+
+    // Act
+    let resumed = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+
+    // Assert
+    assert_eq!(resumed, Resumed::Refused(ResumeRefused::InputsUnexpected));
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    assert_eq!(exec_history(&pool, ex).await, history);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn resume_with_inputs_writes_on_resume_and_resumed_and_the_next_task_reads_them(
+    pool: sqlx::PgPool,
+) {
+    // Arrange
+    let (_ws, ex) = approve_waiting(&pool).await;
+    let inputs = obj(json!({"who": "ada", "n": "3"}));
+
+    // Act
+    let resumed = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+    settle_with_logs(&pool).await;
+
+    // Assert
+    assert_eq!(resumed, Resumed::Released(1));
+    let out = outputs_of(&pool, ex, "p").await.expect("p has outputs");
+    // The input check answers every declared input; an absent optional one
+    // is `null`, as a start's is.
+    assert_eq!(
+        out["onResume"],
+        json!({"who": "ada", "n": 3, "doc": null}),
+        "{out}"
+    );
+    assert_eq!(out["resumed"]["by"], Value::Null, "{out}");
+    assert_eq!(out["resumed"]["to"], json!("SUCCESS"), "{out}");
+    let on = out["resumed"]["on"].as_str().expect("`on` is a string");
+    chrono::DateTime::parse_from_rfc3339(on).expect("`on` is RFC 3339");
+    let logs = log_lines(&pool, ex).await;
+    assert!(
+        logs.iter().any(|l| l.contains("who=ada n=3 by=SUCCESS")),
+        "{logs:?}"
+    );
+    assert_eq!(exec_state(&pool, ex).await, "SUCCESS");
+    let history = exec_history(&pool, ex).await;
+    assert!(
+        history.as_array().unwrap().contains(&json!("RESTARTED")),
+        "{history}"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_refused_value_names_the_input_and_writes_nothing(pool: sqlx::PgPool) {
+    // Arrange
+    let (_ws, ex) = approve_waiting(&pool).await;
+    let bad = obj(json!({"who": "ada", "n": "x"}));
+    let missing = obj(json!({"n": "3"}));
+
+    // Act
+    let refused = resume_with(&pool, &req(ex, Some(&bad))).await.unwrap();
+    let refused_missing = resume_with(&pool, &req(ex, Some(&missing))).await.unwrap();
+
+    // Assert
+    match &refused {
+        Resumed::Refused(ResumeRefused::Invalid(m)) => assert!(m.contains("`n`"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    match &refused_missing {
+        Resumed::Refused(ResumeRefused::Invalid(m)) => {
+            assert!(m.contains("Missing required input:who"), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    assert_eq!(
+        state_of(&runs(&pool, ex).await, "p").as_deref(),
+        Some("PAUSED")
+    );
+    assert_eq!(outputs_of(&pool, ex, "p").await, None);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn s6_an_undeclared_key_is_refused(pool: sqlx::PgPool) {
+    // Arrange
+    let (_ws, ex) = approve_waiting(&pool).await;
+    let inputs = obj(json!({"who": "ada", "n": "3", "zzz": 1}));
+
+    // Act
+    let refused = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+
+    // Assert
+    match &refused {
+        Resumed::Refused(ResumeRefused::Invalid(m)) => assert!(m.contains("`zzz`"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    assert_eq!(outputs_of(&pool, ex, "p").await, None);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_pause_without_on_resume_accepts_no_body_and_refuses_inputs(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    let src = "id: plain\nnamespace: t\ntasks:\n  - id: p\n    \
+               type: io.kestra.plugin.core.flow.Pause\n  \
+               - id: after\n    type: io.kestra.plugin.core.log.Log\n    message: after\n";
+    let ex = start(&pool, &db, ws, user, src).await;
+    settle_everything(&pool, &handlers()).await;
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    let some = obj(json!({"a": 1}));
+    let none = serde_json::Map::new();
+
+    // Act
+    let refused = resume_with(&pool, &req(ex, Some(&some))).await.unwrap();
+    let state_after_refusal = exec_state(&pool, ex).await;
+    let released = resume_with(&pool, &req(ex, Some(&none))).await.unwrap();
+    settle_everything(&pool, &handlers()).await;
+
+    // Assert
+    assert_eq!(refused, Resumed::Refused(ResumeRefused::InputsUnexpected));
+    assert_eq!(state_after_refusal, "PAUSED");
+    assert_eq!(released, Resumed::Released(1));
+    let out = outputs_of(&pool, ex, "p").await.expect("p has outputs");
+    assert_eq!(out["onResume"], json!({}), "{out}");
+    assert_eq!(out["resumed"]["to"], json!("SUCCESS"), "{out}");
+    assert_eq!(exec_state(&pool, ex).await, "SUCCESS");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn parallel_pauses_the_first_gets_the_inputs_and_the_others_on_resume_empty(
+    pool: sqlx::PgPool,
+) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    let src = "id: two\nnamespace: t\ntasks:\n  - id: both\n    \
+               type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+               - id: p1\n        type: io.kestra.plugin.core.flow.Pause\n        \
+               onResume:\n          - id: a\n            type: STRING\n      \
+               - id: p2\n        type: io.kestra.plugin.core.flow.Pause\n        \
+               onResume:\n          - id: b\n            type: STRING\n";
+    let ex = start(&pool, &db, ws, user, src).await;
+    settle_everything(&pool, &handlers()).await;
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    let inputs = obj(json!({"a": "x"}));
+
+    // Act
+    let resumed = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+    settle_everything(&pool, &handlers()).await;
+
+    // Assert
+    assert_eq!(resumed, Resumed::Released(2));
+    let p1 = outputs_of(&pool, ex, "p1").await.expect("p1 outputs");
+    let p2 = outputs_of(&pool, ex, "p2").await.expect("p2 outputs");
+    assert_eq!(p1["onResume"], json!({"a": "x"}), "{p1}");
+    assert_eq!(p2["onResume"], json!({}), "{p2}");
+    assert_eq!(exec_state(&pool, ex).await, "SUCCESS");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn only_a_loop_until_waiting_is_no_pause_waiting(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    let src = "id: until\nnamespace: t\ntasks:\n  - id: lu\n    \
+               type: io.kestra.plugin.core.flow.LoopUntil\n    \
+               condition: \"{{ false }}\"\n    \
+               checkFrequency:\n      interval: PT1H\n      maxIterations: 3\n    \
+               tasks:\n      \
+               - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+    let ex = start(&pool, &db, ws, user, src).await;
+    settle_everything(&pool, &handlers()).await;
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    let history = exec_history(&pool, ex).await;
+
+    // Act
+    let resumed = resume_with(&pool, &req(ex, None)).await.unwrap();
+
+    // Assert
+    assert_eq!(resumed, Resumed::NoPauseWaiting);
+    assert_eq!(exec_history(&pool, ex).await, history);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_lost_race_is_moved(pool: sqlx::PgPool) {
+    // Arrange
+    let (_ws, ex) = approve_waiting(&pool).await;
+    let inputs = obj(json!({"who": "ada", "n": "3"}));
+    let history = exec_history(&pool, ex).await;
+
+    // Act
+    let resumed = resume_with(
+        &pool,
+        &ResumeRequest {
+            id: ex,
+            inputs: Some(&inputs),
+            files: &[],
+            expected: Some(Uuid::new_v4()),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Assert
+    assert_eq!(resumed, Resumed::Refused(ResumeRefused::Moved));
+    assert_eq!(exec_history(&pool, ex).await, history);
+    assert_eq!(
+        state_of(&runs(&pool, ex).await, "p").as_deref(),
+        Some("PAUSED")
+    );
+    assert_eq!(outputs_of(&pool, ex, "p").await, None);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn s2_a_file_stored_under_the_pause_run_is_indexed_and_readable(pool: sqlx::PgPool) {
+    // Arrange
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let (ws, ex) = approve_waiting(&pool).await;
+    let run = run_id_of(&pool, ex, "p").await;
+    let flow = egret_workflow::spec::parse(APPROVE).unwrap();
+    let doc_input = match &flow.tasks[0].kind {
+        egret_workflow::models::TaskKind::Pause(p) => p
+            .on_resume
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|i| i.id == "doc")
+            .unwrap()
+            .clone(),
+        other => panic!("{other:?}"),
+    };
+    let req_id = Uuid::new_v4();
+    let stored = egret_workflow::storage::inputs::upload_resume_input(
+        &fs,
+        ws,
+        "t",
+        "approve",
+        ex,
+        "p",
+        run,
+        req_id,
+        &doc_input,
+        "a.txt",
+        &mut &b"hello"[..],
+    )
+    .await
+    .expect("stored");
+    let inputs = obj(json!({"who": "ada", "n": "1", "doc": stored.uri}));
+    let files = [stored.clone()];
+
+    // Act
+    let resumed = resume_with(
+        &pool,
+        &ResumeRequest {
+            id: ex,
+            inputs: Some(&inputs),
+            files: &files,
+            expected: Some(run),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Assert
+    assert_eq!(resumed, Resumed::Released(1));
+    assert!(
+        stored.uri.ends_with(&format!(
+            "/executions/{ex}/tasks/p/{run}/resume/{req_id}/doc/a.txt"
+        )),
+        "{}",
+        stored.uri
+    );
+    let mut conn = pool.acquire().await.unwrap();
+    let readable = egret_workflow::storage::resolve_readable(&mut conn, ws, ex, &stored.uri)
+        .await
+        .expect("the database answers");
+    assert!(readable.is_ok(), "{readable:?}");
+    let indexed: Option<Uuid> = sqlx::query_scalar(
+        "SELECT task_run_id FROM workflow.execution_files WHERE execution_id = $1 AND uri = $2",
+    )
+    .bind(ex)
+    .bind(&stored.uri)
+    .fetch_one(&pool)
+    .await
+    .expect("the file is indexed");
+    assert_eq!(indexed, Some(run));
+    let out = outputs_of(&pool, ex, "p").await.unwrap();
+    assert_eq!(out["onResume"]["doc"], json!(stored.uri), "{out}");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn s7_a_secret_on_resume_value_is_sealed_and_a_later_task_reads_it_masked_in_logs(
+    pool: sqlx::PgPool,
+) {
+    // Arrange
+    egret_workflow::secret_inputs::install_for_tests();
+    let (db, ws, user) = setup(&pool).await;
+    let src = "id: sec\nnamespace: t\ntasks:\n  - id: p\n    \
+               type: io.kestra.plugin.core.flow.Pause\n    \
+               onResume:\n      - id: tok\n        type: SECRET\n  \
+               - id: log\n    type: io.kestra.plugin.core.log.Log\n    \
+               message: \"tok={{ outputs.p.onResume.tok }}\"\n  \
+               - id: chk\n    type: io.kestra.plugin.core.log.Log\n    \
+               message: \"clear={{ outputs.p.onResume.tok == 's3cr3t' }}\"\n";
+    let ex = start(&pool, &db, ws, user, src).await;
+    settle_everything(&pool, &handlers()).await;
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    let inputs = obj(json!({"tok": "s3cr3t"}));
+
+    // Act
+    let resumed = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+    settle_with_logs(&pool).await;
+
+    // Assert
+    assert_eq!(resumed, Resumed::Released(1));
+    let out = outputs_of(&pool, ex, "p").await.unwrap();
+    assert_eq!(out["onResume"]["tok"], json!("******"), "{out}");
+    let sealed: bool = sqlx::query_scalar(
+        "SELECT secret_outputs IS NOT NULL FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = 'p'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(sealed, "the clear value is sealed");
+    let logs = log_lines(&pool, ex).await;
+    assert!(logs.iter().any(|l| l.starts_with("tok=")), "{logs:?}");
+    // The later task reads the CLEAR value (the render surface reveals it)...
+    assert!(logs.iter().any(|l| l == "clear=true"), "{logs:?}");
+    // ...and its log masks it.
+    assert!(!logs.iter().any(|l| l.contains("s3cr3t")), "{logs:?}");
     assert_eq!(exec_state(&pool, ex).await, "SUCCESS");
 }
 

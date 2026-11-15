@@ -3243,7 +3243,19 @@ async fn resume_execution(
         )));
     }
     match crate::worker::resume_by_hand(&st.db.pool, id).await? {
-        crate::worker::Resumed::Released(_) => {}
+        crate::worker::Resumed::Released(_) | crate::worker::Resumed::ByHand => {}
+        // Package 7c T4: with no body the only refusal is a `Pause` whose
+        // `onResume` requires a value (T5 gives this route its body and codes).
+        crate::worker::Resumed::Refused(crate::worker::ResumeRefused::Invalid(why)) => {
+            return Err(Error::InvalidInput(why));
+        }
+        crate::worker::Resumed::Refused(
+            crate::worker::ResumeRefused::InputsUnexpected | crate::worker::ResumeRefused::Moved,
+        ) => {
+            return Err(Error::Conflict(format!(
+                "execution {id} cannot be resumed as it is now; reload and try again"
+            )));
+        }
         crate::worker::Resumed::NotPaused => {
             return Err(Error::Conflict(format!(
                 "execution {id} is no longer PAUSED; its pause ended before the resume reached it"

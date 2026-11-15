@@ -269,6 +269,46 @@ impl FileStore {
             execution.hyphenated()
         )
     }
+
+    /// Every resume's files of the `Pause` run `task_run` (package 7c S2),
+    /// ending with `/`: the object prefix of [`uri::resume_input_uri`]'s
+    /// `tasks/{task-slug}/{task_run}/resume/`.
+    pub fn resume_root(
+        &self,
+        workspace: Uuid,
+        namespace: &str,
+        flow_id: &str,
+        execution: Uuid,
+        task_id: &str,
+        task_run: Uuid,
+    ) -> String {
+        format!(
+            "{}tasks/{}/{}/resume/",
+            self.execution_prefix(workspace, namespace, flow_id, execution),
+            uri::slugify_str(task_id),
+            task_run.hyphenated()
+        )
+    }
+
+    /// One resume request's files, ending with `/`: what a refused resume
+    /// deletes, never another request's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_prefix(
+        &self,
+        workspace: Uuid,
+        namespace: &str,
+        flow_id: &str,
+        execution: Uuid,
+        task_id: &str,
+        task_run: Uuid,
+        request: Uuid,
+    ) -> String {
+        format!(
+            "{}{}/",
+            self.resume_root(workspace, namespace, flow_id, execution, task_id, task_run),
+            request.hyphenated()
+        )
+    }
 }
 
 static INSTALLED: OnceLock<Arc<FileStore>> = OnceLock::new();

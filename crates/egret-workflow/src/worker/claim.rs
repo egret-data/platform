@@ -4256,7 +4256,17 @@ pub(crate) fn checked_inputs(
     flow: &crate::models::Flow,
     posted: &serde_json::Value,
 ) -> std::result::Result<serde_json::Value, crate::inputs_check::InputError> {
-    crate::inputs_check::resolve(&flow.inputs, posted, &start_renderer(flow))
+    checked_inputs_for(flow, &flow.inputs, posted)
+}
+
+/// [`checked_inputs`] against another declared list -- a `Pause`'s
+/// `onResume` (package 7c D5), rendered as a start's are.
+pub(crate) fn checked_inputs_for(
+    flow: &crate::models::Flow,
+    declared: &[crate::models::Input],
+    posted: &serde_json::Value,
+) -> std::result::Result<serde_json::Value, crate::inputs_check::InputError> {
+    crate::inputs_check::resolve(declared, posted, &input_renderer(flow, declared))
         .map(serde_json::Value::Object)
 }
 
@@ -4268,12 +4278,24 @@ pub(crate) fn input_outcomes(
     flow: &crate::models::Flow,
     posted: &serde_json::Value,
 ) -> Vec<crate::inputs_check::InputOutcome> {
-    crate::inputs_check::resolve_all(&flow.inputs, posted, &start_renderer(flow))
+    input_outcomes_for(flow, &flow.inputs, posted)
+}
+
+/// [`input_outcomes`] against another declared list -- a `Pause`'s
+/// `onResume` (package 7c D5).
+pub(crate) fn input_outcomes_for(
+    flow: &crate::models::Flow,
+    declared: &[crate::models::Input],
+    posted: &serde_json::Value,
+) -> Vec<crate::inputs_check::InputOutcome> {
+    crate::inputs_check::resolve_all(declared, posted, &input_renderer(flow, declared))
 }
 
 /// The renderer [`checked_inputs`] documents, built once per check.
-fn start_renderer(
+/// `declared` is the list being checked: its defaulted inputs bind `null`.
+fn input_renderer(
     flow: &crate::models::Flow,
+    declared: &[crate::models::Input],
 ) -> impl Fn(
     &str,
     &serde_json::Map<String, serde_json::Value>,
@@ -4281,8 +4303,7 @@ fn start_renderer(
     use crate::runners::env::{render_typed, RenderContext};
     let flow_binding = serde_json::json!({"id": flow.id, "namespace": flow.namespace});
     let vars = serde_json::to_value(&flow.variables).unwrap_or(serde_json::Value::Null);
-    let defaulted: serde_json::Map<String, serde_json::Value> = flow
-        .inputs
+    let defaulted: serde_json::Map<String, serde_json::Value> = declared
         .iter()
         .filter(|i| i.defaults.is_some())
         .map(|i| (i.id.clone(), serde_json::Value::Null))
@@ -4513,11 +4534,14 @@ pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
 }
 
 /// What a manual resume found under the execution's lock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resumed {
     /// The execution was `PAUSED`; this many `Pause` runs (at least one)
     /// were released and the execution settled on from there.
     Released(usize),
+    /// Package 7c D5: the execution was paused by hand and is `RUNNING`
+    /// again; no task run changed, and the settle drove it on.
+    ByHand,
     /// The execution is `PAUSED`, but no `Pause` task is waiting: only a
     /// `LoopUntil` waits for its next iteration, which a resume does not end
     /// (Kestra resumes `Pause` tasks only). Nothing written. (W7b Task 3 fix
@@ -4526,6 +4550,8 @@ pub enum Resumed {
     /// The execution was no longer `PAUSED` when the lock was taken -- the
     /// waker ended the pause first, or it was never paused. Nothing written.
     NotPaused,
+    /// Package 7c: nothing written; why (D5, S6, S7, a lost race).
+    Refused(super::pause::ResumeRefused),
 }
 
 /// **Resume a paused execution by hand** (W7b Task 3 fix round 1; Kestra's
@@ -4544,22 +4570,21 @@ pub enum Resumed {
 /// `FAILED` (and the execution has moved on), so this answers
 /// [`Resumed::NotPaused`] and writes nothing; one still `PAUSED` when this
 /// takes the lock ends `SUCCESS`, and the waker then finds nothing due.
+///
+/// Since package 7c it is [`super::pause::resume_with`] with no body: a
+/// manual pause goes back to `RUNNING`, a `Pause` run ends `SUCCESS` with
+/// `{onResume: {}, resumed}`.
 pub async fn resume_by_hand(pool: &PgPool, execution_id: Uuid) -> Result<Resumed> {
-    transaction!(pool, |at| {
-        let (conn, gate) = at.parts();
-        let (ctx, mut state, now) = load(conn, execution_id, Stack::Fresh(gate.clone())).await?;
-        if state.history.last() != Some(&RunState::Paused) {
-            return Ok(Resumed::NotPaused);
-        }
-        let before = state.clone();
-        let released = crate::executor::release_paused_pauses(&mut state, now).len();
-        if released == 0 {
-            // Before any write: the transaction commits nothing.
-            return Ok(Resumed::NoPauseWaiting);
-        }
-        settle(conn, &ctx, &before, state, now, None).await?;
-        Ok(Resumed::Released(released))
-    })
+    super::pause::resume_with(
+        pool,
+        &super::pause::ResumeRequest {
+            id: execution_id,
+            inputs: None,
+            files: &[],
+            expected: None,
+        },
+    )
+    .await
 }
 
 /// Everything a writer needs to know about the execution it is writing.
