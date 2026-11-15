@@ -72,6 +72,8 @@ pub struct NewClient {
     pub workspace_id: Uuid,
     pub warehouse_id: Uuid,
     pub catalog_role_id: Uuid,
+    /// Owning workspace service account (required; see the embedded store).
+    pub service_account_id: Uuid,
 }
 
 /// The one-time create result: the generated `client_id` + plaintext

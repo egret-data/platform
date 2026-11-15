@@ -81,6 +81,9 @@ pub struct NewClient {
     pub workspace_id: Uuid,
     pub warehouse_id: Uuid,
     pub catalog_role_id: Uuid,
+    /// Owning workspace service account. Required: the verifier is fail-closed
+    /// on a NULL owner, so no client may be minted without one.
+    pub service_account_id: Uuid,
 }
 
 /// The one-time create result: the generated `client_id` + plaintext `client_secret`.
@@ -531,8 +534,8 @@ impl CatalogStore {
             .to_string();
         let id: Uuid = sqlx::query_scalar(
             "INSERT INTO catalog.catalog_clients \
-               (name, consumer_type, workspace_id, warehouse_id, catalog_role_id, client_id, client_secret_hash) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+               (name, consumer_type, workspace_id, warehouse_id, catalog_role_id, client_id, client_secret_hash, service_account_id) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
         .bind(&c.name)
         .bind(&c.consumer_type)
@@ -541,6 +544,7 @@ impl CatalogStore {
         .bind(c.catalog_role_id)
         .bind(&client_id)
         .bind(&hash)
+        .bind(c.service_account_id)
         .fetch_one(self.pool())
         .await?;
         Ok(CreatedClient {

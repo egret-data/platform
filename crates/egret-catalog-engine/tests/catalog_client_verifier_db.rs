@@ -34,21 +34,16 @@ async fn seed() -> Option<Seeded> {
         .create_role(wh.id, "engine", "engine", None)
         .await
         .unwrap();
+    let sa = common::seed_service_account(&store, ws).await;
     let created = store
         .create_client(&NewClient {
+            service_account_id: sa,
             name: "cv".into(),
             consumer_type: "engine".into(),
             workspace_id: ws,
             warehouse_id: wh.id,
             catalog_role_id: role.id,
         })
-        .await
-        .unwrap();
-    let sa = common::seed_service_account(&store, ws).await;
-    sqlx::query("UPDATE catalog.catalog_clients SET service_account_id = $1 WHERE client_id = $2")
-        .bind(sa)
-        .bind(&created.client_id)
-        .execute(store.pool())
         .await
         .unwrap();
     Some(Seeded {

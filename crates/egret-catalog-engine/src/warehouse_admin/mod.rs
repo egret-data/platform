@@ -860,9 +860,24 @@ async fn create_client(
 ) -> Result<(StatusCode, Json<CreatedClientDto>), CatalogHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "catalog_registry:create").await?;
     check_consumer_type(&b.consumer_type)?;
+    let mut conn = st
+        .store
+        .pool()
+        .acquire()
+        .await
+        .map_err(crate::CatalogError::from)?;
+    let service_account_id = egret_auth::users::ensure_catalog_client_sa(
+        &mut conn,
+        b.workspace_id,
+        Uuid::new_v4(),
+        &b.name,
+    )
+    .await?;
+    drop(conn);
     let c = st
         .store
         .create_client(&NewClient {
+            service_account_id,
             name: b.name,
             consumer_type: b.consumer_type,
             workspace_id: b.workspace_id,

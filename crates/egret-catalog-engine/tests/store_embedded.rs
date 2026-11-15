@@ -31,8 +31,10 @@ async fn create_client_then_verify() {
         .await
         .unwrap();
 
+    let sa = common::seed_service_account(&store, ws).await;
     let created = store
         .create_client(&NewClient {
+            service_account_id: sa,
             name: "trino-eng".into(),
             consumer_type: "engine".into(),
             workspace_id: ws,
@@ -45,13 +47,6 @@ async fn create_client_then_verify() {
     assert!(!created.client_secret.is_empty());
 
     // A client verifies only while an active service account owns it (SA2).
-    let sa = common::seed_service_account(&store, ws).await;
-    sqlx::query("UPDATE catalog.catalog_clients SET service_account_id = $1 WHERE client_id = $2")
-        .bind(sa)
-        .bind(&created.client_id)
-        .execute(store.pool())
-        .await
-        .unwrap();
 
     // Correct secret verifies + returns (warehouse name, role name).
     let vc = store
@@ -93,22 +88,16 @@ async fn current_mirrors_verify_without_the_secret() {
         .create_role(wh.id, "engine", "engine", None)
         .await
         .unwrap();
+    let sa = common::seed_service_account(&store, ws).await;
     let created = store
         .create_client(&NewClient {
+            service_account_id: sa,
             name: "trino-eng".into(),
             consumer_type: "engine".into(),
             workspace_id: ws,
             warehouse_id: wh.id,
             catalog_role_id: role.id,
         })
-        .await
-        .unwrap();
-
-    let sa = common::seed_service_account(&store, ws).await;
-    sqlx::query("UPDATE catalog.catalog_clients SET service_account_id = $1 WHERE id = $2")
-        .bind(sa)
-        .bind(created.id)
-        .execute(store.pool())
         .await
         .unwrap();
 

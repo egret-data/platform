@@ -13,7 +13,7 @@
 //! `svc-` name, and the `service_accounts` insert).
 
 use anyhow::Context;
-use egret_auth::users::{ensure_username_via, UserRepo};
+use egret_auth::users::ensure_catalog_client_sa;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -65,36 +65,9 @@ async fn backfill_one(pool: &PgPool, client_id: Uuid) -> anyhow::Result<bool> {
         return Ok(false);
     };
 
-    // `(workspace_id, name)` is unique among workspace SAs and client names are
-    // not unique, so a taken name gets the client id appended.
-    let mut sa_name = format!("catalog:{client_name}");
-    let taken: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM service_accounts \
-          WHERE scope = 'workspace' AND workspace_id = $1 AND name = $2)",
-    )
-    .bind(workspace_id)
-    .bind(&sa_name)
-    .fetch_one(&mut *tx)
-    .await?;
-    if taken {
-        sa_name = format!("{sa_name}-{client_id}");
-    }
-
-    let email = format!("svc-catalog-{client_id}@service.egret.local");
-    let user_id = UserRepo::insert_service_with(&mut *tx, &email, &sa_name).await?;
-    ensure_username_via(&mut tx, user_id).await?;
-    sqlx::query(
-        "INSERT INTO service_accounts (user_id, scope, workspace_id, name, description) \
-         VALUES ($1, 'workspace', $2, $3, $4)",
-    )
-    .bind(user_id.0)
-    .bind(workspace_id)
-    .bind(&sa_name)
-    .bind("Owns the catalog client; created by `egret backfill catalog-client-sa`")
-    .execute(&mut *tx)
-    .await?;
+    let sa_id = ensure_catalog_client_sa(&mut tx, workspace_id, client_id, &client_name).await?;
     sqlx::query("UPDATE catalog.catalog_clients SET service_account_id = $1 WHERE id = $2")
-        .bind(user_id.0)
+        .bind(sa_id)
         .bind(client_id)
         .execute(&mut *tx)
         .await?;

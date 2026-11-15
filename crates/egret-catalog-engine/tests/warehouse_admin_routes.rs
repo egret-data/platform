@@ -1008,3 +1008,80 @@ async fn an_unknown_consumer_type_is_a_bad_request() {
         );
     }
 }
+
+/// SA2 task 4: a client created through the route is born owned (non-NULL
+/// `service_account_id`) and then PASSES the fail-closed verifier, so a new
+/// client is never dark.
+#[tokio::test]
+async fn a_client_created_through_the_route_is_owned_and_verifies() {
+    use egret_machine_idp::ClientVerifier;
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "client_owner", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let ws: Uuid = sqlx::query_scalar("SELECT workspace_id FROM catalog.warehouses WHERE id = $1")
+        .bind(wh)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let role = store
+        .create_role(wh, "engine", "engine", None)
+        .await
+        .unwrap();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/warehouses/{wh}/clients"),
+            &token,
+            Some(
+                serde_json::json!({"name": "owned", "consumerType": "engine",
+                "workspaceId": ws, "catalogRoleId": role.id}),
+            ),
+        ))
+        .await
+        .unwrap();
+    let (status, body) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "body={body}");
+    let client_id = body["clientId"].as_str().unwrap();
+    let secret = body["clientSecret"].as_str().unwrap();
+
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT service_account_id FROM catalog.catalog_clients WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let owner = owner.expect("a new client must have an owning service account");
+    let scope: (String, Option<Uuid>) =
+        sqlx::query_as("SELECT scope, workspace_id FROM service_accounts WHERE user_id = $1")
+            .bind(owner)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(scope, ("workspace".to_string(), Some(ws)));
+    let username: Option<String> =
+        sqlx::query_scalar("SELECT username::text FROM users WHERE id = $1")
+            .bind(owner)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        username.is_some_and(|u| u.starts_with("svc-")),
+        "ledgered svc- username"
+    );
+
+    let verified = ClientVerifier::verify(&store, client_id, secret)
+        .await
+        .unwrap();
+    assert!(
+        verified.is_some(),
+        "the fail-closed verifier must accept an owned client"
+    );
+}

@@ -103,6 +103,7 @@ impl From<NewClient> for concrete::NewClient {
             workspace_id: c.workspace_id,
             warehouse_id: c.warehouse_id,
             catalog_role_id: c.catalog_role_id,
+            service_account_id: c.service_account_id,
         }
     }
 }
