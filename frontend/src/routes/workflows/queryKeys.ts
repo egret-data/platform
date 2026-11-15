@@ -38,7 +38,12 @@ export const workflowsKeys = {
   version: (id: string, v: number) => ["workflows", "flow", id, "versions", v] as const,
   schema: (ws: string) => ["workflows", "ws", ws, "schema"] as const,
   execution: (id: string) => ["workflows", "execution", id] as const,
-  resumeInputs: (id: string) => ["workflows", "execution", id, "resume-inputs"] as const,
+  /**
+   * The waiting Pause's `onResume` inputs, read by the Resume dialog (`POST …/resume/validate`,
+   * package 7c). Deliberately NOT under `execution(id)`: refreshing the execution after a resume
+   * or a refusal must not POST validate again.
+   */
+  resumeInputs: (id: string) => ["workflows", "resume-inputs", id] as const,
   /**
    * The direct children of an execution (`GET …/executions?parent=`), under
    * `execution(id)` so refreshing the execution refreshes them too.

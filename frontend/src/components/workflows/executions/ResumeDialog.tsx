@@ -68,10 +68,12 @@ function ResumeForm({ ws, execution, onOpenChange }: { ws: string; execution: Ex
   const validate = useWorkflowValidateResumeInputs();
   const asked = useQuery({
     queryKey: workflowsKeys.resumeInputs(execution.id),
+    // FE-DATA-2 exception: a validation POST read once as a query when the dialog opens, so the generated fetcher, not its mutation hook.
     queryFn: () => workflowValidateResumeInputs(ws, execution.id, {}),
     staleTime: 0,
     gcTime: 0,
     retry: false,
+    refetchOnWindowFocus: false,
   });
   const inputs: RunInput[] = useMemo(
     () =>
@@ -91,8 +93,11 @@ function ResumeForm({ ws, execution, onOpenChange }: { ws: string; execution: Ex
   const [pending, setPending] = useState(false);
 
   const loading = asked.isPending;
+  // Only when nothing was read yet: a later failed refetch keeps the form the user is filling in.
   const loadError =
-    asked.error instanceof ApiError
+    asked.data !== undefined
+      ? null
+      : asked.error instanceof ApiError
       ? (resumeRefusal(asked.error.code) ?? asked.error.message)
       : asked.isError
         ? "The inputs could not be loaded. Close the dialog and try again."

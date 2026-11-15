@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
@@ -9,6 +9,7 @@ vi.mock("sonner", () => ({ toast }));
 import type { ExecutionDto } from "@/api/generated/model";
 import { resumeRefusal } from "@/components/workflows/executions/actions";
 import { RESUME_BY_HAND, RESUME_NO_INPUTS, ResumeDialog } from "@/components/workflows/executions/ResumeDialog";
+import { workflowsKeys } from "@/routes/workflows/queryKeys";
 
 const WS = "eng";
 const EXEC = "5e5e5e5e-0000-4000-8000-0000000000aa";
@@ -71,7 +72,7 @@ function renderDialog(exec: ExecutionDto = execution()) {
       <ResumeDialog ws={WS} execution={exec} open onOpenChange={onOpenChange} />
     </QueryClientProvider>,
   );
-  return { onOpenChange };
+  return { onOpenChange, client };
 }
 
 const dialog = () => screen.findByRole("alertdialog");
@@ -153,6 +154,48 @@ describe("ResumeDialog", () => {
     expect(await within(d).findByText(resumeRefusal("resume_inputs_unexpected")!)).toBeInTheDocument();
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("does not post validate again when a refusal refreshes the execution or the window regains focus", async () => {
+    // Arrange
+    const server = new Server();
+    server.validate = { status: 200, body: answer([INT_N]) };
+    server.checks = [{ status: 200, body: answer([INT_N]) }];
+    server.resume = { status: 409, body: { code: "not_paused", error: "not paused" } };
+    renderDialog();
+    const d = await dialog();
+    await userEvent.type(await within(d).findByLabelText(/^n/), "3");
+
+    // Act
+    await userEvent.click(resumeButton(d));
+    await within(d).findByText(resumeRefusal("not_paused")!);
+    focusManager.setFocused(false);
+    focusManager.setFocused(true);
+    focusManager.setFocused(undefined);
+
+    // Assert: the opening read and the check before the resume, nothing after.
+    await waitFor(() => expect(server.posts(RESUME)).toHaveLength(1));
+    expect(server.posts(VALIDATE)).toHaveLength(2);
+    expect(within(d).getAllByText(resumeRefusal("not_paused")!)).toHaveLength(1);
+    expect(within(d).getByLabelText(/^n/)).toBeInTheDocument();
+  });
+
+  it("keeps the form when a later read of the inputs is refused", async () => {
+    // Arrange
+    const server = new Server();
+    server.validate = { status: 200, body: answer([INT_N]) };
+    server.checks = [{ status: 409, body: { code: "not_paused", error: "not paused" } }];
+    const { client } = renderDialog();
+    const d = await dialog();
+    await within(d).findByLabelText(/^n/);
+
+    // Act
+    await client.invalidateQueries({ queryKey: workflowsKeys.resumeInputs(EXEC) });
+
+    // Assert
+    await waitFor(() => expect(server.posts(VALIDATE)).toHaveLength(2));
+    expect(within(d).getByLabelText(/^n/)).toBeInTheDocument();
+    expect(within(d).queryByText(resumeRefusal("not_paused")!)).toBeNull();
   });
 
   it("shows a skeleton and disables Resume while the inputs load", async () => {
