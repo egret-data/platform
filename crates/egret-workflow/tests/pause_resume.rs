@@ -650,6 +650,15 @@ fn req(id: Uuid, inputs: Option<&serde_json::Map<String, Value>>) -> ResumeReque
     }
 }
 
+/// [`req`] as the route sends it for a `Pause` it read waiting: `expected`
+/// is that run (T5 review C1: inputs with no `expected` are `Moved`).
+fn at(id: Uuid, inputs: Option<&serde_json::Map<String, Value>>, run: Uuid) -> ResumeRequest<'_> {
+    ResumeRequest {
+        expected: Some(run),
+        ..req(id, inputs)
+    }
+}
+
 fn obj(v: Value) -> serde_json::Map<String, Value> {
     match v {
         Value::Object(m) => m,
@@ -789,7 +798,12 @@ async fn resume_with_inputs_writes_on_resume_and_resumed_and_the_next_task_reads
     let inputs = obj(json!({"who": "ada", "n": "3"}));
 
     // Act
-    let resumed = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+    let resumed = resume_with(
+        &pool,
+        &at(ex, Some(&inputs), run_id_of(&pool, ex, "p").await),
+    )
+    .await
+    .unwrap();
     settle_with_logs(&pool).await;
 
     // Assert
@@ -827,8 +841,15 @@ async fn a_refused_value_names_the_input_and_writes_nothing(pool: sqlx::PgPool) 
     let missing = obj(json!({"n": "3"}));
 
     // Act
-    let refused = resume_with(&pool, &req(ex, Some(&bad))).await.unwrap();
-    let refused_missing = resume_with(&pool, &req(ex, Some(&missing))).await.unwrap();
+    let refused = resume_with(&pool, &at(ex, Some(&bad), run_id_of(&pool, ex, "p").await))
+        .await
+        .unwrap();
+    let refused_missing = resume_with(
+        &pool,
+        &at(ex, Some(&missing), run_id_of(&pool, ex, "p").await),
+    )
+    .await
+    .unwrap();
 
     // Assert
     match &refused {
@@ -856,7 +877,12 @@ async fn s6_an_undeclared_key_is_refused(pool: sqlx::PgPool) {
     let inputs = obj(json!({"who": "ada", "n": "3", "zzz": 1}));
 
     // Act
-    let refused = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+    let refused = resume_with(
+        &pool,
+        &at(ex, Some(&inputs), run_id_of(&pool, ex, "p").await),
+    )
+    .await
+    .unwrap();
 
     // Assert
     match &refused {
@@ -881,9 +907,13 @@ async fn a_pause_without_on_resume_accepts_no_body_and_refuses_inputs(pool: sqlx
     let none = serde_json::Map::new();
 
     // Act
-    let refused = resume_with(&pool, &req(ex, Some(&some))).await.unwrap();
+    let refused = resume_with(&pool, &at(ex, Some(&some), run_id_of(&pool, ex, "p").await))
+        .await
+        .unwrap();
     let state_after_refusal = exec_state(&pool, ex).await;
-    let released = resume_with(&pool, &req(ex, Some(&none))).await.unwrap();
+    let released = resume_with(&pool, &at(ex, Some(&none), run_id_of(&pool, ex, "p").await))
+        .await
+        .unwrap();
     settle_everything(&pool, &handlers()).await;
 
     // Assert
@@ -914,7 +944,12 @@ async fn parallel_pauses_the_first_gets_the_inputs_and_the_others_on_resume_empt
     let inputs = obj(json!({"a": "x"}));
 
     // Act
-    let resumed = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+    let resumed = resume_with(
+        &pool,
+        &at(ex, Some(&inputs), run_id_of(&pool, ex, "p1").await),
+    )
+    .await
+    .unwrap();
     settle_everything(&pool, &handlers()).await;
 
     // Assert
@@ -977,6 +1012,64 @@ async fn a_lost_race_is_moved(pool: sqlx::PgPool) {
         Some("PAUSED")
     );
     assert_eq!(outputs_of(&pool, ex, "p").await, None);
+}
+
+/// T5 review C1: inputs sent where the route read no `Pause` waiting
+/// (`expected: None`) are not written into a `Pause` that waits under the
+/// lock: they were checked against nothing and passed no D7 gate.
+#[sqlx::test(migrations = "../../migrations")]
+async fn c1_inputs_where_the_route_read_no_pause_are_moved(pool: sqlx::PgPool) {
+    // Arrange
+    let (_ws, ex) = approve_waiting(&pool).await;
+    let inputs = obj(json!({"who": "ada", "n": "3"}));
+    let history = exec_history(&pool, ex).await;
+
+    // Act
+    let refused = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+
+    // Assert
+    assert_eq!(refused, Resumed::Refused(ResumeRefused::Moved));
+    assert_eq!(exec_history(&pool, ex).await, history);
+    assert_eq!(outputs_of(&pool, ex, "p").await, None);
+
+    // Control: the same inputs with the run the route read are written.
+    let run = run_id_of(&pool, ex, "p").await;
+    let resumed = resume_with(&pool, &at(ex, Some(&inputs), run))
+        .await
+        .unwrap();
+    assert_eq!(resumed, Resumed::Released(1));
+}
+
+/// T5 review M1: the route read a `Pause` waiting, and by the lock the
+/// execution is paused by hand instead: `Moved`, not a resume by hand.
+#[sqlx::test(migrations = "../../migrations")]
+async fn m1_a_manual_pause_after_the_read_is_moved(pool: sqlx::PgPool) {
+    // Arrange: `p` resumed, `log` running, then a manual pause.
+    let (ws, ex) = approve_waiting(&pool).await;
+    let run = run_id_of(&pool, ex, "p").await;
+    let inputs = obj(json!({"who": "ada", "n": "3"}));
+    assert_eq!(
+        resume_with(&pool, &at(ex, Some(&inputs), run))
+            .await
+            .unwrap(),
+        Resumed::Released(1)
+    );
+    assert_eq!(pause_by_hand(&pool, ws, ex).await.unwrap(), Paused::Done);
+    let history = exec_history(&pool, ex).await;
+
+    // Act: a resume whose read saw `p` waiting.
+    let moved = resume_with(&pool, &at(ex, None, run)).await.unwrap();
+
+    // Assert
+    assert_eq!(moved, Resumed::Refused(ResumeRefused::Moved));
+    assert_eq!(exec_history(&pool, ex).await, history);
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+
+    // Control: a resume whose read saw the manual pause resumes it.
+    assert_eq!(
+        resume_with(&pool, &req(ex, None)).await.unwrap(),
+        Resumed::ByHand
+    );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
@@ -1076,7 +1169,12 @@ async fn s7_a_secret_on_resume_value_is_sealed_and_a_later_task_reads_it_masked_
     let inputs = obj(json!({"tok": "s3cr3t"}));
 
     // Act
-    let resumed = resume_with(&pool, &req(ex, Some(&inputs))).await.unwrap();
+    let resumed = resume_with(
+        &pool,
+        &at(ex, Some(&inputs), run_id_of(&pool, ex, "p").await),
+    )
+    .await
+    .unwrap();
     settle_with_logs(&pool).await;
 
     // Assert

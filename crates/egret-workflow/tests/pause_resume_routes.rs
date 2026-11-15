@@ -771,6 +771,59 @@ async fn only_a_loop_until_waiting_is_still_409(pool: sqlx::PgPool) {
     let msg = expect_error(res, 409, None).await;
     assert!(msg.contains("Nothing to resume"), "{msg}");
     assert_eq!(exec_history(&pool, ex).await, history);
+
+    // T5 review C1: inputs where no `onResume` applies are refused up front.
+    let res = common::post(
+        &app,
+        &resume_path(ws, ex),
+        user,
+        json!({ "inputs": { "who": "x" } }),
+    )
+    .await;
+    expect_error(res, 400, Some("resume_inputs_unexpected")).await;
+    assert_eq!(exec_history(&pool, ex).await, history);
+}
+
+/// T5 review: a file part for an input that is not FILE is refused naming
+/// it, as a start refuses it, and a file the request already stored goes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_file_part_for_a_non_file_input_is_refused_and_its_uploads_deleted(pool: sqlx::PgPool) {
+    // Arrange
+    let fs = egret_workflow::storage::install_mem_for_tests();
+    let (_db, ws, user, app) = setup(&pool).await;
+    let ex = waiting(&pool, ws, APPROVE).await;
+    let run = run_id_of(&pool, ex, "p").await;
+
+    // Act: `doc` is stored first, then `who` (a STRING) comes as a file.
+    let res = post_multipart(
+        &app,
+        &resume_path(ws, ex),
+        user,
+        &[
+            Part::File("doc", "a.txt", b"hello"),
+            Part::Text("n", "3"),
+            Part::File("who", "who.txt", b"ada"),
+        ],
+    )
+    .await;
+    let validate = post_multipart(
+        &app,
+        &validate_path(ws, ex),
+        user,
+        &[Part::File("who", "who.txt", b"ada")],
+    )
+    .await;
+
+    // Assert
+    let msg = expect_error(res, 400, None).await;
+    assert!(msg.contains("`who`"), "{msg}");
+    assert!(msg.contains("not a FILE input"), "{msg}");
+    let listed = listed_under(&fs, &fs.resume_root(ws, "t", "approve", ex, "p", run)).await;
+    assert!(listed.objects.is_empty(), "{listed:?}");
+    assert_eq!(indexed_files(&pool, ex).await, 0);
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    let msg = expect_error(validate, 400, None).await;
+    assert!(msg.contains("`who`"), "{msg}");
 }
 
 // ── 9: FILE inputs (S2, D6; carried items 1-3) ──────────────────────────────

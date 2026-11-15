@@ -34814,7 +34814,7 @@
             }
           },
           "400": {
-            "description": "`resume_inputs_unexpected`: inputs (or any multipart part) were sent, and the execution is paused by hand or the waiting Pause declares no `onResume`. No code: `inputs` is not a JSON object; an input is refused by the start check, or names no `onResume` input of the Pause (the message names it) -- including a required input with no default when no body was sent; the flow runs `egret.sql`, the waiting Pause declares `onResume`, and the caller is not the flow's creator; a SECRET input was given and this deployment has no `secrets.master_key`; or a multipart part is refused. Nothing is written, and a file the request uploaded is deleted.",
+            "description": "`resume_inputs_unexpected`: inputs (or any multipart part) were sent, and the execution is paused by hand, the waiting Pause declares no `onResume`, or no Pause waits (only a `LoopUntil`). No code: `inputs` is not a JSON object; an input is refused by the start check, or names no `onResume` input of the Pause (the message names it) -- including a required input with no default when no body was sent; the flow runs `egret.sql`, the waiting Pause declares `onResume`, and the caller is not the flow's creator; a SECRET input was given and this deployment has no `secrets.master_key`; or a multipart part is refused (it names no `onResume` input, names one twice, carries a file for a non-`FILE` input, or a file whose extension is not allowed). Nothing is written, and a file the request uploaded is deleted.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34854,7 +34854,7 @@
             }
           },
           "409": {
-            "description": "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or another request resumed the Pause first. A resume that changes nothing must not answer 200.",
+            "description": "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or what waits changed after the request was read (another request resumed the Pause first, the execution was paused by hand since, or a Pause started waiting while inputs were sent to an execution read as having none). A resume that changes nothing must not answer 200.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34970,7 +34970,7 @@
             }
           },
           "400": {
-            "description": "`inputs` is not a JSON object, or a multipart part names no `onResume` input of the waiting Pause, names one twice, or is not readable.",
+            "description": "`inputs` is not a JSON object, or a multipart part names no `onResume` input of the waiting Pause, names one twice, carries a file for a non-`FILE` input or with an extension that input does not allow, or is not readable.",
             "content": {
               "application/json": {
                 "schema": {

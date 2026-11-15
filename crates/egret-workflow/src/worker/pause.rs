@@ -64,7 +64,11 @@ pub struct ResumeRequest<'a> {
     pub inputs: Option<&'a Map<String, Value>>,
     /// The files the route stored for this resume (S2), all under `expected`.
     pub files: &'a [crate::storage::StoredFile],
-    /// The `Pause` run the route read as waiting and stored files under.
+    /// The `Pause` run the route read as waiting and stored files under;
+    /// `None` when it read no `Pause` waiting (paused by hand, or only a
+    /// `LoopUntil`). Under the lock, a mismatch is `Moved`: `Some` and the
+    /// execution now paused by hand or another run first; `None` with inputs
+    /// or files and a `Pause` now waiting.
     pub expected: Option<Uuid>,
 }
 
@@ -77,7 +81,9 @@ pub enum ResumeRefused {
     /// A value refused, a key not declared (S6), a FILE not readable, or a
     /// SECRET with no master key (S7): the message names the input.
     Invalid(String),
-    /// The waiting `Pause` run is not the one the route read (a lost race).
+    /// What waits under the lock is not what the route read (a lost race):
+    /// another `Pause` run, a manual pause where it read a `Pause`, or a
+    /// `Pause` where it read none and inputs were sent.
     Moved,
 }
 
@@ -103,6 +109,11 @@ pub async fn resume_with(pool: &PgPool, req: &ResumeRequest<'_>) -> Result<Resum
         let posted = req.inputs.cloned().unwrap_or_default();
         let before = state.clone();
         if crate::executor::paused_by_hand(&state) {
+            // The route chose a `Pause` run, and the execution is now paused
+            // by hand instead: what it read is gone (T5 review M1).
+            if req.expected.is_some() {
+                return Ok(Resumed::Refused(ResumeRefused::Moved));
+            }
             if !posted.is_empty() {
                 return Ok(Resumed::Refused(ResumeRefused::InputsUnexpected));
             }
@@ -124,7 +135,15 @@ pub async fn resume_with(pool: &PgPool, req: &ResumeRequest<'_>) -> Result<Resum
         .fetch_one(&mut *conn)
         .await
         .map_err(db_err)?;
-        if req.expected.is_some_and(|e| e != chosen_id) {
+        // What the route read must be what waits under the lock (T5 review
+        // C1, M1). A `Pause` it did not see takes no inputs or files: they
+        // were checked against nothing, and the D7 gate was not asked for it.
+        // With none, the release is today's resume of every waiting `Pause`.
+        let moved = match req.expected {
+            Some(e) => e != chosen_id,
+            None => !posted.is_empty() || !req.files.is_empty(),
+        };
+        if moved {
             return Ok(Resumed::Refused(ResumeRefused::Moved));
         }
         let flow = crate::spec::parse(&ctx.source).map_err(|e| {

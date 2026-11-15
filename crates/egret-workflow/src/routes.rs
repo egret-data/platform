@@ -3295,6 +3295,10 @@ async fn read_parts(
             // D8: a validate reads the file and drops it; the would-be value
             // is its name, not a URI.
             Some(file_name) if matches!(of.sink, PartSink::Discard) => {
+                // The upload's own checks (a FILE input, a name, an allowed
+                // extension), so a validate refuses what a resume would.
+                crate::storage::inputs::admit(input, &file_name)
+                    .map_err(|e| upload_refusal(e, gate, limit))?;
                 let mut field = field;
                 while field
                     .chunk()
@@ -3567,8 +3571,8 @@ fn resume_inputs_unexpected(id: Uuid) -> ExecOpError {
         StatusCode::BAD_REQUEST,
         RESUME_INPUTS_UNEXPECTED_CODE,
         format!(
-            "execution {id} takes no inputs to resume: it is paused by hand, or the waiting \
-             Pause declares no onResume"
+            "execution {id} takes no inputs to resume: it is paused by hand, the waiting Pause \
+             declares no onResume, or no Pause waits"
         ),
     )
 }
@@ -3634,11 +3638,11 @@ fn resume_answer(
     ),
     responses(
         (status = 200, description = "Paused by hand: the execution is `RUNNING` again and runs on. A `Pause` waiting: the first one in run order ends `SUCCESS` with `outputs.onResume` (the checked values; a SECRET value is `******`, a FILE value the URI of the file stored under the Pause run) and `outputs.resumed` (`by`, `on`, `to`), whatever its `pauseDuration:` or `timeout:`; every other waiting `Pause` ends `SUCCESS` with `onResume: {}`; the execution then runs on. The body is its detail afterwards.", body = ExecutionDto),
-        (status = 400, description = "`resume_inputs_unexpected`: inputs (or any multipart part) were sent, and the execution is paused by hand or the waiting Pause declares no `onResume`. No code: `inputs` is not a JSON object; an input is refused by the start check, or names no `onResume` input of the Pause (the message names it) -- including a required input with no default when no body was sent; the flow runs `egret.sql`, the waiting Pause declares `onResume`, and the caller is not the flow's creator; a SECRET input was given and this deployment has no `secrets.master_key`; or a multipart part is refused. Nothing is written, and a file the request uploaded is deleted.", body = egret_core::http::ErrorBody),
+        (status = 400, description = "`resume_inputs_unexpected`: inputs (or any multipart part) were sent, and the execution is paused by hand, the waiting Pause declares no `onResume`, or no Pause waits (only a `LoopUntil`). No code: `inputs` is not a JSON object; an input is refused by the start check, or names no `onResume` input of the Pause (the message names it) -- including a required input with no default when no body was sent; the flow runs `egret.sql`, the waiting Pause declares `onResume`, and the caller is not the flow's creator; a SECRET input was given and this deployment has no `secrets.master_key`; or a multipart part is refused (it names no `onResume` input, names one twice, carries a file for a non-`FILE` input, or a file whose extension is not allowed). Nothing is written, and a file the request uploaded is deleted.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash, or no longer exists at all. A disabled flow is not refused.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or another request resumed the Pause first. A resume that changes nothing must not answer 200.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or what waits changed after the request was read (another request resumed the Pause first, the execution was paused by hand since, or a Pause started waiting while inputs were sent to an execution read as having none). A resume that changes nothing must not answer 200.", body = egret_core::http::ErrorBody),
         (status = 413, description = "An uploaded file is over `workflow.storage.max_file_bytes`, a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is written.", body = egret_core::http::ErrorBody),
         (status = 415, description = "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
@@ -3756,6 +3760,13 @@ async fn resume_execution(
                 _ => None,
             },
         };
+        // No `onResume` applies (paused by hand, a `Pause` without one, or
+        // only a `LoopUntil`): inputs are refused here, before the worker,
+        // as a multipart part is (T5 review C1). The worker refuses them
+        // again under the lock.
+        if on_resume.is_empty() && inputs.as_ref().is_some_and(|m| !m.is_empty()) {
+            return Err(op(resume_inputs_unexpected(id)));
+        }
         (inputs, Vec::new(), None)
     };
 
@@ -3818,7 +3829,7 @@ async fn resume_execution(
     ),
     responses(
         (status = 200, description = "Every `onResume` input of the first waiting Pause, with the start check's errors; an empty body answers each with its default; an empty list when the execution is paused by hand or the Pause has no `onResume`. Nothing is stored: a file part is read and dropped, and its value is its file name. No audit. A SECRET input's `value` is `******`. `id` and `namespace` are the flow's.", body = ValidateInputsDto),
-        (status = 400, description = "`inputs` is not a JSON object, or a multipart part names no `onResume` input of the waiting Pause, names one twice, or is not readable.", body = egret_core::http::ErrorBody),
+        (status = 400, description = "`inputs` is not a JSON object, or a multipart part names no `onResume` input of the waiting Pause, names one twice, carries a file for a non-`FILE` input or with an extension that input does not allow, or is not readable.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission (the resume's), or the workflows module is disabled for this workspace.", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace; or its flow is in the trash, or no longer exists at all, as the resume answers.", body = egret_core::http::ErrorBody),

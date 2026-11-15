@@ -138,7 +138,7 @@ pub async fn upload_resume_input(
 
 /// The checks before a byte is stored: a FILE input, a file name, an
 /// extension `allowedFileExtensions` accepts.
-fn admit(input: &Input, file_name: &str) -> std::result::Result<(), UploadError> {
+pub(crate) fn admit(input: &Input, file_name: &str) -> std::result::Result<(), UploadError> {
     if input.r#type != InputType::File {
         return Err(UploadError::Author(format!(
             "Invalid value for input `{}`: a file was uploaded for it, and it is not a FILE input",
