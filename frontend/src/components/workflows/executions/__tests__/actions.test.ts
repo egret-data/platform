@@ -49,17 +49,17 @@ describe("canResume", () => {
 
   it("is enabled when a PAUSED run is a Pause, unbounded or bounded", () => {
     for (const rw of ["NEVER", "TERMINAL:SUCCESS", "TERMINAL:FAILED"]) {
-      expect(canResume({ runs: [run("SUCCESS", null), run("PAUSED", rw)] })).toEqual({ ok: true });
+      expect(canResume({ paused_by_hand: false, runs: [run("SUCCESS", null), run("PAUSED", rw)] })).toEqual({ ok: true });
     }
   });
 
   it("is disabled with the spec's reason when only a LoopUntil waits", () => {
-    expect(canResume({ runs: [run("PAUSED", "ITERATE"), run("SUCCESS", null)] })).toEqual({ ok: false, reason: LOOP_WAIT_REASON });
+    expect(canResume({ paused_by_hand: false, runs: [run("PAUSED", "ITERATE"), run("SUCCESS", null)] })).toEqual({ ok: false, reason: LOOP_WAIT_REASON });
     expect(LOOP_WAIT_REASON).toBe("Waiting on a loop condition, not a Pause task");
   });
 
   it("reads only PAUSED runs: a finished pause that kept its resume_with does not count", () => {
     // A naturally ended Pause keeps `TERMINAL:SUCCESS` on its row.
-    expect(canResume({ runs: [run("SUCCESS", "TERMINAL:SUCCESS"), run("PAUSED", "ITERATE")] }).ok).toBe(false);
+    expect(canResume({ paused_by_hand: false, runs: [run("SUCCESS", "TERMINAL:SUCCESS"), run("PAUSED", "ITERATE")] }).ok).toBe(false);
   });
 });

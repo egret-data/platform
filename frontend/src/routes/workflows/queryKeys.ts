@@ -38,6 +38,7 @@ export const workflowsKeys = {
   version: (id: string, v: number) => ["workflows", "flow", id, "versions", v] as const,
   schema: (ws: string) => ["workflows", "ws", ws, "schema"] as const,
   execution: (id: string) => ["workflows", "execution", id] as const,
+  resumeInputs: (id: string) => ["workflows", "execution", id, "resume-inputs"] as const,
   /**
    * The direct children of an execution (`GET …/executions?parent=`), under
    * `execution(id)` so refreshing the execution refreshes them too.
