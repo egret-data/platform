@@ -749,6 +749,11 @@ pub struct Pause {
     pub behavior: Option<Property<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_pause: Option<Box<Task>>,
+    /// `onResume` (`Pause.java:193`): inputs a resume collects, written to this
+    /// run's outputs as `onResume` (package 7c D4, D5). `None` and `Some([])`
+    /// are the same: no inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_resume: Option<Vec<crate::models::Input>>,
     /// Kestra `AbstractBranch._finally` (`AbstractBranch.java:30-35`), the list
     /// run after the block has ended, whatever its state.
     #[serde(

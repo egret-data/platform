@@ -396,6 +396,13 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
     http_findings(flow, report);
     schedule_findings(flow, report);
     input_save_findings(&flow.inputs, report);
+    for (path, task) in crate::spec::path::every_task(flow) {
+        if let TaskKind::Pause(p) = &task.kind {
+            if let Some(list) = &p.on_resume {
+                input_save_findings_at(list, &format!("{path}.onResume"), report);
+            }
+        }
+    }
     output_save_findings(flow, report);
     retry_new_execution_in_loop_findings(flow, report);
 }
@@ -789,6 +796,15 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
     validate_after_execution(flow, &mut report);
 
     validate_inputs(&flow.inputs, &mut report);
+    // Package 7c D4: a `Pause`'s `onResume` is an input list, checked as the
+    // flow's `inputs:` are, under the task's path (`tasks.<id>.onResume`).
+    for (path, task) in crate::spec::path::every_task(flow) {
+        if let TaskKind::Pause(p) = &task.kind {
+            if let Some(list) = &p.on_resume {
+                validate_inputs_at(list, &format!("{path}.onResume"), &mut report);
+            }
+        }
+    }
 
     for trigger in &flow.triggers {
         validate_trigger(trigger, &mut report);
@@ -1379,6 +1395,12 @@ fn retry_new_execution_in_loop_findings(flow: &Flow, report: &mut ValidationRepo
 /// `Option`-then-validate debt for it the way `FlowOutput::type` has, so
 /// nothing else on `Input` is owed here.
 fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
+    validate_inputs_at(inputs, "inputs", report);
+}
+
+/// [`validate_inputs`] for an input list found at `list` (`inputs`, or a
+/// `Pause`'s `tasks.<id>.onResume`), so findings carry that path.
+fn validate_inputs_at(inputs: &[Input], list: &str, report: &mut ValidationReport) {
     // kestra: `ArrayInputValidator` and `MultiselectInputValidator` --
     // character for character the same four-way test in both files, on the
     // two input types that have an `itemType` at all. An `ARRAY of ARRAY` and
@@ -1413,7 +1435,7 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
                         .and_then(|v| v.as_str().map(str::to_string))
                         .unwrap_or_else(|| format!("{item:?}")),
                 ),
-                path: format!("inputs.{}.itemType", input.id),
+                path: format!("{list}.{}.itemType", input.id),
             });
         }
     }
@@ -1444,7 +1466,7 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
                     input.id,
                     bad.join(", ")
                 ),
-                path: format!("inputs.{}.allowedFileExtensions", input.id),
+                path: format!("{list}.{}.allowedFileExtensions", input.id),
             });
         }
     }
@@ -1458,7 +1480,7 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
             report.errors.push(Finding {
                 code: "duplicate_input_id",
                 message: format!("input id '{id}' is declared more than once"),
-                path: format!("inputs.{id}"),
+                path: format!("{list}.{id}"),
             });
         }
     }
@@ -1497,7 +1519,11 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
 ///
 /// Not added (D11): "a default needs `required: true`".
 fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
-    input_dependency_findings(inputs, report);
+    input_save_findings_at(inputs, "inputs", report);
+}
+
+fn input_save_findings_at(inputs: &[Input], list: &str, report: &mut ValidationReport) {
+    input_dependency_findings_at(inputs, list, report);
     for input in inputs {
         if input.defaults.is_some() && input.prefill.is_some() {
             report.errors.push(Finding {
@@ -1506,7 +1532,7 @@ fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
                     "input '{}': Inputs with a default value cannot also have a prefill.",
                     input.id
                 ),
-                path: format!("inputs.{}.prefill", input.id),
+                path: format!("{list}.{}.prefill", input.id),
             });
         }
         if input.r#type == InputType::File {
@@ -1514,7 +1540,7 @@ fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
                 report.errors.push(Finding {
                     code: "input_file_defaults_invalid",
                     message: format!("input '{}': {why}", input.id),
-                    path: format!("inputs.{}.defaults", input.id),
+                    path: format!("{list}.{}.defaults", input.id),
                 });
             }
         }
@@ -1522,7 +1548,7 @@ fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
             report.errors.push(Finding {
                 code: "input_bound_invalid",
                 message: format!("input '{}': invalid `{field}`: {cause}", input.id),
-                path: format!("inputs.{}.{field}", input.id),
+                path: format!("{list}.{}.{field}", input.id),
             });
         }
         if matches!(input.r#type, InputType::String | InputType::Secret) {
@@ -1531,7 +1557,7 @@ fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
                     report.errors.push(Finding {
                         code: "input_validator_invalid",
                         message: format!("input '{}': invalid pattern [{v}]", input.id),
-                        path: format!("inputs.{}.validator", input.id),
+                        path: format!("{list}.{}.validator", input.id),
                     });
                 }
             }
@@ -1540,7 +1566,7 @@ fn input_save_findings(inputs: &[Input], report: &mut ValidationReport) {
 }
 
 /// The two `dependsOn` checks of [`input_save_findings`].
-fn input_dependency_findings(inputs: &[Input], report: &mut ValidationReport) {
+fn input_dependency_findings_at(inputs: &[Input], list: &str, report: &mut ValidationReport) {
     let mut order: Vec<&str> = Vec::new();
     let mut graph: HashMap<&str, Vec<&str>> = HashMap::new();
     for input in inputs {
@@ -1560,7 +1586,7 @@ fn input_dependency_findings(inputs: &[Input], report: &mut ValidationReport) {
                     message: format!(
                         "Input with id '{id}' depends on a non-existent input '{dep}'."
                     ),
-                    path: format!("inputs.{id}.dependsOn.inputs"),
+                    path: format!("{list}.{id}.dependsOn.inputs"),
                 });
             }
         }
@@ -1574,7 +1600,7 @@ fn input_dependency_findings(inputs: &[Input], report: &mut ValidationReport) {
                     "Cycle dependency detected for input with id '{id}': [{}]",
                     cycle.join(", ")
                 ),
-                path: format!("inputs.{id}.dependsOn"),
+                path: format!("{list}.{id}.dependsOn"),
             });
         }
     }
@@ -6785,5 +6811,81 @@ mod loop_output_tests {
                 "{want}: {found:?}"
             );
         }
+    }
+
+    const ON_RESUME_ALL_TYPES: &str = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: s\n        type: STRING\n      - id: n\n        type: INT\n        min: 1\n      - id: x\n        type: FLOAT\n      - id: b\n        type: BOOL\n        defaults: true\n      - id: d\n        type: DATE\n      - id: dt\n        type: DATETIME\n      - id: t\n        type: TIME\n      - id: du\n        type: DURATION\n      - id: f\n        type: FILE\n        required: false\n      - id: sec\n        type: SECRET\n        required: false\n      - id: sel\n        type: SELECT\n        values: [a, b]\n      - id: ms\n        type: MULTISELECT\n        values: [a, b]\n      - id: arr\n        type: ARRAY\n        itemType: INT\n      - id: j\n        type: JSON\n      - id: u\n        type: URI\n      - id: e\n        type: EMAIL\n      - id: y\n        type: YAML\n        required: false\n  - id: after\n    type: io.kestra.plugin.core.log.Log\n    message: \"{{ outputs.p.onResume.s }}\"\n";
+
+    #[test]
+    fn on_resume_with_every_input_type_publishes_without_a_finding() {
+        let flow = crate::spec::parse(ON_RESUME_ALL_TYPES).expect("parses");
+        let r = crate::spec::validate_source(ON_RESUME_ALL_TYPES, &flow);
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert!(
+            r.warnings.iter().all(|w| !w.path.contains("onResume")),
+            "{r:?}"
+        );
+        assert!(crate::executor::build_plan(ON_RESUME_ALL_TYPES).is_ok());
+    }
+
+    #[test]
+    fn a_bad_on_resume_input_is_refused_at_its_path() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: a\n        type: ARRAY\n        itemType: SECRET\n      - id: f\n        type: FILE\n        allowedFileExtensions: [csv]\n      - id: dup\n        type: STRING\n      - id: dup\n        type: STRING\n";
+        let flow = crate::spec::parse(src).expect("parses");
+        let r = crate::spec::validate_source(src, &flow);
+        let at = |code: &str| {
+            r.errors
+                .iter()
+                .find(|e| e.code == code)
+                .map(|e| e.path.clone())
+        };
+        assert_eq!(
+            at("input_item_type_invalid").as_deref(),
+            Some("tasks.p.onResume.a.itemType")
+        );
+        assert_eq!(
+            at("input_file_extension_invalid").as_deref(),
+            Some("tasks.p.onResume.f.allowedFileExtensions")
+        );
+        assert_eq!(
+            at("duplicate_input_id").as_deref(),
+            Some("tasks.p.onResume.dup")
+        );
+    }
+
+    #[test]
+    fn a_bad_on_resume_default_or_dependency_is_refused_at_save_at_its_path() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: n\n        type: INT\n        min: abc\n      - id: m\n        type: STRING\n        dependsOn:\n          inputs: [nope]\n";
+        let flow = crate::spec::parse(src).expect("parses");
+        let r = crate::spec::validate_source(src, &flow);
+        let paths: Vec<_> = r.errors.iter().map(|e| (e.code, e.path.as_str())).collect();
+        assert!(
+            paths.contains(&("input_bound_invalid", "tasks.p.onResume.n.min")),
+            "{paths:?}"
+        );
+        assert!(
+            paths.contains(&(
+                "input_depends_on_unknown",
+                "tasks.p.onResume.m.dependsOn.inputs"
+            )),
+            "{paths:?}"
+        );
+        // A save-only finding: the run gate does not raise it.
+        assert!(crate::spec::validate_for_run(&flow)
+            .errors
+            .iter()
+            .all(|e| e.code != "input_depends_on_unknown"));
+    }
+
+    #[test]
+    fn on_resume_ids_may_repeat_a_flow_input_id_and_the_other_pause_gaps_stay() {
+        let src = "id: f\nnamespace: a.b\ninputs:\n  - id: ok\n    type: STRING\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n";
+        let flow = crate::spec::parse(src).expect("parses");
+        assert!(crate::spec::validate_source(src, &flow).errors.is_empty());
+        let gap = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n    behavior: RESUME\n";
+        let flow = crate::spec::parse(gap).expect("parses");
+        assert!(crate::spec::validate_source(gap, &flow)
+            .errors
+            .iter()
+            .any(|e| e.code == "unsupported_pause_property" && e.path == "tasks.p.behavior"));
     }
 }
