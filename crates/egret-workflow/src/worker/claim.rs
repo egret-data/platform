@@ -4270,19 +4270,11 @@ pub(crate) fn checked_inputs_for(
         .map(serde_json::Value::Object)
 }
 
-/// Every declared input's outcome under [`checked_inputs`]'s renderer, for the
-/// validate endpoint (package #3b, D14): the same check, listing every input
-/// instead of stopping at the first error. **The values are clear**, SECRET
-/// ones included (review M6); the caller masks them before it answers.
-pub(crate) fn input_outcomes(
-    flow: &crate::models::Flow,
-    posted: &serde_json::Value,
-) -> Vec<crate::inputs_check::InputOutcome> {
-    input_outcomes_for(flow, &flow.inputs, posted)
-}
-
-/// [`input_outcomes`] against another declared list -- a `Pause`'s
-/// `onResume` (package 7c D5).
+/// Every input of `declared` (a flow's `inputs:`, or a `Pause`'s `onResume`,
+/// package 7c D8) under [`checked_inputs`]'s renderer, for the validate
+/// endpoints (package #3b, D14): the same check, listing every input instead
+/// of stopping at the first error. **The values are clear**, SECRET ones
+/// included (review M6); the caller masks them before it answers.
 pub(crate) fn input_outcomes_for(
     flow: &crate::models::Flow,
     declared: &[crate::models::Input],
