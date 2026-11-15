@@ -92,11 +92,35 @@ CREATE INDEX catalog_clients_service_account_idx
 
 ---
 
-### Task 4: `Credential` repo + lifecycle + the SA-scoped credential API
+### Task 4: Owner-on-create — every `create_client` path attaches a service account
+
+> Discovered during execution: the fail-closed verifier (Task 2) refuses a catalog
+> client with a NULL owner, so EVERY catalog-client creation path must attach an owner
+> or new engines/warehouses break. There are ~5 call sites, so this is its own task
+> (the user-facing credential API is Task 5).
+
+**Files:**
+- Modify: `crates/egret-catalog-engine/src/store/embedded.rs` (`NewClient` + `create_client` insert ~:514-540 — add a REQUIRED `service_account_id: Uuid` field so the compiler forces every caller to supply one).
+- Modify the user-facing creator: `crates/egret-catalog-engine/src/warehouse_admin/mod.rs` (`create_client` route ~:855) — take/resolve an owning SA (synthesize a workspace-scoped SA for the client like the Task-3 backfill does, or accept one; keep it consistent with the backfill's per-client-SA model).
+- Modify the engine-provisioning callers: `crates/egret-engine-mgmt/src/catalog_apply.rs` (~:1159) and `crates/egret-engine-mgmt/src/engines.rs` (~:4023, ~:5055, ~:10153) — each engine's minted catalog client gets a synthesized workspace-scoped SA (reuse the backfill primitives `insert_service_with` + `ensure_username_via` + the `service_accounts` insert; name/email keyed off the engine or client id for determinism/idempotency). Factor the "ensure an SA owns this new catalog client" logic into ONE reusable helper (e.g. in egret-auth or a small shared fn) rather than copy-pasting across 5 sites.
+- Test: DB-gated — creating a catalog client (user-facing route AND an engine-provisioning path) yields a client with a non-NULL `service_account_id`, and that client then PASSES the Task-2 verifier (end-to-end: create → verify succeeds), proving no new NULL-owner clients are minted.
+
+**Interfaces:**
+- `NewClient` gains `service_account_id: Uuid` (required). `create_client` writes it. The "ensure/synthesize an owning SA" helper: `ensure_catalog_client_sa(tx, workspace_id, deterministic_key, name) -> Uuid` (ledger-correct), reused by the backfill (Task 3) if practical and by every creator here.
+
+- [ ] **Step 1: Write failing tests** — a catalog client created via the warehouse-admin route has a non-NULL owner and verifies; an engine-provisioning mint has a non-NULL owner and verifies. (Reuse Task 1/2 seed helpers + the Task-2 verifier.)
+- [ ] **Step 2: Run, verify fail** (the `service_account_id` field / helper absent).
+- [ ] **Step 3: Implement** — add the required field to `NewClient`; write the one shared `ensure_catalog_client_sa` helper (ledger-correct, deterministic/idempotent, mirroring Task 3); fix every `create_client` caller to call it and pass the SA. Keep the engine-provisioning ordering intact (the existing code is careful about mint-before/after — do not reorder; only thread the owner through). If a caller lacks a workspace in scope, derive it from the warehouse (`warehouses.workspace_id`).
+- [ ] **Step 4: Run, verify pass.** Run the egret-engine-mgmt + egret-catalog-engine suites (this task touches their creation paths) — they must stay green.
+- [ ] **Step 5: Commit.** `feat(sa): every catalog client is created with an owning service account (SA2)`
+
+---
+
+### Task 5: `Credential` repo + lifecycle + the SA-scoped credential API
 
 **Files:**
 - Create: a `Credential` abstraction — `crates/egret-controlplane/src/access/credentials.rs` (or a small shared module) reading/writing both `dataapi.clients` and `catalog.catalog_clients`.
-- Modify: `crates/egret-controlplane/src/access/mod.rs` (mount the routes), the catalog-client creation path (`egret-catalog-engine/src/store/embedded.rs` insert ~:533) to require/accept an owning SA.
+- Modify: `crates/egret-controlplane/src/access/mod.rs` (mount the routes). (Owner-on-create already landed in Task 4 — this task is the read/list + lifecycle + the user-facing credential CRUD under the SA.)
 - Test: DB-gated in `crates/egret-controlplane/tests/` — list across audiences; create a catalog credential (carries warehouse/role) under an SA; rotate/revoke/set-expiry; the workspace-consistency guard.
 
 **Interfaces:**
@@ -108,23 +132,23 @@ CREATE INDEX catalog_clients_service_account_idx
 
 - [ ] **Step 1: Write failing tests** (model on `service_account_principals.rs`): list shows both audiences with correct status; create catalog cred under a workspace SA in the SAME workspace succeeds, in a DIFFERENT workspace is refused (workspace-consistency guard: a workspace SA owns only its workspace's credentials; a platform SA may own catalog creds in any workspace); rotate sets `revoked_at` on the old + returns a new secret; revoke makes the catalog verifier refuse (reuse Task 2); set-expiry in the past makes verify refuse.
 - [ ] **Step 2: Run, verify fail.**
-- [ ] **Step 3: Implement** the `Credential` repo (dispatch by audience to the right table), the routes + handlers (authz first on every handler), the workspace-consistency guard, and owner-attachment on creation. Reuse the dataapi rotate/revoke logic; add the equivalent for catalog (`revoked_at`). utoipa-annotate + register DTOs/paths (regen is Task 5).
+- [ ] **Step 3: Implement** the `Credential` repo (dispatch by audience to the right table), the routes + handlers (authz first on every handler), the workspace-consistency guard. Owner-attachment on creation already landed in Task 4; here the user-facing credential-create reuses it. Reuse the dataapi rotate/revoke logic; add the equivalent for catalog (`revoked_at`). utoipa-annotate + register DTOs/paths (regen is Task 6).
 - [ ] **Step 4: Run, verify pass.** Existing SA1 `service_account_principals` + catalog tests still pass.
 - [ ] **Step 5: Commit.** `feat(sa): manage service-account credentials across both audiences (SA2)`
 
 ---
 
-### Task 5: OpenAPI + client regen; full gate
+### Task 6: OpenAPI + client regen; full gate
 
 - [ ] **Step 1:** `CARGO_TARGET_DIR=target-sa2 cargo run -p egret-bin --bin egret -- openapi > openapi.json`; then `frontend/` `npm run gen:api`.
 - [ ] **Step 2:** confirm the credential routes appear + CI drift tests pass (`committed_openapi_json_is_current`, `generated_client_was_emitted_from_the_committed_spec`).
-- [ ] **Step 3:** full gate — `cargo fmt --check`; `cargo clippy -p egret-catalog-engine -p egret-controlplane -p egret-bin -p egret-machine-idp --all-targets -- -D warnings`; `cargo test -p egret-catalog-engine -p egret-controlplane -p egret-bin` (DB-gated run).
+- [ ] **Step 3:** full gate — `cargo fmt --check`; `cargo clippy -p egret-catalog-engine -p egret-controlplane -p egret-bin -p egret-engine-mgmt -p egret-machine-idp --all-targets -- -D warnings`; `cargo test -p egret-catalog-engine -p egret-controlplane -p egret-bin -p egret-engine-mgmt` (DB-gated run — includes the engine-provisioning suites touched by Task 4).
 - [ ] **Step 4:** commit `chore(sa): regenerate OpenAPI + client for credential routes (SA2)`.
 
 ---
 
 ## Self-Review
-- **Spec coverage:** schema+backfill → T1/T3; kill switch → T2; lifecycle + Credential repo → T4 (+ T1 columns); SA-scoped API → T4; regen → T5. Deferred items (FE, creation-UI consolidation, platform_admin invariant) named in Global Constraints.
-- **Security:** T2 fail-closed on NULL SA + mirrors the dataapi `Ok(None)`-for-everything oracle discipline; gating BOTH `verify` and `current` closes the cache-staleness hole; backfill is ledger-correct (no hand-minted usernames).
-- **No placeholders:** the only "confirm in code" notes are the credential-mint permission string and the exact dataapi rotate/revoke helpers to reuse — both read during planning from named files.
-- **Type consistency:** `service_account_id`, `revoked_at`, `expires_at`, the `Credential`/audience shape, and the `/service-accounts/{id}/credentials` routes are identical across T1–T5.
+- **Spec coverage:** schema+backfill → T1/T3; kill switch → T2; owner-on-create everywhere → T4; lifecycle + Credential repo + SA-scoped API → T5; regen + full gate → T6. Deferred items (FE, creation-UI consolidation, platform_admin invariant) named in Global Constraints.
+- **Security:** T2 fail-closed on NULL SA + mirrors the dataapi `Ok(None)`-for-everything oracle discipline; gating BOTH `verify` and `current` closes the cache-staleness hole; backfill is ledger-correct (no hand-minted usernames); T4 makes `NewClient.service_account_id` REQUIRED so the compiler forbids any new NULL-owner client.
+- **No placeholders:** the only "confirm in code" notes are the credential-mint permission string, the exact dataapi rotate/revoke helpers, and the ~5 `create_client` call sites — all read during planning from named files.
+- **Type consistency:** `service_account_id`, `revoked_at`, `expires_at`, the `Credential`/audience shape, and the `/service-accounts/{id}/credentials` routes are identical across T1–T6.
