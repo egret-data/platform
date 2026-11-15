@@ -44,6 +44,15 @@ async fn create_client_then_verify() {
     assert!(created.client_id.starts_with("egret_"));
     assert!(!created.client_secret.is_empty());
 
+    // A client verifies only while an active service account owns it (SA2).
+    let sa = common::seed_service_account(&store, ws).await;
+    sqlx::query("UPDATE catalog.catalog_clients SET service_account_id = $1 WHERE client_id = $2")
+        .bind(sa)
+        .bind(&created.client_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
     // Correct secret verifies + returns (warehouse name, role name).
     let vc = store
         .verify_client(&created.client_id, &created.client_secret)
@@ -92,6 +101,14 @@ async fn current_mirrors_verify_without_the_secret() {
             warehouse_id: wh.id,
             catalog_role_id: role.id,
         })
+        .await
+        .unwrap();
+
+    let sa = common::seed_service_account(&store, ws).await;
+    sqlx::query("UPDATE catalog.catalog_clients SET service_account_id = $1 WHERE id = $2")
+        .bind(sa)
+        .bind(created.id)
+        .execute(store.pool())
         .await
         .unwrap();
 

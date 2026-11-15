@@ -34,3 +34,28 @@ pub async fn seed_workspace_with_slug(s: &CatalogStore) -> (Uuid, String) {
         .expect("seed workspace");
     (id, slug)
 }
+
+/// Seed a service account (a `provider='service'` user plus its
+/// `service_accounts` row) in `workspace_id` and return its user id.
+pub async fn seed_service_account(s: &CatalogStore, workspace_id: Uuid) -> Uuid {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let sa: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (provider, email, name) VALUES ('service', $1, $2) RETURNING id",
+    )
+    .bind(format!("sa-{suffix}@service.invalid"))
+    .bind(format!("sa-{suffix}"))
+    .fetch_one(s.pool())
+    .await
+    .expect("seed service user");
+    sqlx::query(
+        "INSERT INTO service_accounts (user_id, scope, workspace_id, name) \
+         VALUES ($1, 'workspace', $2, $3)",
+    )
+    .bind(sa)
+    .bind(workspace_id)
+    .bind(format!("sa-{suffix}"))
+    .execute(s.pool())
+    .await
+    .expect("seed service account");
+    sa
+}
