@@ -173,6 +173,8 @@ Hiện egret chỉ cảnh báo khi gặp `onResume` và ghi rằng nó thuộc d
 7. **Giao diện đọc danh sách input từ `resume/validate`.** Giao diện Kestra đọc `task.inputs` của task đang dừng (`Resume.vue:72-81`), không phải `onResume`, và không bao giờ gọi `validateResume`. egret dùng câu trả lời của server, nên form khớp với những gì server kiểm tra.
 8. **Pause bằng tay bị từ chối khi còn run nào đang chờ (Q5).** Kestra pause một execution mà `Pause` hay `LoopUntil` của nó đã đang chờ (`ES.pause` chỉ kiểm tra `isRunning()`), và bộ hẹn giờ của run đang chờ khi đó có thể kết thúc pause bằng tay. egret trả 409 `not_running`, nên D1 luôn đúng và một pause bằng tay không thể bị bộ hẹn giờ huỷ.
 
+9. **Pause bằng tay được nhận từ `RESTARTED`** (D3; thêm 2026-11-16). `ES.pause` của Kestra cần `isRunning()`, vốn chỉ là `RUNNING` hoặc `KILLING` (`core/src/main/java/io/kestra/core/models/flows/State.java:304-306`). `RESTARTED` của egret là trạng thái đang chạy mà lần `advance` kế tiếp chuyển sang `RUNNING`, nên từ chối nó sẽ từ chối một pause trong khoảng ngay sau restart hay resume; hiệu ứng giống như pause muộn hơn một chút.
+
 Ghi chú tương đương (không phải điểm khác), 2026-11-15:
 
 - **Các iteration của loop vẫn tiếp tục bắt đầu dưới một loop gốc bị pause (Q3)**, như ở Kestra (`LoopExecutionEventMessageHandler.java:94-182`; egret `worker/spawn.rs:735-746`).

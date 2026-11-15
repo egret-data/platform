@@ -171,6 +171,8 @@ egret today warns on `onResume` and names roadmap row #9 (`spec/keys.rs`). `docs
 7. **The UI reads the inputs from `resume/validate`.** Kestra's UI reads `task.inputs` of the paused task (`Resume.vue:72-81`), not `onResume`, and never calls `validateResume`. egret uses the server's answer, so the form matches what the server checks.
 8. **A manual pause is refused while any run waits (Q5).** Kestra pauses an execution whose `Pause` or `LoopUntil` is already waiting (`ES.pause` checks only `isRunning()`), and the waiting run's timer can then end the manual pause. egret answers 409 `not_running`, so D1 always holds and a manual pause cannot be undone by a timer.
 
+9. **A manual pause is accepted from `RESTARTED`** (D3; added 2026-11-16). Kestra's `ES.pause` needs `isRunning()`, which is `RUNNING` or `KILLING` only (`core/src/main/java/io/kestra/core/models/flows/State.java:304-306`). egret's `RESTARTED` is a running state that the next `advance` moves to `RUNNING`, so refusing it would refuse a pause in the window right after a restart or a resume; the effect is the same as pausing a moment later.
+
 Parity notes (not divergences), 2026-11-15:
 
 - **Loop iterations keep starting under a paused loop root (Q3)**, as in Kestra (`LoopExecutionEventMessageHandler.java:94-182`; egret `worker/spawn.rs:735-746`).

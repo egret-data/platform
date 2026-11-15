@@ -1546,7 +1546,8 @@ mod tests {
     }
 
     /// A key Kestra accepts and egret ignores is a warning that names who
-    /// lifts it (D2, D12): `onResume` is #9's, `logLevel` #13's.
+    /// lifts it (D2, D12): `logLevel` is #13's (`onResume` is honoured
+    /// since package 7c).
     /// `warningOnRetry` is #13's too (Task 3).
     #[test]
     fn a_key_kestra_accepts_and_egret_ignores_is_not_honoured_and_names_its_package() {
