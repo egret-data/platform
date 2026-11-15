@@ -3614,7 +3614,8 @@ fn resume_answer(
             }))
         }
         Resumed::Refused(ResumeRefused::Moved) => ExecOpError::Core(Error::Conflict(format!(
-            "the Pause execution {id} waited on was resumed by another request; refresh and \
+            "what execution {id} waits on changed between this request's read and its lock \
+             (another resume, a pause by hand, or a Pause that started waiting); reload it and \
              resume again"
         ))),
     };
@@ -3642,7 +3643,7 @@ fn resume_answer(
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash, or no longer exists at all. A disabled flow is not refused.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or what waits changed after the request was read (another request resumed the Pause first, the execution was paused by hand since, or a Pause started waiting while inputs were sent to an execution read as having none). A resume that changes nothing must not answer 200.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or what waits changed between the request's read and the execution's lock (another request resumed the Pause first, the execution was paused by hand since, or a Pause started waiting that declares `onResume` or while inputs were sent to an execution read as having none): reload it and resume again. A resume that changes nothing must not answer 200.", body = egret_core::http::ErrorBody),
         (status = 413, description = "An uploaded file is over `workflow.storage.max_file_bytes`, a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is written.", body = egret_core::http::ErrorBody),
         (status = 415, description = "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),

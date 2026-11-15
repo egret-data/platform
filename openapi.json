@@ -34854,7 +34854,7 @@
             }
           },
           "409": {
-            "description": "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or what waits changed after the request was read (another request resumed the Pause first, the execution was paused by hand since, or a Pause started waiting while inputs were sent to an execution read as having none). A resume that changes nothing must not answer 200.",
+            "description": "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or what waits changed between the request's read and the execution's lock (another request resumed the Pause first, the execution was paused by hand since, or a Pause started waiting that declares `onResume` or while inputs were sent to an execution read as having none): reload it and resume again. A resume that changes nothing must not answer 200.",
             "content": {
               "application/json": {
                 "schema": {
