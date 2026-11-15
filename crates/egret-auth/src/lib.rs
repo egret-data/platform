@@ -18,6 +18,7 @@ pub mod preregistration;
 pub mod principal;
 pub mod roles;
 pub mod routes;
+pub mod service_accounts;
 pub mod session;
 pub mod token;
 pub mod users;

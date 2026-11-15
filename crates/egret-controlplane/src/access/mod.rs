@@ -14,6 +14,8 @@
 //! avoid colliding with the embedded-catalog `roles`/`role_id` routes already
 //! served by `warehouses.rs`.
 
+mod service_accounts;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post, put};
@@ -64,6 +66,7 @@ pub fn router() -> Router<CpState> {
         .route("/permissions", get(list_permissions))
         .route("/access/effective", get(get_effective_access))
         .route("/access/who-can-access", get(who_can_access))
+        .merge(service_accounts::router())
 }
 
 /// Revoke platform role `role_id` from (`principal_type`, `principal_id`)
@@ -1532,6 +1535,16 @@ async fn who_can_access(
         list_permissions,
         get_effective_access,
         who_can_access,
+        service_accounts::list_service_accounts,
+        service_accounts::create_service_account,
+        service_accounts::get_service_account,
+        service_accounts::disable_service_account,
+        service_accounts::enable_service_account,
+        service_accounts::delete_service_account,
+        service_accounts::add_service_account_group,
+        service_accounts::remove_service_account_group,
+        service_accounts::add_service_account_role,
+        service_accounts::remove_service_account_role,
     ),
     components(schemas(
         UserDto,
@@ -1562,6 +1575,11 @@ async fn who_can_access(
         egret_auth::effective::WhoCanAccess,
         egret_auth::effective::ObjectRef,
         egret_auth::effective::AccessEntry,
+        service_accounts::ServiceAccountDto,
+        service_accounts::ServiceAccountDetailDto,
+        service_accounts::CreateServiceAccountBody,
+        service_accounts::AddGroupBody,
+        service_accounts::AddRoleBody,
         ErrorBody,
     )),
     tags((name = "control-plane-access", description = "Platform access control: users, groups, roles, and the permission catalog")),
