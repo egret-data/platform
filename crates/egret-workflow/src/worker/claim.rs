@@ -4565,7 +4565,8 @@ pub enum Resumed {
 ///
 /// Since package 7c it is [`super::pause::resume_with`] with no body: a
 /// manual pause goes back to `RUNNING`, a `Pause` run ends `SUCCESS` with
-/// `{onResume: {}, resumed}`.
+/// `{onResume: {}, resumed}`. A waiting `Pause` that declares `onResume` is
+/// [`super::pause::ResumeRefused::Moved`] (no D7 gate was asked for it).
 pub async fn resume_by_hand(pool: &PgPool, execution_id: Uuid) -> Result<Resumed> {
     super::pause::resume_with(
         pool,

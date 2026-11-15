@@ -67,8 +67,9 @@ pub struct ResumeRequest<'a> {
     /// The `Pause` run the route read as waiting and stored files under;
     /// `None` when it read no `Pause` waiting (paused by hand, or only a
     /// `LoopUntil`). Under the lock, a mismatch is `Moved`: `Some` and the
-    /// execution now paused by hand or another run first; `None` with inputs
-    /// or files and a `Pause` now waiting.
+    /// execution now paused by hand or another run first; `None` and a
+    /// `Pause` now waiting that declares `onResume`, or any `Pause` now
+    /// waiting with inputs or files sent.
     pub expected: Option<Uuid>,
 }
 
@@ -83,7 +84,8 @@ pub enum ResumeRefused {
     Invalid(String),
     /// What waits under the lock is not what the route read (a lost race):
     /// another `Pause` run, a manual pause where it read a `Pause`, or a
-    /// `Pause` where it read none and inputs were sent.
+    /// `Pause` where it read none and inputs were sent or it declares
+    /// `onResume`.
     Moved,
 }
 
@@ -135,17 +137,6 @@ pub async fn resume_with(pool: &PgPool, req: &ResumeRequest<'_>) -> Result<Resum
         .fetch_one(&mut *conn)
         .await
         .map_err(db_err)?;
-        // What the route read must be what waits under the lock (T5 review
-        // C1, M1). A `Pause` it did not see takes no inputs or files: they
-        // were checked against nothing, and the D7 gate was not asked for it.
-        // With none, the release is today's resume of every waiting `Pause`.
-        let moved = match req.expected {
-            Some(e) => e != chosen_id,
-            None => !posted.is_empty() || !req.files.is_empty(),
-        };
-        if moved {
-            return Ok(Resumed::Refused(ResumeRefused::Moved));
-        }
         let flow = crate::spec::parse(&ctx.source).map_err(|e| {
             Error::Internal(anyhow::anyhow!(
                 "execution {}: its frozen source does not parse: {}",
@@ -160,6 +151,20 @@ pub async fn resume_with(pool: &PgPool, req: &ResumeRequest<'_>) -> Result<Resum
                 _ => None,
             })
             .unwrap_or_default();
+        // What the route read must be what waits under the lock (T5 review
+        // C1, M1). A `Pause` it did not see takes no inputs or files: they
+        // were checked against nothing. Nor is a `Pause` that declares
+        // `onResume` released when the route read none (final review I1):
+        // the D7 gate was not asked for it, and even an empty resume would
+        // be a decision on its defaults. With neither, the release is
+        // today's resume of every waiting `Pause`.
+        let moved = match req.expected {
+            Some(e) => e != chosen_id,
+            None => !posted.is_empty() || !req.files.is_empty() || !declared.is_empty(),
+        };
+        if moved {
+            return Ok(Resumed::Refused(ResumeRefused::Moved));
+        }
         let checked =
             checked_on_resume(conn, &ctx, &flow, &task_id, &declared, &posted, req.files).await?;
         let (values, sealed) = match checked {

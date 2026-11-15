@@ -1040,6 +1040,53 @@ async fn c1_inputs_where_the_route_read_no_pause_are_moved(pool: sqlx::PgPool) {
     assert_eq!(resumed, Resumed::Released(1));
 }
 
+/// Final review I1 (D7 kept case): the route read no `Pause` waiting
+/// (`expected: None`), so it asked no D7 gate; under the lock a `Pause` that
+/// declares `onResume` waits. Even an empty resume, which would release it
+/// with the author's defaults, is `Moved` and writes nothing. Control: a
+/// `Pause` without `onResume` is still released by the same request.
+#[sqlx::test(migrations = "../../migrations")]
+async fn i1_an_empty_resume_where_the_route_read_no_pause_is_moved_for_on_resume(
+    pool: sqlx::PgPool,
+) {
+    // Arrange: a Pause whose onResume inputs all have defaults.
+    let (db, ws, user) = setup(&pool).await;
+    let src = "id: defaulted\nnamespace: t\ntasks:\n  - id: p\n    \
+               type: io.kestra.plugin.core.flow.Pause\n    \
+               onResume:\n      - id: who\n        type: STRING\n        defaults: ada\n  \
+               - id: after\n    type: io.kestra.plugin.core.log.Log\n    message: after\n";
+    let ex = start(&pool, &db, ws, user, src).await;
+    settle_everything(&pool, &handlers()).await;
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+    let history = exec_history(&pool, ex).await;
+    let runs_before = runs(&pool, ex).await;
+
+    // Act
+    let refused = resume_with(&pool, &req(ex, None)).await.unwrap();
+    let empty = serde_json::Map::new();
+    let refused_empty_body = resume_with(&pool, &req(ex, Some(&empty))).await.unwrap();
+
+    // Assert
+    assert_eq!(refused, Resumed::Refused(ResumeRefused::Moved));
+    assert_eq!(refused_empty_body, Resumed::Refused(ResumeRefused::Moved));
+    assert_eq!(exec_history(&pool, ex).await, history);
+    assert_eq!(runs(&pool, ex).await, runs_before);
+    assert_eq!(outputs_of(&pool, ex, "p").await, None);
+    assert_eq!(exec_state(&pool, ex).await, "PAUSED");
+
+    // Control: a Pause without onResume, same request, is released.
+    let plain = "id: plain\nnamespace: t\ntasks:\n  - id: p\n    \
+                 type: io.kestra.plugin.core.flow.Pause\n  \
+                 - id: after\n    type: io.kestra.plugin.core.log.Log\n    message: after\n";
+    let other = start(&pool, &db, ws, user, plain).await;
+    settle_everything(&pool, &handlers()).await;
+    assert_eq!(exec_state(&pool, other).await, "PAUSED");
+    assert_eq!(
+        resume_with(&pool, &req(other, None)).await.unwrap(),
+        Resumed::Released(1)
+    );
+}
+
 /// T5 review M1: the route read a `Pause` waiting, and by the lock the
 /// execution is paused by hand instead: `Moved`, not a resume by hand.
 #[sqlx::test(migrations = "../../migrations")]
