@@ -25,13 +25,17 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AddGroupBody,
   AddMemberInput,
+  AddRoleBody,
   AssignRoleInput,
   ControlPlaneAccessGetEffectiveAccessParams,
+  ControlPlaneAccessListServiceAccountsParams,
   ControlPlaneAccessWhoCanAccessParams,
   ControlPlaneUserDto,
   CreateGroupInput,
   CreateRoleInput,
+  CreateServiceAccountBody,
   CreateUserInput,
   EffectiveAccess,
   ErrorBody,
@@ -42,6 +46,8 @@ import type {
   ResetPasswordInput,
   RoleAssigneeDto,
   RoleDto,
+  ServiceAccountDetailDto,
+  ServiceAccountDto,
   SetPermissionsInput,
   UpdateRoleInput,
   UpdateUserInput,
@@ -2256,7 +2262,1095 @@ export function useControlPlaneAccessListPermissions<TData = Awaited<ReturnType<
 
 
 
-export type controlPlaneAccessListUsersResponse200 = {
+export type controlPlaneAccessListServiceAccountsResponse200 = {
+  data: ServiceAccountDto[]
+  status: 200
+}
+
+export type controlPlaneAccessListServiceAccountsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessListServiceAccountsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessListServiceAccountsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessListServiceAccountsResponseSuccess = (controlPlaneAccessListServiceAccountsResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessListServiceAccountsResponseError = (controlPlaneAccessListServiceAccountsResponse401 | controlPlaneAccessListServiceAccountsResponse403 | controlPlaneAccessListServiceAccountsResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessListServiceAccountsResponse = (controlPlaneAccessListServiceAccountsResponseSuccess | controlPlaneAccessListServiceAccountsResponseError)
+
+export const getControlPlaneAccessListServiceAccountsUrl = (params?: ControlPlaneAccessListServiceAccountsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/control-plane/service-accounts?${stringifiedParams}` : `/api/control-plane/service-accounts`
+}
+
+export const controlPlaneAccessListServiceAccounts = async (params?: ControlPlaneAccessListServiceAccountsParams, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessListServiceAccountsResponse> => {
+
+  return customInstance<controlPlaneAccessListServiceAccountsResponse>(getControlPlaneAccessListServiceAccountsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessListServiceAccountsQueryKey = (params?: ControlPlaneAccessListServiceAccountsParams,) => {
+    return [
+    `/api/control-plane/service-accounts`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getControlPlaneAccessListServiceAccountsQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError = ErrorBody>(params?: ControlPlaneAccessListServiceAccountsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneAccessListServiceAccountsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>> = ({ signal }) => controlPlaneAccessListServiceAccounts(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneAccessListServiceAccountsQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>>
+export type ControlPlaneAccessListServiceAccountsQueryError = ErrorBody
+
+
+export function useControlPlaneAccessListServiceAccounts<TData = Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError = ErrorBody>(
+ params: undefined |  ControlPlaneAccessListServiceAccountsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessListServiceAccounts<TData = Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError = ErrorBody>(
+ params?: ControlPlaneAccessListServiceAccountsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessListServiceAccounts<TData = Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError = ErrorBody>(
+ params?: ControlPlaneAccessListServiceAccountsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneAccessListServiceAccounts<TData = Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError = ErrorBody>(
+ params?: ControlPlaneAccessListServiceAccountsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListServiceAccounts>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneAccessListServiceAccountsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneAccessCreateServiceAccountResponse200 = {
+  data: ServiceAccountDto
+  status: 200
+}
+
+export type controlPlaneAccessCreateServiceAccountResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneAccessCreateServiceAccountResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessCreateServiceAccountResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessCreateServiceAccountResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessCreateServiceAccountResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneAccessCreateServiceAccountResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessCreateServiceAccountResponseSuccess = (controlPlaneAccessCreateServiceAccountResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessCreateServiceAccountResponseError = (controlPlaneAccessCreateServiceAccountResponse400 | controlPlaneAccessCreateServiceAccountResponse401 | controlPlaneAccessCreateServiceAccountResponse403 | controlPlaneAccessCreateServiceAccountResponse404 | controlPlaneAccessCreateServiceAccountResponse409 | controlPlaneAccessCreateServiceAccountResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessCreateServiceAccountResponse = (controlPlaneAccessCreateServiceAccountResponseSuccess | controlPlaneAccessCreateServiceAccountResponseError)
+
+export const getControlPlaneAccessCreateServiceAccountUrl = () => {
+
+
+
+
+  return `/api/control-plane/service-accounts`
+}
+
+export const controlPlaneAccessCreateServiceAccount = async (createServiceAccountBody: CreateServiceAccountBody, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessCreateServiceAccountResponse> => {
+
+  return customInstance<controlPlaneAccessCreateServiceAccountResponse>(getControlPlaneAccessCreateServiceAccountUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(createServiceAccountBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessCreateServiceAccountMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessCreateServiceAccount>>, TError,{data: CreateServiceAccountBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessCreateServiceAccount>>, TError,{data: CreateServiceAccountBody}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessCreateServiceAccount'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessCreateServiceAccount>>, {data: CreateServiceAccountBody}> = (props) => {
+          const {data} = props ?? {};
+
+          return  controlPlaneAccessCreateServiceAccount(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessCreateServiceAccountMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessCreateServiceAccount>>>
+    export type ControlPlaneAccessCreateServiceAccountMutationBody = CreateServiceAccountBody
+    export type ControlPlaneAccessCreateServiceAccountMutationError = ErrorBody
+
+    export const useControlPlaneAccessCreateServiceAccount = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessCreateServiceAccount>>, TError,{data: CreateServiceAccountBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessCreateServiceAccount>>,
+        TError,
+        {data: CreateServiceAccountBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessCreateServiceAccountMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessGetServiceAccountResponse200 = {
+  data: ServiceAccountDetailDto
+  status: 200
+}
+
+export type controlPlaneAccessGetServiceAccountResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessGetServiceAccountResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessGetServiceAccountResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessGetServiceAccountResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessGetServiceAccountResponseSuccess = (controlPlaneAccessGetServiceAccountResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessGetServiceAccountResponseError = (controlPlaneAccessGetServiceAccountResponse401 | controlPlaneAccessGetServiceAccountResponse403 | controlPlaneAccessGetServiceAccountResponse404 | controlPlaneAccessGetServiceAccountResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessGetServiceAccountResponse = (controlPlaneAccessGetServiceAccountResponseSuccess | controlPlaneAccessGetServiceAccountResponseError)
+
+export const getControlPlaneAccessGetServiceAccountUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}`
+}
+
+export const controlPlaneAccessGetServiceAccount = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessGetServiceAccountResponse> => {
+
+  return customInstance<controlPlaneAccessGetServiceAccountResponse>(getControlPlaneAccessGetServiceAccountUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessGetServiceAccountQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/service-accounts/${encodeURIComponent(id)}`
+    ] as const;
+    }
+
+
+export const getControlPlaneAccessGetServiceAccountQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneAccessGetServiceAccountQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>> = ({ signal }) => controlPlaneAccessGetServiceAccount(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneAccessGetServiceAccountQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>>
+export type ControlPlaneAccessGetServiceAccountQueryError = ErrorBody
+
+
+export function useControlPlaneAccessGetServiceAccount<TData = Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessGetServiceAccount<TData = Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessGetServiceAccount<TData = Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneAccessGetServiceAccount<TData = Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessGetServiceAccount>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneAccessGetServiceAccountQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneAccessDeleteServiceAccountResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneAccessDeleteServiceAccountResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessDeleteServiceAccountResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessDeleteServiceAccountResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessDeleteServiceAccountResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneAccessDeleteServiceAccountResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessDeleteServiceAccountResponseSuccess = (controlPlaneAccessDeleteServiceAccountResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneAccessDeleteServiceAccountResponseError = (controlPlaneAccessDeleteServiceAccountResponse401 | controlPlaneAccessDeleteServiceAccountResponse403 | controlPlaneAccessDeleteServiceAccountResponse404 | controlPlaneAccessDeleteServiceAccountResponse409 | controlPlaneAccessDeleteServiceAccountResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessDeleteServiceAccountResponse = (controlPlaneAccessDeleteServiceAccountResponseSuccess | controlPlaneAccessDeleteServiceAccountResponseError)
+
+export const getControlPlaneAccessDeleteServiceAccountUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}`
+}
+
+export const controlPlaneAccessDeleteServiceAccount = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessDeleteServiceAccountResponse> => {
+
+  return customInstance<controlPlaneAccessDeleteServiceAccountResponse>(getControlPlaneAccessDeleteServiceAccountUrl(id),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessDeleteServiceAccountMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDeleteServiceAccount>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDeleteServiceAccount>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessDeleteServiceAccount'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessDeleteServiceAccount>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneAccessDeleteServiceAccount(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessDeleteServiceAccountMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessDeleteServiceAccount>>>
+
+    export type ControlPlaneAccessDeleteServiceAccountMutationError = ErrorBody
+
+    export const useControlPlaneAccessDeleteServiceAccount = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDeleteServiceAccount>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessDeleteServiceAccount>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessDeleteServiceAccountMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessDisableServiceAccountResponse200 = {
+  data: ServiceAccountDetailDto
+  status: 200
+}
+
+export type controlPlaneAccessDisableServiceAccountResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessDisableServiceAccountResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessDisableServiceAccountResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessDisableServiceAccountResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneAccessDisableServiceAccountResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessDisableServiceAccountResponseSuccess = (controlPlaneAccessDisableServiceAccountResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessDisableServiceAccountResponseError = (controlPlaneAccessDisableServiceAccountResponse401 | controlPlaneAccessDisableServiceAccountResponse403 | controlPlaneAccessDisableServiceAccountResponse404 | controlPlaneAccessDisableServiceAccountResponse409 | controlPlaneAccessDisableServiceAccountResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessDisableServiceAccountResponse = (controlPlaneAccessDisableServiceAccountResponseSuccess | controlPlaneAccessDisableServiceAccountResponseError)
+
+export const getControlPlaneAccessDisableServiceAccountUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/disable`
+}
+
+export const controlPlaneAccessDisableServiceAccount = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessDisableServiceAccountResponse> => {
+
+  return customInstance<controlPlaneAccessDisableServiceAccountResponse>(getControlPlaneAccessDisableServiceAccountUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessDisableServiceAccountMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDisableServiceAccount>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDisableServiceAccount>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessDisableServiceAccount'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessDisableServiceAccount>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneAccessDisableServiceAccount(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessDisableServiceAccountMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessDisableServiceAccount>>>
+
+    export type ControlPlaneAccessDisableServiceAccountMutationError = ErrorBody
+
+    export const useControlPlaneAccessDisableServiceAccount = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessDisableServiceAccount>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessDisableServiceAccount>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessDisableServiceAccountMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessEnableServiceAccountResponse200 = {
+  data: ServiceAccountDetailDto
+  status: 200
+}
+
+export type controlPlaneAccessEnableServiceAccountResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessEnableServiceAccountResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessEnableServiceAccountResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessEnableServiceAccountResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessEnableServiceAccountResponseSuccess = (controlPlaneAccessEnableServiceAccountResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessEnableServiceAccountResponseError = (controlPlaneAccessEnableServiceAccountResponse401 | controlPlaneAccessEnableServiceAccountResponse403 | controlPlaneAccessEnableServiceAccountResponse404 | controlPlaneAccessEnableServiceAccountResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessEnableServiceAccountResponse = (controlPlaneAccessEnableServiceAccountResponseSuccess | controlPlaneAccessEnableServiceAccountResponseError)
+
+export const getControlPlaneAccessEnableServiceAccountUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/enable`
+}
+
+export const controlPlaneAccessEnableServiceAccount = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessEnableServiceAccountResponse> => {
+
+  return customInstance<controlPlaneAccessEnableServiceAccountResponse>(getControlPlaneAccessEnableServiceAccountUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessEnableServiceAccountMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessEnableServiceAccount>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessEnableServiceAccount>>, TError,{id: string}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessEnableServiceAccount'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessEnableServiceAccount>>, {id: string}> = (props) => {
+          const {id} = props ?? {};
+
+          return  controlPlaneAccessEnableServiceAccount(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessEnableServiceAccountMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessEnableServiceAccount>>>
+
+    export type ControlPlaneAccessEnableServiceAccountMutationError = ErrorBody
+
+    export const useControlPlaneAccessEnableServiceAccount = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessEnableServiceAccount>>, TError,{id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessEnableServiceAccount>>,
+        TError,
+        {id: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessEnableServiceAccountMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessAddServiceAccountGroupResponse200 = {
+  data: ServiceAccountDetailDto
+  status: 200
+}
+
+export type controlPlaneAccessAddServiceAccountGroupResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessAddServiceAccountGroupResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessAddServiceAccountGroupResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessAddServiceAccountGroupResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneAccessAddServiceAccountGroupResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessAddServiceAccountGroupResponseSuccess = (controlPlaneAccessAddServiceAccountGroupResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessAddServiceAccountGroupResponseError = (controlPlaneAccessAddServiceAccountGroupResponse401 | controlPlaneAccessAddServiceAccountGroupResponse403 | controlPlaneAccessAddServiceAccountGroupResponse404 | controlPlaneAccessAddServiceAccountGroupResponse409 | controlPlaneAccessAddServiceAccountGroupResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessAddServiceAccountGroupResponse = (controlPlaneAccessAddServiceAccountGroupResponseSuccess | controlPlaneAccessAddServiceAccountGroupResponseError)
+
+export const getControlPlaneAccessAddServiceAccountGroupUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/groups`
+}
+
+export const controlPlaneAccessAddServiceAccountGroup = async (id: string,
+    addGroupBody: AddGroupBody, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessAddServiceAccountGroupResponse> => {
+
+  return customInstance<controlPlaneAccessAddServiceAccountGroupResponse>(getControlPlaneAccessAddServiceAccountGroupUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(addGroupBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessAddServiceAccountGroupMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountGroup>>, TError,{id: string;data: AddGroupBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountGroup>>, TError,{id: string;data: AddGroupBody}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessAddServiceAccountGroup'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountGroup>>, {id: string;data: AddGroupBody}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneAccessAddServiceAccountGroup(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessAddServiceAccountGroupMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountGroup>>>
+    export type ControlPlaneAccessAddServiceAccountGroupMutationBody = AddGroupBody
+    export type ControlPlaneAccessAddServiceAccountGroupMutationError = ErrorBody
+
+    export const useControlPlaneAccessAddServiceAccountGroup = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountGroup>>, TError,{id: string;data: AddGroupBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountGroup>>,
+        TError,
+        {id: string;data: AddGroupBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessAddServiceAccountGroupMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessRemoveServiceAccountGroupResponse200 = {
+  data: ServiceAccountDetailDto
+  status: 200
+}
+
+export type controlPlaneAccessRemoveServiceAccountGroupResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessRemoveServiceAccountGroupResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessRemoveServiceAccountGroupResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessRemoveServiceAccountGroupResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneAccessRemoveServiceAccountGroupResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessRemoveServiceAccountGroupResponseSuccess = (controlPlaneAccessRemoveServiceAccountGroupResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessRemoveServiceAccountGroupResponseError = (controlPlaneAccessRemoveServiceAccountGroupResponse401 | controlPlaneAccessRemoveServiceAccountGroupResponse403 | controlPlaneAccessRemoveServiceAccountGroupResponse404 | controlPlaneAccessRemoveServiceAccountGroupResponse409 | controlPlaneAccessRemoveServiceAccountGroupResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessRemoveServiceAccountGroupResponse = (controlPlaneAccessRemoveServiceAccountGroupResponseSuccess | controlPlaneAccessRemoveServiceAccountGroupResponseError)
+
+export const getControlPlaneAccessRemoveServiceAccountGroupUrl = (id: string,
+    groupId: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/groups/${encodeURIComponent(groupId)}`
+}
+
+export const controlPlaneAccessRemoveServiceAccountGroup = async (id: string,
+    groupId: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessRemoveServiceAccountGroupResponse> => {
+
+  return customInstance<controlPlaneAccessRemoveServiceAccountGroupResponse>(getControlPlaneAccessRemoveServiceAccountGroupUrl(id,groupId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessRemoveServiceAccountGroupMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountGroup>>, TError,{id: string;groupId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountGroup>>, TError,{id: string;groupId: string}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessRemoveServiceAccountGroup'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountGroup>>, {id: string;groupId: string}> = (props) => {
+          const {id,groupId} = props ?? {};
+
+          return  controlPlaneAccessRemoveServiceAccountGroup(id,groupId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessRemoveServiceAccountGroupMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountGroup>>>
+
+    export type ControlPlaneAccessRemoveServiceAccountGroupMutationError = ErrorBody
+
+    export const useControlPlaneAccessRemoveServiceAccountGroup = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountGroup>>, TError,{id: string;groupId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountGroup>>,
+        TError,
+        {id: string;groupId: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessRemoveServiceAccountGroupMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessAddServiceAccountRoleResponse200 = {
+  data: ServiceAccountDetailDto
+  status: 200
+}
+
+export type controlPlaneAccessAddServiceAccountRoleResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneAccessAddServiceAccountRoleResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessAddServiceAccountRoleResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessAddServiceAccountRoleResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessAddServiceAccountRoleResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessAddServiceAccountRoleResponseSuccess = (controlPlaneAccessAddServiceAccountRoleResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessAddServiceAccountRoleResponseError = (controlPlaneAccessAddServiceAccountRoleResponse400 | controlPlaneAccessAddServiceAccountRoleResponse401 | controlPlaneAccessAddServiceAccountRoleResponse403 | controlPlaneAccessAddServiceAccountRoleResponse404 | controlPlaneAccessAddServiceAccountRoleResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessAddServiceAccountRoleResponse = (controlPlaneAccessAddServiceAccountRoleResponseSuccess | controlPlaneAccessAddServiceAccountRoleResponseError)
+
+export const getControlPlaneAccessAddServiceAccountRoleUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/roles`
+}
+
+export const controlPlaneAccessAddServiceAccountRole = async (id: string,
+    addRoleBody: AddRoleBody, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessAddServiceAccountRoleResponse> => {
+
+  return customInstance<controlPlaneAccessAddServiceAccountRoleResponse>(getControlPlaneAccessAddServiceAccountRoleUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(addRoleBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessAddServiceAccountRoleMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountRole>>, TError,{id: string;data: AddRoleBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountRole>>, TError,{id: string;data: AddRoleBody}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessAddServiceAccountRole'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountRole>>, {id: string;data: AddRoleBody}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneAccessAddServiceAccountRole(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessAddServiceAccountRoleMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountRole>>>
+    export type ControlPlaneAccessAddServiceAccountRoleMutationBody = AddRoleBody
+    export type ControlPlaneAccessAddServiceAccountRoleMutationError = ErrorBody
+
+    export const useControlPlaneAccessAddServiceAccountRole = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountRole>>, TError,{id: string;data: AddRoleBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessAddServiceAccountRole>>,
+        TError,
+        {id: string;data: AddRoleBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessAddServiceAccountRoleMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessRemoveServiceAccountRoleResponse200 = {
+  data: ServiceAccountDetailDto
+  status: 200
+}
+
+export type controlPlaneAccessRemoveServiceAccountRoleResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessRemoveServiceAccountRoleResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessRemoveServiceAccountRoleResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessRemoveServiceAccountRoleResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneAccessRemoveServiceAccountRoleResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessRemoveServiceAccountRoleResponseSuccess = (controlPlaneAccessRemoveServiceAccountRoleResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessRemoveServiceAccountRoleResponseError = (controlPlaneAccessRemoveServiceAccountRoleResponse401 | controlPlaneAccessRemoveServiceAccountRoleResponse403 | controlPlaneAccessRemoveServiceAccountRoleResponse404 | controlPlaneAccessRemoveServiceAccountRoleResponse409 | controlPlaneAccessRemoveServiceAccountRoleResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessRemoveServiceAccountRoleResponse = (controlPlaneAccessRemoveServiceAccountRoleResponseSuccess | controlPlaneAccessRemoveServiceAccountRoleResponseError)
+
+export const getControlPlaneAccessRemoveServiceAccountRoleUrl = (id: string,
+    roleId: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/roles/${encodeURIComponent(roleId)}`
+}
+
+export const controlPlaneAccessRemoveServiceAccountRole = async (id: string,
+    roleId: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessRemoveServiceAccountRoleResponse> => {
+
+  return customInstance<controlPlaneAccessRemoveServiceAccountRoleResponse>(getControlPlaneAccessRemoveServiceAccountRoleUrl(id,roleId),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessRemoveServiceAccountRoleMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountRole>>, TError,{id: string;roleId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountRole>>, TError,{id: string;roleId: string}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessRemoveServiceAccountRole'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountRole>>, {id: string;roleId: string}> = (props) => {
+          const {id,roleId} = props ?? {};
+
+          return  controlPlaneAccessRemoveServiceAccountRole(id,roleId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessRemoveServiceAccountRoleMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountRole>>>
+
+    export type ControlPlaneAccessRemoveServiceAccountRoleMutationError = ErrorBody
+
+    export const useControlPlaneAccessRemoveServiceAccountRole = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountRole>>, TError,{id: string;roleId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessRemoveServiceAccountRole>>,
+        TError,
+        {id: string;roleId: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessRemoveServiceAccountRoleMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessListUsersResponse200 = {
   data: ControlPlaneUserDto[]
   status: 200
 }
