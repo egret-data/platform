@@ -846,7 +846,7 @@ describe("ExecutionDetail: Overview", () => {
     renderPage();
     const runs = await screen.findByRole("region", { name: "Task runs" });
     const rows = within(runs).getAllByRole("row").slice(1);
-    expect(rows.map((r) => r.textContent)).toEqual(["extract—Success45 sChange state", "eacheu-westSuccess15 sChange state"]);
+    expect(rows.map((r) => r.textContent)).toEqual(["extract—Success45 s", "eacheu-westSuccess15 s"]);
     await userEvent.click(within(runs).getByRole("link", { name: "each" }));
     expect(screen.getByTestId("where")).toHaveTextContent(`/explore/${WS}/workflows/executions/${EXEC}/gantt?run=1`);
     // The link lands on the Gantt with that run's panel open (Task 4).
@@ -898,14 +898,17 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     renderPage();
     await screen.findByRole("button", { name: "Replay" });
     expect(screen.queryByRole("button", { name: "Change status" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Change state of extract" })).toBeNull();
+    // A killed execution can be replayed from a task, but no state can be changed.
+    await userEvent.click(screen.getByRole("button", { name: "Actions for extract" }));
+    expect(await screen.findByRole("menuitem", { name: "Replay from this task" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Change state" })).toBeNull();
   });
 
   it("hides all three without can_manage", async () => {
     new Server(ok(execution("FAILED", { can_manage: false })));
     renderPage();
     await screen.findByRole("heading", { level: 1, name: EXEC });
-    for (const name of ["Restart", "Change status", "Change state of extract"]) expect(screen.queryByRole("button", { name })).toBeNull();
+    for (const name of ["Restart", "Change status", "Actions for extract"]) expect(screen.queryByRole("button", { name })).toBeNull();
   });
 
   it("disables them on a loop iteration, saying the loop's execution", async () => {
@@ -915,7 +918,7 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     expect(restart).toBeDisabled();
     expect(restart).toHaveAccessibleDescription(new RegExp(NEW));
     expect(screen.getByRole("button", { name: "Change status" })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Change state of extract" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Actions for extract" })).toBeNull();
   });
 
   it("restarts after a confirm, re-reads the execution and the list, and toasts", async () => {
@@ -981,7 +984,8 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     const server = new Server(ok(execution("FAILED")), ok(execution("FAILED")));
     server.extra[`POST ${EXEC_PATH}/task-runs/r-1/state`] = ok(execution("SUCCESS"));
     renderPage();
-    await userEvent.click(await screen.findByRole("button", { name: "Change state of load" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for load" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Change state" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Change the state of load?" });
     await waitFor(() => expect(server.listReads()).toBeGreaterThan(0));
     const listBefore = server.listReads();
@@ -1002,11 +1006,80 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     const server = new Server(ok(execution("FAILED")));
     server.extra[`POST ${EXEC_PATH}/task-runs/r-0/state`] = { status: 409, body: { error: "x", code: "inside_working_directory" } };
     renderPage();
-    await userEvent.click(await screen.findByRole("button", { name: "Change state of extract" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for extract" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Change state" }));
     const dialog = await screen.findByRole("alertdialog");
     await userEvent.click(within(dialog).getByRole("combobox", { name: "New state" }));
     await userEvent.click(await screen.findByRole("option", { name: "Failed" }));
     await userEvent.click(within(dialog).getByRole("button", { name: "Change state" }));
     expect(await within(dialog).findByText(/Restart the execution instead/)).toBeInTheDocument();
+  });
+});
+
+describe("ExecutionDetail: Replay from a task (package 7b)", () => {
+  const REPLAY_PATH = `${EXEC_PATH}/replay`;
+
+  it("offers Replay from this task on a finished execution, and the dialog sends the task run", async () => {
+    const server = new Server(ok(execution("SUCCESS")));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for load" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Replay from this task" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Replay from load?" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Replay" }));
+    await waitFor(() => expect(server.calls.filter((c) => c.method === "POST" && c.path === REPLAY_PATH)).toHaveLength(1));
+    const call = server.calls.find((c) => c.method === "POST" && c.path === REPLAY_PATH);
+    expect(call?.query.get("taskRunId")).toBe("r-1");
+    expect(call?.query.get("source")).toBe("frozen");
+    await waitFor(() => expect(screen.getByTestId("where")).toHaveTextContent(`/executions/${NEW}/overview`));
+  });
+
+  it("shows it disabled, saying why, on a run inside a WorkingDirectory (the server refuses it)", async () => {
+    const source =
+      "id: hello\nnamespace: company.team\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    tasks:\n" +
+      "      - id: extract\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+    const server = new Server(
+      ok(execution("SUCCESS", { source, runs: [run("block", "SUCCESS", 0, { type_id: null }), run("extract", "SUCCESS", 1, { parent_ix: 0 })] })),
+    );
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for extract" }));
+    const item = await screen.findByRole("menuitem", { name: /Replay from this task/ });
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    expect(item).toHaveTextContent(/inside a WorkingDirectory block/);
+    await userEvent.click(item);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(server.calls.filter((c) => c.method === "POST" && c.path === REPLAY_PATH)).toHaveLength(0);
+    // The block itself can be replayed from.
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(screen.getByRole("button", { name: "Actions for block" }));
+    expect(await screen.findByRole("menuitem", { name: "Replay from this task" })).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("does not offer it while the execution runs", async () => {
+    new Server(ok(execution("RUNNING")));
+    renderPage();
+    await screen.findByRole("region", { name: "Task runs" });
+    expect(screen.queryByRole("button", { name: /^Actions for / })).toBeNull();
+  });
+
+  it("does not offer it on a loop iteration", async () => {
+    new Server(ok(execution("SUCCESS", { parent_execution_id: NEW, loop_index: 1 })));
+    renderPage();
+    await screen.findByRole("region", { name: "Task runs" });
+    expect(screen.queryByRole("button", { name: /^Actions for / })).toBeNull();
+  });
+
+  it("does not offer it without can_manage, nor once the flow was deleted for good (KI-297)", async () => {
+    new Server(ok(execution("SUCCESS", { can_manage: false })));
+    const first = renderPage();
+    await screen.findByRole("region", { name: "Task runs" });
+    expect(screen.queryByRole("button", { name: /^Actions for / })).toBeNull();
+    first.unmount();
+    vi.unstubAllGlobals();
+    new Server(ok(execution("SUCCESS", { flow_id: null })));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for extract" }));
+    // The menu keeps Change state, and offers no replay.
+    expect(await screen.findByRole("menuitem", { name: "Change state" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Replay from this task" })).toBeNull();
   });
 });

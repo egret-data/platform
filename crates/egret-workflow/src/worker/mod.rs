@@ -80,6 +80,7 @@
 mod cancel;
 mod claim;
 pub mod commands;
+mod copy;
 mod flow_outputs;
 mod force_close;
 pub mod handlers;
@@ -147,13 +148,15 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
     let e = stamps::Entered::of(&parse(before), &parse(after), false);
     (e.running, e.terminal)
 }
+pub use copy::{replay_execution, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest};
 pub use kill::{kill_execution, kill_execution_reporting, KillOutcome};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;
 pub use restart::{
     restart_execution, set_execution_status, set_task_run_state, RestartRefused, Restarted,
-    StateChangeRefused, NO_RESTARTABLE_ITERATION, RESTARTED_LABEL_KEY, RESTARTED_LABEL_VALUE,
+    StateChangeRefused, NO_RESTARTABLE_ITERATION, REPLAY_LABEL_KEY, REPLAY_LABEL_VALUE,
+    RESTARTED_LABEL_KEY, RESTARTED_LABEL_VALUE,
 };
 /// **How far down a chain of child executions this worker will spawn** — the
 /// backstop beside `subflow`'s cycle guard, and the second half of the one

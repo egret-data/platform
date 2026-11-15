@@ -826,6 +826,7 @@ export * from './workflowNamespaceDto';
 export * from './workflowNamespaceFileRevisionsParams';
 export * from './workflowNamespaceFileStatsParams';
 export * from './workflowPreviewExecutionFileParams';
+export * from './workflowReplayExecutionParams';
 export * from './workflowRestartExecutionParams';
 export * from './workflowSearchNamespaceFilesParams';
 export * from './workflowUploadNamespaceFileParams';

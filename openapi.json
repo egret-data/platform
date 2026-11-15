@@ -34293,8 +34293,8 @@
         "tags": [
           "workflow"
         ],
-        "summary": "Run a finished execution again.",
-        "description": "# It is a start, deliberately, and from the FROZEN source\n\n`worker::start_execution` with `workflow.executions.source` and\n`workflow.executions.inputs` — the row's own copies, not a re-read of the\ndraft. `worker::replay::spawn_due` takes the same decision for the\n`CREATE_NEW_EXECUTION` replacement and states the reason: *\"a replay that\npicked up an edit made since would be a different flow with the same\ntrace.\"* Starting from the draft is what `POST .../flows/{id}/executions`\nis for, and the two routes exist to be different.\n\n# The link is `replayed_from_execution_id`, not a parent\n\n`replay::spawn_due` links its replacement with `parent_execution_id` set and\n`parent_run_ix` NULL. That slot is **one per execution and already spoken\nfor**: migration 0138's `workflow_executions_loop_run_idx` is\n`UNIQUE (parent_execution_id, parent_run_ix, loop_index) NULLS NOT DISTINCT\nWHERE parent_execution_id IS NOT NULL`, so `(X, NULL, NULL)` can exist once,\nand `spawn_due` reads exactly that to answer \"it already exists\". A manual\nreplay that took the slot would make a later retry-replay of the same\nexecution fail a unique constraint, and a second manual replay fail one too.\n\nSo the replacement has no parent, and the link has a column of its own:\n`replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3), written\nhere through `start_execution_in` in one transaction with the row. It is\nwhat lets a replay read its source's files (a replay copies its source's\ninputs verbatim, and those may be `kestra://` URIs of the source). The audit\nrecord still carries both ids.\n\n# Not a loop iteration\n\nAn iteration (`parent_execution_id` with a `loop_index`) is refused (400)\nnaming its loop root: it is a part of the root's run, `replay::spawn_due`\nnever replays one, and a replay of it would be a top-level run of the\nloop's body alone.\n\n# Terminal only\n\nA non-terminal execution is refused (409) rather than replayed: two RUNNING\nexecutions of one flow, a replay and its original, would be in flight at\nonce, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through\n`worker::from_wire`, which is derived from `RunState::ALL`, so a state added\nto the enum is classified here without anyone remembering to come back.",
+        "summary": "Run a finished execution again, whole or from one of its task runs, on a\nchosen source, with its own inputs or new ones (package 7b).",
+        "description": "# Which source runs\n\n`source=frozen`, the default, is the replayed execution's own copy\n(`workflow.executions.source`), not a re-read of the draft:\n`worker::replay::spawn_due` takes the same decision for the\n`CREATE_NEW_EXECUTION` replacement -- *\"a replay that picked up an edit\nmade since would be a different flow with the same trace.\"*\n`source=current` is the flow's draft and `source=version:N` (Kestra's\n`revision=N`) a published version: chosen by the caller, never by\ndefault. The source is read once, here, before any transaction (a\nmultipart body is stored against its inputs, S6); the worker judges\nthat same text inside its transaction: the `egret.sql` gate with the\ncaller, the input check, the plan and the copy's match (D5, D8).\n\n# The link is `replayed_from_execution_id`, not a parent\n\n`replay::spawn_due` links its replacement with `parent_execution_id` set and\n`parent_run_ix` NULL. That slot is **one per execution and already spoken\nfor**: migration 0138's `workflow_executions_loop_run_idx` is\n`UNIQUE (parent_execution_id, parent_run_ix, loop_index) NULLS NOT DISTINCT\nWHERE parent_execution_id IS NOT NULL`, so `(X, NULL, NULL)` can exist once,\nand `spawn_due` reads exactly that to answer \"it already exists\". A manual\nreplay that took the slot would make a later retry-replay of the same\nexecution fail a unique constraint, and a second manual replay fail one too.\n\nSo the replacement has no parent, and the link has a column of its own:\n`replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3),\nwritten by the worker in one transaction with the row. It is what lets a\nreplay read its source's files. The audit record carries both ids.\n\n# Not a loop iteration\n\nAn iteration (`parent_execution_id` with a `loop_index`) is refused (400)\nnaming its loop root: it is a part of the root's run, `replay::spawn_due`\nnever replays one, and a replay of it would be a top-level run of the\nloop's body alone. A `taskRunId` inside an iteration is refused naming\nthe `Loop` run to replay from (D9).\n\n# Terminal only\n\nA non-terminal execution is refused (409) rather than replayed: two RUNNING\nexecutions of one flow, a replay and its original, would be in flight at\nonce. `RunState::is_terminal` is the predicate -- read through\n`worker::from_wire`, which is derived from `RunState::ALL`, so a state added\nto the enum is classified here without anyone remembering to come back.\nThe worker checks it again under the execution's lock.",
         "operationId": "replay_execution",
         "parameters": [
           {
@@ -34317,6 +34317,54 @@
             }
           },
           {
+            "name": "taskRunId",
+            "in": "query",
+            "description": "Replay from this task run of the execution (Kestra `taskRunId`). Without\nit, the whole execution is replayed.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "`frozen` (default), `current`, or `version:N` (N ≥ 1).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "description": "Kestra's spelling of `version:N`: an integer N ≥ 1. Not with `source`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "breakpoints",
+            "in": "query",
+            "description": "**Not supported** (spec Q3): any value answers 400\n`replay_breakpoints_unsupported`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "workspace",
             "in": "path",
             "required": true,
@@ -34325,9 +34373,25 @@
             }
           }
         ],
+        "requestBody": {
+          "description": "Optional. With no body, a body without `inputs`, or `\"inputs\": null`, the new execution reuses the replayed execution's own inputs (SECRET values included). With `inputs`, they REPLACE them and are checked against the chosen source's `inputs:`, as a start's are. **JSON** (`StartExecutionRequest`, at most 2 MiB; no `Content-Type` is read as JSON). **`multipart/form-data`** (`StartExecutionMultipart`, as the start's: each part is named by an input id, a part with a file name is that `FILE` input's file, stored under the NEW execution; at most `workflow.storage.max_file_bytes` + 1 MiB in total). A multipart caller builds the body itself, as for the start.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionMultipart"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "201": {
-            "description": "A NEW execution, started from the replayed one's frozen source and inputs. The body is the new execution, not the old one — read its `id`.",
+            "description": "A NEW execution of the chosen source, linked by `replayed_from_execution_id`, with the label `system.replay: true` and `attempt_number + 1`. Without `taskRunId` it runs from the start. With `taskRunId`, the runs before that task run are copied with their outputs and the run, its ancestors and what follows it run again (Kestra's replay). The old execution is untouched. The body is the new execution — read its `id`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34337,7 +34401,7 @@
             }
           },
           "400": {
-            "description": "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans, or uses a task type this deployment does not serve",
+            "description": "`invalid_source`: `source` is not `frozen`, `current` or `version:N` (N ≥ 1), `revision` is not an integer ≥ 1, or both are given. `replay_breakpoints_unsupported`: `breakpoints` was given (not supported yet). `replay_task_not_in_source`: a task the new execution keeps or runs again is missing from the chosen source, sits under another parent or list there, or is of another kind (the message names the task). No code: the execution is a **loop iteration** (replay its loop root instead); `taskRunId` is a run inside an iteration of one of its `Loop` runs (the message names the `Loop` task and its run, to replay from instead); `inputs` is not a JSON object, or an input is refused by the start check, or a multipart part is refused (the message names the input); the **flow's current draft** does not parse, so whether it is disabled cannot be decided; the chosen source does not plan or uses a task type this deployment does not serve; or it runs `egret.sql` and the caller is not the flow's creator.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34367,7 +34431,7 @@
             }
           },
           "404": {
-            "description": "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.",
+            "description": "`task_run_not_found`: `taskRunId` is not a run of this execution (another execution's, another workspace's, one a restart removed, or not a UUID). `flow_version_not_found`: the flow has no published version N. No code: no such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34377,7 +34441,27 @@
             }
           },
           "409": {
-            "description": "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight at once.",
+            "description": "Nothing is written. No code: the execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`), or the chosen source (`current` or `version:N`) itself says `disabled: true`, as Kestra refuses a disabled revision. With `taskRunId`: `inside_working_directory` (the run is inside a `WorkingDirectory`; replay from the block's own run), `files_pruned` (the retention pruner deleted the files of the execution or of one it was replayed from), `after_execution_running` (its `afterExecution:` tasks still run).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "An uploaded file is over `workflow.storage.max_file_bytes`, a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34395,6 +34479,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         }
       }
@@ -34404,8 +34498,8 @@
         "tags": [
           "workflow"
         ],
-        "summary": "Restart a `FAILED` or `PAUSED` execution in place (Kestra's restart).",
-        "description": "The scoped read keeps a foreign id from reaching the worker, which is\nunscoped; every other check is\n[`worker::restart_execution`](crate::worker::restart_execution)'s, made under\nthe execution's lock, and its answer is authoritative.",
+        "summary": "Restart a `FAILED` or `PAUSED` execution (Kestra's restart): in place on\nits frozen source (the default), or into a new execution on another\nsource (package 7b, spec D3).",
+        "description": "The scoped read keeps a foreign id from reaching the worker, which is\nunscoped; every other check is the worker's\n([`worker::restart_execution`](crate::worker::restart_execution) in place,\n[`worker::replay_execution`](crate::worker::replay_execution) into a new\nexecution), made under the execution's lock, and its answer is\nauthoritative.",
         "operationId": "restart_execution",
         "parameters": [
           {
@@ -34428,9 +34522,21 @@
             }
           },
           {
+            "name": "source",
+            "in": "query",
+            "description": "`frozen` (the default: restart in place, 200), `current` (the flow's\ndraft) or `version:N` (published version N, N ≥ 1). Any source but\n`frozen` restarts into a NEW execution (201).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
             "name": "revision",
             "in": "query",
-            "description": "**Not supported.** Restarting from an older revision of the flow\narrives with package 7b; any value answers 400\n`restart_revision_unsupported`.",
+            "description": "Kestra's spelling of `version:N`: an integer N ≥ 1. Not with `source`.",
             "required": false,
             "schema": {
               "type": [
@@ -34450,7 +34556,17 @@
         ],
         "responses": {
           "200": {
-            "description": "The execution was restarted in place, as Kestra restarts one: it keeps its id, its `FAILED` and `PAUSED` runs are reset, runs that ended `SUCCESS` keep their outputs and are not run again, and it carries the label `system.restarted: true` and `attempt_number + 1`. The body is its detail afterwards.",
+            "description": "`source` absent or `frozen`: the execution was restarted in place, as Kestra restarts one: it keeps its id, its `FAILED` and `PAUSED` runs are reset, runs that ended `SUCCESS` keep their outputs and are not run again, and it carries the label `system.restarted: true` and `attempt_number + 1`. The body is its detail afterwards.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "`source=current`, `source=version:N` or `revision=N`: the restart runs in a NEW execution of the chosen source (Kestra's restart with a revision). The old execution is untouched. Its runs are copied with their outputs, the `FAILED` and `PAUSED` ones reset; the new execution carries the label `system.restarted: true`, `attempt_number + 1` and `replayed_from_execution_id` = the old id. The body is the NEW execution — read its `id`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34460,7 +34576,7 @@
             }
           },
           "400": {
-            "description": "The query has a `revision` (code `restart_revision_unsupported`; restarting an older revision is package 7b); or the execution is a **loop iteration** (no code; the message names its loop root, which is restarted instead); or the flow runs `egret.sql` and the caller is not its creator (no code; the tasks run as the creator, as for a replay)",
+            "description": "`invalid_source`: `source` is not `frozen`, `current` or `version:N` (N ≥ 1), `revision` is not an integer ≥ 1, or both are given. `replay_task_not_in_source`: a task the new execution keeps or runs again is missing from the chosen source, sits under another parent or list there, or is of another kind (the message names the task). No code: the execution is a **loop iteration** (the message names its loop root, which is restarted instead); the flow runs `egret.sql` in the source that would run and the caller is not its creator (the tasks run as the creator, as for a replay); or the chosen source does not parse or plan.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34490,7 +34606,7 @@
             }
           },
           "404": {
-            "description": "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash or was deleted (as for a replay)",
+            "description": "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash or was deleted (as for a replay). `flow_version_not_found`: the flow has no published version N.",
             "content": {
               "application/json": {
                 "schema": {
@@ -34500,7 +34616,7 @@
             }
           },
           "409": {
-            "description": "Nothing is written. The flow is disabled (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the execution's files.",
+            "description": "Nothing is written. The flow is disabled, or the chosen source (`current` or `version:N`) itself says `disabled: true` (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the files of the execution, or of an execution it was replayed from.",
             "content": {
               "application/json": {
                 "schema": {

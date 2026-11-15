@@ -89,6 +89,7 @@ import type {
   WorkflowNamespaceFileRevisionsParams,
   WorkflowNamespaceFileStatsParams,
   WorkflowPreviewExecutionFileParams,
+  WorkflowReplayExecutionParams,
   WorkflowRestartExecutionParams,
   WorkflowSearchNamespaceFilesParams,
   WorkflowUploadNamespaceFileParams
@@ -1388,39 +1389,66 @@ export type workflowReplayExecutionResponse409 = {
   status: 409
 }
 
+export type workflowReplayExecutionResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowReplayExecutionResponse415 = {
+  data: ErrorBody
+  status: 415
+}
+
 export type workflowReplayExecutionResponse500 = {
   data: ErrorBody
   status: 500
 }
 
+export type workflowReplayExecutionResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
 export type workflowReplayExecutionResponseSuccess = (workflowReplayExecutionResponse201) & {
   headers: Headers;
 };
-export type workflowReplayExecutionResponseError = (workflowReplayExecutionResponse400 | workflowReplayExecutionResponse401 | workflowReplayExecutionResponse403 | workflowReplayExecutionResponse404 | workflowReplayExecutionResponse409 | workflowReplayExecutionResponse500) & {
+export type workflowReplayExecutionResponseError = (workflowReplayExecutionResponse400 | workflowReplayExecutionResponse401 | workflowReplayExecutionResponse403 | workflowReplayExecutionResponse404 | workflowReplayExecutionResponse409 | workflowReplayExecutionResponse413 | workflowReplayExecutionResponse415 | workflowReplayExecutionResponse500 | workflowReplayExecutionResponse503) & {
   headers: Headers;
 };
 
 export type workflowReplayExecutionResponse = (workflowReplayExecutionResponseSuccess | workflowReplayExecutionResponseError)
 
 export const getWorkflowReplayExecutionUrl = (workspace: string,
-    id: string,) => {
+    id: string,
+    params?: WorkflowReplayExecutionParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/replay`
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/replay?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/replay`
 }
 
 /**
- * # It is a start, deliberately, and from the FROZEN source
+ * # Which source runs
  *
- * `worker::start_execution` with `workflow.executions.source` and
- * `workflow.executions.inputs` — the row's own copies, not a re-read of the
- * draft. `worker::replay::spawn_due` takes the same decision for the
- * `CREATE_NEW_EXECUTION` replacement and states the reason: *"a replay that
- * picked up an edit made since would be a different flow with the same
- * trace."* Starting from the draft is what `POST .../flows/{id}/executions`
- * is for, and the two routes exist to be different.
+ * `source=frozen`, the default, is the replayed execution's own copy
+ * (`workflow.executions.source`), not a re-read of the draft:
+ * `worker::replay::spawn_due` takes the same decision for the
+ * `CREATE_NEW_EXECUTION` replacement -- *"a replay that picked up an edit
+ * made since would be a different flow with the same trace."*
+ * `source=current` is the flow's draft and `source=version:N` (Kestra's
+ * `revision=N`) a published version: chosen by the caller, never by
+ * default. The source is read once, here, before any transaction (a
+ * multipart body is stored against its inputs, S6); the worker judges
+ * that same text inside its transaction: the `egret.sql` gate with the
+ * caller, the input check, the plan and the copy's match (D5, D8).
  *
  * # The link is `replayed_from_execution_id`, not a parent
  *
@@ -1434,37 +1462,40 @@ export const getWorkflowReplayExecutionUrl = (workspace: string,
  * execution fail a unique constraint, and a second manual replay fail one too.
  *
  * So the replacement has no parent, and the link has a column of its own:
- * `replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3), written
- * here through `start_execution_in` in one transaction with the row. It is
- * what lets a replay read its source's files (a replay copies its source's
- * inputs verbatim, and those may be `kestra://` URIs of the source). The audit
- * record still carries both ids.
+ * `replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3),
+ * written by the worker in one transaction with the row. It is what lets a
+ * replay read its source's files. The audit record carries both ids.
  *
  * # Not a loop iteration
  *
  * An iteration (`parent_execution_id` with a `loop_index`) is refused (400)
  * naming its loop root: it is a part of the root's run, `replay::spawn_due`
  * never replays one, and a replay of it would be a top-level run of the
- * loop's body alone.
+ * loop's body alone. A `taskRunId` inside an iteration is refused naming
+ * the `Loop` run to replay from (D9).
  *
  * # Terminal only
  *
  * A non-terminal execution is refused (409) rather than replayed: two RUNNING
  * executions of one flow, a replay and its original, would be in flight at
- * once, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through
+ * once. `RunState::is_terminal` is the predicate -- read through
  * `worker::from_wire`, which is derived from `RunState::ALL`, so a state added
  * to the enum is classified here without anyone remembering to come back.
- * @summary Run a finished execution again.
+ * The worker checks it again under the execution's lock.
+ * @summary Run a finished execution again, whole or from one of its task runs, on a
+chosen source, with its own inputs or new ones (package 7b).
  */
 export const workflowReplayExecution = async (workspace: string,
-    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowReplayExecutionResponse> => {
+    id: string,
+    workflowReplayExecutionBody: StartExecutionRequest | StartExecutionMultipart,
+    params?: WorkflowReplayExecutionParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowReplayExecutionResponse> => {
 
-  return customInstance<workflowReplayExecutionResponse>(getWorkflowReplayExecutionUrl(workspace,id),
+  return customInstance<workflowReplayExecutionResponse>(getWorkflowReplayExecutionUrl(workspace,id,params),
   {
     ...options,
     method: 'POST'
-
-
+    ,
+    body: JSON.stringify(workflowReplayExecutionBody)
   }
 );}
 
@@ -1473,8 +1504,8 @@ export const workflowReplayExecution = async (workspace: string,
 
 
 export const getWorkflowReplayExecutionMutationOptions = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart;params?: WorkflowReplayExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart;params?: WorkflowReplayExecutionParams}, TContext> => {
 
 const mutationKey = ['workflowReplayExecution'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -1486,10 +1517,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowReplayExecution>>, {workspace: string;id: string}> = (props) => {
-          const {workspace,id} = props ?? {};
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowReplayExecution>>, {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart;params?: WorkflowReplayExecutionParams}> = (props) => {
+          const {workspace,id,data,params} = props ?? {};
 
-          return  workflowReplayExecution(workspace,id,requestOptions)
+          return  workflowReplayExecution(workspace,id,data,params,requestOptions)
         }
 
 
@@ -1500,18 +1531,19 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type WorkflowReplayExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowReplayExecution>>>
-
+    export type WorkflowReplayExecutionMutationBody = StartExecutionRequest | StartExecutionMultipart
     export type WorkflowReplayExecutionMutationError = ErrorBody
 
     /**
- * @summary Run a finished execution again.
+ * @summary Run a finished execution again, whole or from one of its task runs, on a
+chosen source, with its own inputs or new ones (package 7b).
  */
 export const useWorkflowReplayExecution = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart;params?: WorkflowReplayExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof workflowReplayExecution>>,
         TError,
-        {workspace: string;id: string},
+        {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart;params?: WorkflowReplayExecutionParams},
         TContext
       > => {
       return useMutation(getWorkflowReplayExecutionMutationOptions(options), queryClient);
@@ -1519,6 +1551,11 @@ export const useWorkflowReplayExecution = <TError = ErrorBody,
     export type workflowRestartExecutionResponse200 = {
   data: ExecutionDto
   status: 200
+}
+
+export type workflowRestartExecutionResponse201 = {
+  data: ExecutionDto
+  status: 201
 }
 
 export type workflowRestartExecutionResponse400 = {
@@ -1551,7 +1588,7 @@ export type workflowRestartExecutionResponse500 = {
   status: 500
 }
 
-export type workflowRestartExecutionResponseSuccess = (workflowRestartExecutionResponse200) & {
+export type workflowRestartExecutionResponseSuccess = (workflowRestartExecutionResponse200 | workflowRestartExecutionResponse201) & {
   headers: Headers;
 };
 export type workflowRestartExecutionResponseError = (workflowRestartExecutionResponse400 | workflowRestartExecutionResponse401 | workflowRestartExecutionResponse403 | workflowRestartExecutionResponse404 | workflowRestartExecutionResponse409 | workflowRestartExecutionResponse500) & {
@@ -1579,10 +1616,14 @@ export const getWorkflowRestartExecutionUrl = (workspace: string,
 
 /**
  * The scoped read keeps a foreign id from reaching the worker, which is
- * unscoped; every other check is
- * [`worker::restart_execution`](crate::worker::restart_execution)'s, made under
- * the execution's lock, and its answer is authoritative.
- * @summary Restart a `FAILED` or `PAUSED` execution in place (Kestra's restart).
+ * unscoped; every other check is the worker's
+ * ([`worker::restart_execution`](crate::worker::restart_execution) in place,
+ * [`worker::replay_execution`](crate::worker::replay_execution) into a new
+ * execution), made under the execution's lock, and its answer is
+ * authoritative.
+ * @summary Restart a `FAILED` or `PAUSED` execution (Kestra's restart): in place on
+its frozen source (the default), or into a new execution on another
+source (package 7b, spec D3).
  */
 export const workflowRestartExecution = async (workspace: string,
     id: string,
@@ -1633,7 +1674,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type WorkflowRestartExecutionMutationError = ErrorBody
 
     /**
- * @summary Restart a `FAILED` or `PAUSED` execution in place (Kestra's restart).
+ * @summary Restart a `FAILED` or `PAUSED` execution (Kestra's restart): in place on
+its frozen source (the default), or into a new execution on another
+source (package 7b, spec D3).
  */
 export const useWorkflowRestartExecution = <TError = ErrorBody,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecution>>, TError,{workspace: string;id: string;params?: WorkflowRestartExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}

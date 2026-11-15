@@ -2468,14 +2468,17 @@ async fn startable_flow(
 ///   the caller re-runs the creator's SQL under the creator's identity, so
 ///   on a flow that runs `egret.sql` only its creator may.
 ///
-/// The frozen source is what is judged, as it is what runs again. A loop
-/// iteration is left to the worker, which refuses it naming its root before
-/// anything runs. Change status runs no task and passes neither door.
+/// `source` is what is judged: the source that runs again -- the frozen one
+/// for an in-place restart and a state change, the chosen one for a restart
+/// into a new execution (package 7b, D8). A loop iteration is left to the
+/// worker, which refuses it naming its root before anything runs. Change
+/// status runs no task and passes neither door.
 async fn rerun_gate(
     st: &WorkflowState,
     ws: Uuid,
     caller: Uuid,
     detail: &crate::repo::ExecutionDetail,
+    source: &str,
 ) -> EgretResult<()> {
     if detail.execution.loop_index.is_some() {
         return Ok(());
@@ -2485,7 +2488,7 @@ async fn rerun_gate(
         .flow_id
         .ok_or_else(|| Error::NotFound("flow".into()))?;
     let _ = startable_flow(st, ws, flow_id).await?;
-    let flow = parse(&detail.source)
+    let flow = parse(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
     let mut conn = st
         .db
@@ -2493,14 +2496,8 @@ async fn rerun_gate(
         .acquire()
         .await
         .map_err(|e| Error::Internal(anyhow::Error::new(e)))?;
-    crate::worker::sql_principal::check_start(
-        &mut conn,
-        &flow,
-        Some(flow_id),
-        &detail.source,
-        Some(caller),
-    )
-    .await
+    crate::worker::sql_principal::check_start(&mut conn, &flow, Some(flow_id), source, Some(caller))
+        .await
 }
 
 /// The `inputs` object a start will actually run with.
@@ -2586,6 +2583,62 @@ fn core_refusal(e: Error) -> axum::response::Response {
     e.into_response()
 }
 
+/// A start's or a replay's JSON body, or `None` for none.
+///
+/// The JSON body keeps axum's 2 MiB: the routes' own limit is off
+/// (`DefaultBodyLimit::disable` in [`management_router`]) so that the
+/// multipart branch can follow `max_file_bytes`, and a JSON body is buffered
+/// whole, so it must not inherit that.
+#[allow(clippy::result_large_err)]
+async fn read_json_body(
+    st: &WorkflowState,
+    req: axum::extract::Request,
+) -> std::result::Result<Option<StartExecutionRequest>, axum::response::Response> {
+    use axum::extract::FromRequest as _;
+    let req = req
+        .map(|b| axum::body::Body::new(http_body_util::Limited::new(b, MAX_JSON_START_BODY_BYTES)));
+    // **No `Content-Type` is JSON** (controller decision on W9a Task 7's
+    // concern 2). `Option<Json>` alone reads a headerless request as "no
+    // body" and would start a headerless JSON body with `{}` -- and the
+    // client orval generates for this route's two content types sends no
+    // `Content-Type`. So a headerless body is read as JSON: empty is `{}`
+    // as before, anything else is parsed (and refused if it is not JSON).
+    // An explicit type that is neither JSON nor multipart stays 415 --
+    // and a browser's `fetch` labels a string body `text/plain`, so the
+    // web UI says `application/json` itself (W7a Task 8, `RunFlow.tsx`).
+    let req = if req.headers().contains_key(axum::http::header::CONTENT_TYPE) {
+        req
+    } else {
+        let (mut parts, body) = req.into_parts();
+        // Only the limit is a 413 (fix round 1, M2); a body that fails to
+        // arrive is the request's, a 400.
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+            if is_length_limit(&e) {
+                refuse(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("the JSON body is over {MAX_JSON_START_BODY_BYTES} bytes"),
+                )
+            } else {
+                refuse(
+                    StatusCode::BAD_REQUEST,
+                    format!("the request body could not be read: {e}"),
+                )
+            }
+        })?;
+        if !bytes.is_empty() {
+            parts.headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("application/json"),
+            );
+        }
+        axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
+    };
+    let body = Option::<Json<StartExecutionRequest>>::from_request(req, st)
+        .await
+        .map_err(axum::response::IntoResponse::into_response)?;
+    Ok(body.map(|Json(b)| b))
+}
+
 #[utoipa::path(
     post,
     path = "/api/ws/{workspace}/workflows/flows/{id}/executions",
@@ -2621,7 +2674,6 @@ async fn start_flow_execution(
     Path((_ws, id)): Path<(String, Uuid)>,
     req: axum::extract::Request,
 ) -> std::result::Result<(StatusCode, Json<ExecutionDto>), axum::response::Response> {
-    use axum::extract::FromRequest as _;
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
         .await
         .map_err(core_refusal)?;
@@ -2635,53 +2687,8 @@ async fn start_flow_execution(
     let execution_id = if is_multipart(req.headers()) {
         start_multipart(&st, ctx.workspace_id.0, ctx.principal.user_id.0, &flow, req).await?
     } else {
-        // The JSON body keeps axum's 2 MiB: the route's own limit is off
-        // (`DefaultBodyLimit::disable` in [`management_router`]) so that the
-        // multipart branch can follow `max_file_bytes`, and a JSON body is
-        // buffered whole, so it must not inherit that.
-        let req = req.map(|b| {
-            axum::body::Body::new(http_body_util::Limited::new(b, MAX_JSON_START_BODY_BYTES))
-        });
-        // **No `Content-Type` is JSON** (controller decision on W9a Task 7's
-        // concern 2). `Option<Json>` alone reads a headerless request as "no
-        // body" and would start a headerless JSON body with `{}` -- and the
-        // client orval generates for this route's two content types sends no
-        // `Content-Type`. So a headerless body is read as JSON: empty is `{}`
-        // as before, anything else is parsed (and refused if it is not JSON).
-        // An explicit type that is neither JSON nor multipart stays 415 --
-        // and a browser's `fetch` labels a string body `text/plain`, so the
-        // web UI says `application/json` itself (W7a Task 8, `RunFlow.tsx`).
-        let req = if req.headers().contains_key(axum::http::header::CONTENT_TYPE) {
-            req
-        } else {
-            let (mut parts, body) = req.into_parts();
-            // Only the limit is a 413 (fix round 1, M2); a body that fails to
-            // arrive is the request's, a 400.
-            let bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
-                if is_length_limit(&e) {
-                    refuse(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        format!("the JSON body is over {MAX_JSON_START_BODY_BYTES} bytes"),
-                    )
-                } else {
-                    refuse(
-                        StatusCode::BAD_REQUEST,
-                        format!("the request body could not be read: {e}"),
-                    )
-                }
-            })?;
-            if !bytes.is_empty() {
-                parts.headers.insert(
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::HeaderValue::from_static("application/json"),
-                );
-            }
-            axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes))
-        };
-        let body = Option::<Json<StartExecutionRequest>>::from_request(req, &st)
-            .await
-            .map_err(axum::response::IntoResponse::into_response)?;
-        let inputs = start_inputs(body).map_err(core_refusal)?;
+        let body = read_json_body(&st, req).await?;
+        let inputs = start_inputs(body.map(Json)).map_err(core_refusal)?;
         // **`start_execution`, not a second creation path.** The webhook calls
         // `start_execution_with_trigger` because it HAS a trigger record; an
         // API start has none, and `start_execution` is that function with
@@ -2924,13 +2931,13 @@ async fn validate_execution_inputs(
 
 /// The multipart start (W9a spec §7.1), in its order: the execution id is
 /// generated first; each file part is streamed to `inputs/{input}/{file}` of
-/// it ([`crate::storage::inputs::upload_input`]); then ONE transaction
-/// inserts the row, checks the FILE inputs, indexes the uploads and runs the
-/// first settle (`start_execution_in`). Any failure after an upload began
-/// deletes the execution's prefix, best effort: a start that never committed
-/// has no execution for the pruner to find. (A client that disconnects drops
-/// this future: the in-flight upload is aborted by `put_stream`'s guard and
-/// any finished one is left for the orphan sweep.)
+/// it ([`receive_parts`]); then ONE transaction inserts the row, checks the
+/// FILE inputs, indexes the uploads and runs the first settle
+/// (`start_execution_in`). Any failure after an upload began deletes the
+/// execution's prefix, best effort: a start that never committed has no
+/// execution for the pruner to find. (A client that disconnects drops this
+/// future: the in-flight upload is aborted by `put_stream`'s guard and any
+/// finished one is left for the orphan sweep.)
 #[allow(clippy::result_large_err)]
 async fn start_multipart(
     st: &WorkflowState,
@@ -2939,6 +2946,69 @@ async fn start_multipart(
     flow: &crate::repo::FlowRow,
     req: axum::extract::Request,
 ) -> std::result::Result<Uuid, axum::response::Response> {
+    let parsed = parse(&flow.source).map_err(|e| {
+        core_refusal(Error::InvalidInput(format!(
+            "the flow does not parse: {}",
+            e.message
+        )))
+    })?;
+    let execution = Uuid::new_v4();
+    let Uploaded { inputs, files } = receive_parts(workspace, &parsed, execution, req).await?;
+    // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
+    // needs a read is rolled back, the read fetched, and the start run again
+    // -- with the same id and the same uploads: they happened above, before
+    // any transaction, and are not repeated.
+    let started = crate::worker::txn::transaction!(&st.db.pool, |at| {
+        crate::worker::start_execution_in_with(
+            at,
+            crate::worker::NewExecution {
+                workspace_id: workspace,
+                flow_id: Some(flow.id),
+                source: &flow.source,
+                inputs: serde_json::Value::Object(inputs.clone()),
+                trigger: None,
+                scheduled_date: None,
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed: false,
+                replayed_from_execution_id: None,
+                id: Some(execution),
+                input_files: files.clone(),
+                labels: None,
+                backfill_id: None,
+                variables: None,
+                started_by: Some(started_by),
+            },
+        )
+        .await
+    })
+    .map_err(core_refusal);
+    if started.is_err() && !files.is_empty() {
+        discard_uploads(workspace, &parsed, execution).await;
+    }
+    started
+}
+
+/// What a multipart body gave: each part's value by input id (a file part's
+/// is its `kestra://` URI) and the files it stored.
+struct Uploaded {
+    inputs: serde_json::Map<String, serde_json::Value>,
+    files: Vec<crate::storage::StoredFile>,
+}
+
+/// Read a multipart body against `parsed`'s declared inputs, storing each
+/// file part under `execution` (W9a spec §7.1; shared by the start and the
+/// replay, package 7b). On its own failure it deletes what it stored; once
+/// it has answered, the caller deletes them ([`discard_uploads`]) if the
+/// execution is not created.
+#[allow(clippy::result_large_err)]
+async fn receive_parts(
+    workspace: Uuid,
+    parsed: &crate::models::Flow,
+    execution: Uuid,
+    req: axum::extract::Request,
+) -> std::result::Result<Uploaded, axum::response::Response> {
     use axum::extract::FromRequest as _;
     let Some(fs) = crate::storage::current() else {
         return Err(core_refusal(Error::InvalidInput(
@@ -2947,12 +3017,6 @@ async fn start_multipart(
                 .into(),
         )));
     };
-    let parsed = parse(&flow.source).map_err(|e| {
-        core_refusal(Error::InvalidInput(format!(
-            "the flow does not parse: {}",
-            e.message
-        )))
-    })?;
     let limit = multipart_body_limit(fs.caps);
     let gate = Arc::new(MultipartGate::default());
     let req = req.map(|b| {
@@ -2967,15 +3031,11 @@ async fn start_multipart(
     let mut multipart = axum::extract::Multipart::from_request(req, &())
         .await
         .map_err(axum::response::IntoResponse::into_response)?;
-    let execution = Uuid::new_v4();
     let mut uploading = false;
-    let started = read_parts_and_start(
-        st,
+    let read = read_parts(
         &fs,
         workspace,
-        started_by,
-        flow,
-        &parsed,
+        parsed,
         execution,
         &mut multipart,
         &gate,
@@ -2983,33 +3043,39 @@ async fn start_multipart(
         &mut uploading,
     )
     .await;
-    if started.is_err() && uploading {
-        let prefix = fs.execution_prefix(workspace, &parsed.namespace, &parsed.id, execution);
-        if let Err(e) = fs.store.delete_prefix(&prefix).await {
-            tracing::warn!(
-                prefix = %prefix,
-                error = %e,
-                "a refused start's uploaded files could not be deleted; the orphan sweep will"
-            );
-        }
+    if read.is_err() && uploading {
+        discard_uploads(workspace, parsed, execution).await;
     }
-    started
+    read
+}
+
+/// Delete what [`receive_parts`] stored for `execution`, best effort: an
+/// execution that was never created has no row for the pruner to find.
+async fn discard_uploads(workspace: Uuid, parsed: &crate::models::Flow, execution: Uuid) {
+    let Some(fs) = crate::storage::current() else {
+        return;
+    };
+    let prefix = fs.execution_prefix(workspace, &parsed.namespace, &parsed.id, execution);
+    if let Err(e) = fs.store.delete_prefix(&prefix).await {
+        tracing::warn!(
+            prefix = %prefix,
+            error = %e,
+            "a refused start's uploaded files could not be deleted; the orphan sweep will"
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::result_large_err)]
-async fn read_parts_and_start(
-    st: &WorkflowState,
+async fn read_parts(
     fs: &crate::storage::FileStore,
     workspace: Uuid,
-    started_by: Uuid,
-    flow: &crate::repo::FlowRow,
     parsed: &crate::models::Flow,
     execution: Uuid,
     multipart: &mut axum::extract::Multipart,
     gate: &MultipartGate,
     limit: usize,
     uploading: &mut bool,
-) -> std::result::Result<Uuid, axum::response::Response> {
+) -> std::result::Result<Uploaded, axum::response::Response> {
     use futures_util::StreamExt as _;
     let bad = |m: String| core_refusal(Error::InvalidInput(m));
     let mut inputs = serde_json::Map::new();
@@ -3066,36 +3132,7 @@ async fn read_parts_and_start(
         };
         inputs.insert(name, serde_json::Value::String(value));
     }
-    // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
-    // needs a read is rolled back, the read fetched, and the start run again
-    // -- with the same id and the same uploads: they happened above, before
-    // any transaction, and are not repeated.
-    crate::worker::txn::transaction!(&st.db.pool, |at| {
-        crate::worker::start_execution_in_with(
-            at,
-            crate::worker::NewExecution {
-                workspace_id: workspace,
-                flow_id: Some(flow.id),
-                source: &flow.source,
-                inputs: serde_json::Value::Object(inputs.clone()),
-                trigger: None,
-                scheduled_date: None,
-                trigger_execution_id: None,
-                execution_depth: 0,
-                flow_trigger_event_id: None,
-                born_failed: false,
-                replayed_from_execution_id: None,
-                id: Some(execution),
-                input_files: files.clone(),
-                labels: None,
-                backfill_id: None,
-                variables: None,
-                started_by: Some(started_by),
-            },
-        )
-        .await
-    })
-    .map_err(core_refusal)
+    Ok(Uploaded { inputs, files })
 }
 
 /// A text part, whole, at most [`MAX_TEXT_PART_BYTES`], as UTF-8.
@@ -3244,28 +3281,44 @@ async fn resume_execution(
     params(
         WorkspacePath,
         ("id" = Uuid, Path, description = "Execution id to replay"),
+        ReplayQuery,
+    ),
+    request_body(
+        description = "Optional. With no body, a body without `inputs`, or `\"inputs\": null`, the new execution reuses the replayed execution's own inputs (SECRET values included). With `inputs`, they REPLACE them and are checked against the chosen source's `inputs:`, as a start's are. **JSON** (`StartExecutionRequest`, at most 2 MiB; no `Content-Type` is read as JSON). **`multipart/form-data`** (`StartExecutionMultipart`, as the start's: each part is named by an input id, a part with a file name is that `FILE` input's file, stored under the NEW execution; at most `workflow.storage.max_file_bytes` + 1 MiB in total). A multipart caller builds the body itself, as for the start.",
+        content(
+            (StartExecutionRequest = "application/json"),
+            (StartExecutionMultipart = "multipart/form-data"),
+        ),
     ),
     responses(
-        (status = 201, description = "A NEW execution, started from the replayed one's frozen source and inputs. The body is the new execution, not the old one — read its `id`.", body = ExecutionDto),
-        (status = 400, description = "The execution is a **loop iteration** (replay its loop root instead); or the **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans, or uses a task type this deployment does not serve", body = egret_core::http::ErrorBody),
+        (status = 201, description = "A NEW execution of the chosen source, linked by `replayed_from_execution_id`, with the label `system.replay: true` and `attempt_number + 1`. Without `taskRunId` it runs from the start. With `taskRunId`, the runs before that task run are copied with their outputs and the run, its ancestors and what follows it run again (Kestra's replay). The old execution is untouched. The body is the new execution — read its `id`.", body = ExecutionDto),
+        (status = 400, description = "`invalid_source`: `source` is not `frozen`, `current` or `version:N` (N ≥ 1), `revision` is not an integer ≥ 1, or both are given. `replay_breakpoints_unsupported`: `breakpoints` was given (not supported yet). `replay_task_not_in_source`: a task the new execution keeps or runs again is missing from the chosen source, sits under another parent or list there, or is of another kind (the message names the task). No code: the execution is a **loop iteration** (replay its loop root instead); `taskRunId` is a run inside an iteration of one of its `Loop` runs (the message names the `Loop` task and its run, to replay from instead); `inputs` is not a JSON object, or an input is refused by the start check, or a multipart part is refused (the message names the input); the **flow's current draft** does not parse, so whether it is disabled cannot be decided; the chosen source does not plan or uses a task type this deployment does not serve; or it runs `egret.sql` and the caller is not the flow's creator.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
-        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight at once.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "`task_run_not_found`: `taskRunId` is not a run of this execution (another execution's, another workspace's, one a restart removed, or not a UUID). `flow_version_not_found`: the flow has no published version N. No code: no such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. No code: the execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`), or the chosen source (`current` or `version:N`) itself says `disabled: true`, as Kestra refuses a disabled revision. With `taskRunId`: `inside_working_directory` (the run is inside a `WorkingDirectory`; replay from the block's own run), `files_pruned` (the retention pruner deleted the files of the execution or of one it was replayed from), `after_execution_running` (its `afterExecution:` tasks still run).", body = egret_core::http::ErrorBody),
+        (status = 413, description = "An uploaded file is over `workflow.storage.max_file_bytes`, a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is created.", body = egret_core::http::ErrorBody),
+        (status = 415, description = "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+        (status = 503, description = "Internal storage failed while an uploaded file was being stored. Nothing is created; the request can be retried.", body = egret_core::http::ErrorBody),
     ),
 )]
-/// Run a finished execution again.
+/// Run a finished execution again, whole or from one of its task runs, on a
+/// chosen source, with its own inputs or new ones (package 7b).
 ///
-/// # It is a start, deliberately, and from the FROZEN source
+/// # Which source runs
 ///
-/// `worker::start_execution` with `workflow.executions.source` and
-/// `workflow.executions.inputs` — the row's own copies, not a re-read of the
-/// draft. `worker::replay::spawn_due` takes the same decision for the
-/// `CREATE_NEW_EXECUTION` replacement and states the reason: *"a replay that
-/// picked up an edit made since would be a different flow with the same
-/// trace."* Starting from the draft is what `POST .../flows/{id}/executions`
-/// is for, and the two routes exist to be different.
+/// `source=frozen`, the default, is the replayed execution's own copy
+/// (`workflow.executions.source`), not a re-read of the draft:
+/// `worker::replay::spawn_due` takes the same decision for the
+/// `CREATE_NEW_EXECUTION` replacement -- *"a replay that picked up an edit
+/// made since would be a different flow with the same trace."*
+/// `source=current` is the flow's draft and `source=version:N` (Kestra's
+/// `revision=N`) a published version: chosen by the caller, never by
+/// default. The source is read once, here, before any transaction (a
+/// multipart body is stored against its inputs, S6); the worker judges
+/// that same text inside its transaction: the `egret.sql` gate with the
+/// caller, the input check, the plan and the copy's match (D5, D8).
 ///
 /// # The link is `replayed_from_execution_id`, not a parent
 ///
@@ -3279,127 +3332,206 @@ async fn resume_execution(
 /// execution fail a unique constraint, and a second manual replay fail one too.
 ///
 /// So the replacement has no parent, and the link has a column of its own:
-/// `replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3), written
-/// here through `start_execution_in` in one transaction with the row. It is
-/// what lets a replay read its source's files (a replay copies its source's
-/// inputs verbatim, and those may be `kestra://` URIs of the source). The audit
-/// record still carries both ids.
+/// `replayed_from_execution_id` (migration 0166, W9a spec §4.4 item 3),
+/// written by the worker in one transaction with the row. It is what lets a
+/// replay read its source's files. The audit record carries both ids.
 ///
 /// # Not a loop iteration
 ///
 /// An iteration (`parent_execution_id` with a `loop_index`) is refused (400)
 /// naming its loop root: it is a part of the root's run, `replay::spawn_due`
 /// never replays one, and a replay of it would be a top-level run of the
-/// loop's body alone.
+/// loop's body alone. A `taskRunId` inside an iteration is refused naming
+/// the `Loop` run to replay from (D9).
 ///
 /// # Terminal only
 ///
 /// A non-terminal execution is refused (409) rather than replayed: two RUNNING
 /// executions of one flow, a replay and its original, would be in flight at
-/// once, and the narrow door cannot over-accept. `RunState::is_terminal` is the predicate — read through
+/// once. `RunState::is_terminal` is the predicate -- read through
 /// `worker::from_wire`, which is derived from `RunState::ALL`, so a state added
 /// to the enum is classified here without anyone remembering to come back.
+/// The worker checks it again under the execution's lock.
+#[allow(clippy::result_large_err)]
 async fn replay_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
-) -> EgretResult<(StatusCode, Json<ExecutionDto>)> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
-    let source = st.executions.get(ctx.workspace_id.0, id).await?;
+    Query(q): Query<ReplayQuery>,
+    req: axum::extract::Request,
+) -> std::result::Result<(StatusCode, Json<ExecutionDto>), axum::response::Response> {
+    use axum::response::IntoResponse as _;
+    let op = |e: ExecOpError| e.into_response();
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+        .await
+        .map_err(core_refusal)?;
+    // Spec Q3: refused before anything is read, so it writes nothing.
+    if q.breakpoints.is_some() {
+        return Err(op(ExecOpError::Coded(
+            StatusCode::BAD_REQUEST,
+            REPLAY_BREAKPOINTS_UNSUPPORTED_CODE,
+            "breakpoints are not supported yet; they arrive with their own package, after 7c \
+             (pause and resume)"
+                .into(),
+        )));
+    }
+    let choice = source_choice(q.source.as_deref(), q.revision.as_deref()).map_err(op)?;
+    let ws = ctx.workspace_id.0;
+    let caller = ctx.principal.user_id.0;
+    let detail = st.executions.get(ws, id).await.map_err(core_refusal)?;
     // **A loop iteration is not replayed** (user ruling, W9a Task 3 fix round
     // 1): it is a part of its loop root's run, not a run of the flow, and
     // `replay::spawn_due` never replays one either. Its loop root is.
     if let (Some(root), Some(index)) = (
-        source.execution.parent_execution_id,
-        source.execution.loop_index,
+        detail.execution.parent_execution_id,
+        detail.execution.loop_index,
     ) {
-        return Err(Error::InvalidInput(format!(
+        return Err(core_refusal(Error::InvalidInput(format!(
             "execution {id} is iteration {index} of a Loop in execution {root}, not a run of \
              the flow, and cannot be replayed on its own; replay its loop root {root}"
-        )));
+        ))));
     }
-    // **The same gate `start_flow_execution` passes**, and fix round 1 is what
-    // put it here: this handler used to check terminality and NOTHING else, so
-    // a replay ran a flow that was trashed, disabled, or both — every door
-    // start had just closed, walked around by the route beside it. A replay is
-    // a run of the flow, so it answers to the flow's current state, not to the
-    // state the flow was in when the execution being replayed started.
-    //
-    // **The frozen source is still what RUNS** (see this handler's doc); the
-    // flow row is consulted only for permission to run at all, and the returned
-    // row is deliberately discarded.
-    //
-    // An execution whose `flow_id` is NULL names no flow, so neither door can
-    // be asked. `executions_flow_id_fkey` is `ON DELETE SET NULL`, and
-    // `FlowRepo::purge` (deleting a trashed flow permanently, KI-119) issues
-    // that DELETE, so this arm is reached by replaying an execution of a
-    // purged flow — and it refuses rather than running, because a flow that
-    // has been hard-deleted is a stronger "this is gone" than a trashed one,
-    // not a weaker one.
-    let flow_id = source
+    // **The same gate `start_flow_execution` passes** (fix round 1): a replay
+    // is a run of the flow, so it answers to the flow's current state. An
+    // execution whose `flow_id` is NULL names no flow (purged, KI-119), so
+    // neither door can be asked: refused, as a stronger "gone" than the trash.
+    let flow_id = detail
         .execution
         .flow_id
-        .ok_or_else(|| Error::NotFound("flow".into()))?;
-    let _ = startable_flow(&st, ctx.workspace_id.0, flow_id).await?;
-    // An unknown spelling is refused with the non-terminal ones rather than
-    // treated as terminal: `from_wire` answers `None` only for a state this
-    // build does not have, and guessing "finished" about it is the
-    // over-accepting half.
-    if !crate::worker::from_wire(&source.execution.state).is_some_and(RunState::is_terminal) {
-        return Err(Error::Conflict(format!(
-            "execution {id} is {} and has not finished; only a terminal execution can be replayed",
-            source.execution.state
-        )));
-    }
-    // KI-112: the replay runs with the stored SECRET values, not the mask the
-    // row shows; the start masks and seals them again for the new row.
-    let (inputs, _) = crate::secret_inputs::reveal(
-        source.execution.inputs.clone(),
-        source.secret_inputs.as_deref(),
-    )?;
-    // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
-    // needs a read is rolled back, the read fetched, and the start run again.
-    let replacement = crate::worker::txn::transaction!(&st.db.pool, |at| {
-        crate::worker::start_execution_in_with(
-            at,
-            crate::worker::NewExecution {
-                workspace_id: ctx.workspace_id.0,
-                flow_id: source.execution.flow_id,
-                source: &source.source,
-                inputs: inputs.clone(),
-                trigger: None,
-                scheduled_date: None,
-                trigger_execution_id: None,
-                execution_depth: 0,
-                flow_trigger_event_id: None,
-                born_failed: false,
-                // The link (this handler's doc), committed with the row.
-                replayed_from_execution_id: Some(id),
-                id: None,
-                input_files: Vec::new(),
-                // The run's own labels travel with it; the backfill that fired
-                // the original does not (W7f spec §3.3).
-                labels: source.execution.labels.clone(),
-                backfill_id: None,
-                // D3 (final review I3): the run's `variables` travel with it,
-                // as the retry replay's do and Kestra's `childExecution`'s.
-                variables: source.variables.clone(),
-                // A replay is a start a person makes (the `egret.sql` gate).
-                started_by: Some(ctx.principal.user_id.0),
-            },
-        )
+        .ok_or_else(|| core_refusal(Error::NotFound("flow".into())))?;
+    let flow = startable_flow(&st, ws, flow_id)
         .await
-    })?;
+        .map_err(core_refusal)?;
+    // An unknown spelling is refused with the non-terminal ones rather than
+    // treated as terminal: guessing "finished" is the over-accepting half.
+    if !crate::worker::from_wire(&detail.execution.state).is_some_and(RunState::is_terminal) {
+        return Err(core_refusal(Error::Conflict(format!(
+            "execution {id} is {} and has not finished; only a terminal execution can be replayed",
+            detail.execution.state
+        ))));
+    }
+    let source = source_text(&st, ws, &detail, &flow, choice)
+        .await
+        .map_err(op)?;
+    refuse_disabled_source(choice, &source).map_err(core_refusal)?;
+
+    // Which replay (D2, D9). The scoped read answers for this execution's
+    // runs; a run of another execution is looked for under its `Loop` runs.
+    let kind = match q.task_run_id.as_deref() {
+        None => crate::worker::ReplayKind::Whole,
+        Some(raw) => {
+            let not_found = || op(ExecOpError::task_run_not_found(id, raw));
+            let task_run = Uuid::parse_str(raw).map_err(|_| not_found())?;
+            let own = detail
+                .runs
+                .iter()
+                .any(|r| r.id == task_run && r.history.as_array().is_some_and(|h| !h.is_empty()));
+            if own {
+                crate::worker::ReplayKind::FromTaskRun(task_run)
+            } else {
+                match st
+                    .executions
+                    .loop_run_holding(ws, id, task_run)
+                    .await
+                    .map_err(core_refusal)?
+                {
+                    Some((loop_run, loop_task)) => {
+                        return Err(core_refusal(Error::InvalidInput(format!(
+                            "task run {task_run} is inside an iteration of the Loop \
+                             `{loop_task}` (task run {loop_run}) of execution {id}; replay \
+                             execution {id} from that Loop task run instead"
+                        ))));
+                    }
+                    None => return Err(not_found()),
+                }
+            }
+        }
+    };
+
+    // The body (D7). The new execution's id is chosen first: a multipart
+    // body's files are stored under it.
+    let new_id = Uuid::new_v4();
+    let (inputs, input_files, uploaded_for) = if is_multipart(req.headers()) {
+        let parsed = parse(&source).map_err(|e| {
+            core_refusal(Error::InvalidInput(format!(
+                "the flow does not parse: {}",
+                e.message
+            )))
+        })?;
+        let Uploaded { inputs, files } = receive_parts(ws, &parsed, new_id, req).await?;
+        let uploaded_for = (!files.is_empty()).then_some(parsed);
+        (
+            crate::worker::ReplayInputs::Replace(serde_json::Value::Object(inputs)),
+            files,
+            uploaded_for,
+        )
+    } else {
+        let inputs = match read_json_body(&st, req).await?.and_then(|b| b.inputs) {
+            None | Some(serde_json::Value::Null) => crate::worker::ReplayInputs::Reuse,
+            Some(v) => crate::worker::ReplayInputs::Replace(
+                start_inputs(Some(Json(StartExecutionRequest { inputs: Some(v) })))
+                    .map_err(core_refusal)?,
+            ),
+        };
+        (inputs, Vec::new(), None)
+    };
+    let inputs_replaced = matches!(inputs, crate::worker::ReplayInputs::Replace(_));
+
+    let replayed = crate::worker::replay_execution(
+        &st.db.pool,
+        &crate::worker::ReplayRequest {
+            workspace_id: ws,
+            from: id,
+            source: &source,
+            kind,
+            inputs,
+            started_by: caller,
+            id: new_id,
+            input_files,
+        },
+    )
+    .await;
+    let replacement = match replayed {
+        Ok(Ok(replacement)) => Ok(replacement),
+        Ok(Err(r)) => Err(op(ExecOpError::from_replay_refusal(
+            id,
+            r,
+            match kind {
+                crate::worker::ReplayKind::FromTaskRun(t) => Some(t),
+                _ => None,
+            },
+        ))),
+        Err(e) => Err(core_refusal(e)),
+    };
+    // Nothing was created: what the body stored goes too.
+    if let (Err(_), Some(parsed)) = (&replacement, &uploaded_for) {
+        discard_uploads(ws, parsed, new_id).await;
+    }
+    let replacement = replacement?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
-        Some(ctx.workspace_id.0),
+        Some(ws),
         "workflow_execution:replay",
         "workflow_execution",
         Some(replacement.to_string()),
-        // Both ids; `replayed_from_execution_id` carries the link in the data.
-        serde_json::json!({ "replayed_from": id, "replacement": replacement }),
+        // Both ids, the run, the source and whether the inputs were replaced;
+        // never the inputs themselves.
+        serde_json::json!({
+            "replayed_from": id,
+            "replacement": replacement,
+            "task_run_id": match kind {
+                crate::worker::ReplayKind::FromTaskRun(t) => Some(t),
+                _ => None,
+            },
+            "source": choice.wire(),
+            "inputs_replaced": inputs_replaced,
+        }),
     ));
-    let detail = st.executions.get(ctx.workspace_id.0, replacement).await?;
+    let detail = st
+        .executions
+        .get(ws, replacement)
+        .await
+        .map_err(core_refusal)?;
     Ok((
         StatusCode::CREATED,
         Json(ExecutionDto::new(
@@ -3584,11 +3716,140 @@ pub const AFTER_EXECUTION_RUNNING_CODE: &str = "after_execution_running";
 pub const FILES_PRUNED_CODE: &str = "files_pruned";
 pub const STATE_UNCHANGED_CODE: &str = "state_unchanged";
 pub const INSIDE_WORKING_DIRECTORY_CODE: &str = "inside_working_directory";
-pub const RESTART_REVISION_UNSUPPORTED_CODE: &str = "restart_revision_unsupported";
 
-/// The restart, task-run-state and status routes' error: every
+/// `ErrorBody.code`s of the replay and restart routes' source choice and copy
+/// (package 7b, spec D11-D13).
+pub const INVALID_SOURCE_CODE: &str = "invalid_source";
+pub const REPLAY_BREAKPOINTS_UNSUPPORTED_CODE: &str = "replay_breakpoints_unsupported";
+pub const REPLAY_TASK_NOT_IN_SOURCE_CODE: &str = "replay_task_not_in_source";
+pub const FLOW_VERSION_NOT_FOUND_CODE: &str = "flow_version_not_found";
+pub const TASK_RUN_NOT_FOUND_CODE: &str = "task_run_not_found";
+
+/// Which source a replay or a restart into a new execution runs (spec D6,
+/// D11): the replayed execution's frozen source, the flow's current draft,
+/// or a published version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceChoice {
+    Frozen,
+    Current,
+    Version(i32),
+}
+
+impl SourceChoice {
+    /// The query spelling: `frozen`, `current` or `version:N`.
+    pub fn wire(self) -> String {
+        match self {
+            Self::Frozen => "frozen".into(),
+            Self::Current => "current".into(),
+            Self::Version(n) => format!("version:{n}"),
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "frozen" => Some(Self::Frozen),
+            "current" => Some(Self::Current),
+            _ => s
+                .strip_prefix("version:")
+                .and_then(|n| n.parse::<i32>().ok())
+                .filter(|n| *n >= 1)
+                .map(Self::Version),
+        }
+    }
+}
+
+/// `source` and Kestra's `revision` (an integer N, the same as `version:N`).
+/// Both at once, or a spelling outside the three, is 400 `invalid_source`.
+fn source_choice(
+    source: Option<&str>,
+    revision: Option<&str>,
+) -> std::result::Result<SourceChoice, ExecOpError> {
+    let invalid = |m: String| ExecOpError::Coded(StatusCode::BAD_REQUEST, INVALID_SOURCE_CODE, m);
+    match (source, revision) {
+        (Some(_), Some(_)) => Err(invalid("pass `source` or `revision`, not both".to_string())),
+        (None, Some(r)) => r
+            .parse::<i32>()
+            .ok()
+            .filter(|n| *n >= 1)
+            .map(SourceChoice::Version)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "`revision` must be a flow version number of 1 or more, not `{r}`"
+                ))
+            }),
+        (Some(s), None) => SourceChoice::parse(s).ok_or_else(|| {
+            invalid(format!(
+                "`source` must be `frozen`, `current` or `version:N` (N of 1 or more), not `{s}`"
+            ))
+        }),
+        (None, None) => Ok(SourceChoice::Frozen),
+    }
+}
+
+/// The text of the chosen source. `flow` is the execution's flow, already
+/// through [`startable_flow`]; a version is read scoped by the workspace
+/// through it, so another flow's version is `flow_version_not_found`.
+async fn source_text(
+    st: &WorkflowState,
+    ws: Uuid,
+    detail: &crate::repo::ExecutionDetail,
+    flow: &crate::repo::FlowRow,
+    choice: SourceChoice,
+) -> std::result::Result<String, ExecOpError> {
+    match choice {
+        SourceChoice::Frozen => Ok(detail.source.clone()),
+        SourceChoice::Current => Ok(flow.source.clone()),
+        SourceChoice::Version(n) => {
+            let row = match st.repo.get_version(ws, flow.id, n).await {
+                Ok(row) => row,
+                Err(Error::NotFound(_)) => {
+                    return Err(ExecOpError::Coded(
+                        StatusCode::NOT_FOUND,
+                        FLOW_VERSION_NOT_FOUND_CODE,
+                        format!("flow version {n}"),
+                    ))
+                }
+                Err(e) => return Err(e.into()),
+            };
+            row.snapshot
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    Error::Internal(anyhow::anyhow!(
+                        "flow version {} has no source in its snapshot",
+                        row.id
+                    ))
+                    .into()
+                })
+        }
+    }
+}
+
+/// A chosen source (`current` or `version:N`) whose own YAML says
+/// `disabled: true` is refused 409, with [`startable_flow`]'s message: Kestra
+/// loads the chosen revision and refuses it when it is disabled
+/// (`FlowService.getFlowIfExecutableOrThrow`, `FlowService.java:861-880`,
+/// called by the replay and restart controllers, `EC:1450`, `:1494`). The
+/// frozen source is not judged here: it is what already ran, and the flow's
+/// current state is [`startable_flow`]'s.
+fn refuse_disabled_source(choice: SourceChoice, source: &str) -> EgretResult<()> {
+    if choice == SourceChoice::Frozen {
+        return Ok(());
+    }
+    let parsed = parse(source)
+        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
+    if parsed.disabled {
+        return Err(Error::Conflict(
+            "Cannot execute flow: flow is disabled.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The restart, task-run-state, status and replay routes' error: every
 /// [`egret_core::Error`] (404, and the uncoded 400 of a loop iteration), plus
-/// the coded 409s and the coded 400.
+/// the coded 409s, 404s and 400s.
 #[derive(Debug)]
 pub enum ExecOpError {
     Core(Error),
@@ -3664,6 +3925,75 @@ impl ExecOpError {
         }
     }
 
+    /// A worker refusal of a replay or a restart into a new execution
+    /// (package 7b). Nothing was written.
+    /// `task_run` is the run a replay from a task was asked for, which the
+    /// worker's `TaskRunNotFound` does not carry.
+    fn from_replay_refusal(
+        id: Uuid,
+        r: crate::worker::ReplayRefused,
+        task_run: Option<Uuid>,
+    ) -> Self {
+        use crate::executor::MatchFault;
+        use crate::worker::ReplayRefused as R;
+        match r {
+            R::NotTerminal(state) => Self::Core(Error::Conflict(format!(
+                "execution {id} is {state} and has not finished; only a terminal execution can \
+                 be replayed"
+            ))),
+            R::LoopIteration { root } => Self::loop_iteration(id, root, "cannot be replayed"),
+            R::NotRestartable(state) => Self::conflict(
+                NOT_RESTARTABLE_CODE,
+                format!(
+                    "execution {id} is {state}; only a FAILED or PAUSED execution can be restarted"
+                ),
+            ),
+            R::NothingToRestart => Self::conflict(
+                NOTHING_TO_RESTART_CODE,
+                format!("execution {id} has no FAILED or PAUSED task run to restart from"),
+            ),
+            R::FilesPruned => Self::files_pruned(id),
+            R::AfterExecutionRunning => Self::after_execution(id),
+            R::TaskRunNotFound => match task_run {
+                Some(t) => Self::task_run_not_found(id, &t.to_string()),
+                None => ExecOpError::Coded(
+                    StatusCode::NOT_FOUND,
+                    TASK_RUN_NOT_FOUND_CODE,
+                    format!("a task run of execution {id}"),
+                ),
+            },
+            R::InsideWorkingDirectory => Self::conflict(
+                INSIDE_WORKING_DIRECTORY_CODE,
+                "the task run is inside a WorkingDirectory, whose directory is closed; replay \
+                 from the WorkingDirectory's own task run instead, which re-runs the block whole"
+                    .to_string(),
+            ),
+            R::TaskNotInSource { task_id, why } => ExecOpError::Coded(
+                StatusCode::BAD_REQUEST,
+                REPLAY_TASK_NOT_IN_SOURCE_CODE,
+                format!(
+                    "task `{task_id}` {}; every task the new execution keeps or runs again must \
+                     be in the same place, and of the same kind, in the chosen source",
+                    match why {
+                        MatchFault::Missing => "is not in the chosen source",
+                        MatchFault::Moved =>
+                            "sits under another parent or list in the chosen source",
+                        MatchFault::OtherKind => "is of another kind in the chosen source",
+                    }
+                ),
+            ),
+        }
+    }
+
+    fn task_run_not_found(id: Uuid, task_run: &str) -> Self {
+        ExecOpError::Coded(
+            StatusCode::NOT_FOUND,
+            TASK_RUN_NOT_FOUND_CODE,
+            // Rendered as "not found: task run {t} in execution {id}".
+            format!("task run {task_run} in execution {id}"),
+        )
+    }
+
     fn after_execution(id: Uuid) -> Self {
         Self::conflict(
             AFTER_EXECUTION_RUNNING_CODE,
@@ -3684,10 +4014,10 @@ impl axum::response::IntoResponse for ExecOpError {
         match self {
             ExecOpError::Core(e) => e.into_response(),
             ExecOpError::Coded(status, code, message) => {
-                let error = if status == StatusCode::CONFLICT {
-                    Error::Conflict(message).to_string()
-                } else {
-                    Error::InvalidInput(message).to_string()
+                let error = match status {
+                    StatusCode::CONFLICT => Error::Conflict(message).to_string(),
+                    StatusCode::NOT_FOUND => Error::NotFound(message).to_string(),
+                    _ => Error::InvalidInput(message).to_string(),
                 };
                 (
                     status,
@@ -3702,14 +4032,32 @@ impl axum::response::IntoResponse for ExecOpError {
     }
 }
 
-/// `POST .../executions/{id}/restart`'s query. Only here so the refusal of
-/// `revision` is documented; the handler answers 400 to its presence.
+/// `POST .../executions/{id}/restart`'s query (package 7b, spec D3, D11).
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 pub struct RestartQuery {
-    /// **Not supported.** Restarting from an older revision of the flow
-    /// arrives with package 7b; any value answers 400
-    /// `restart_revision_unsupported`.
+    /// `frozen` (the default: restart in place, 200), `current` (the flow's
+    /// draft) or `version:N` (published version N, N ≥ 1). Any source but
+    /// `frozen` restarts into a NEW execution (201).
+    pub source: Option<String>,
+    /// Kestra's spelling of `version:N`: an integer N ≥ 1. Not with `source`.
     pub revision: Option<String>,
+}
+
+/// `POST .../executions/{id}/replay`'s query (package 7b, spec D2, D6, D11,
+/// Q3).
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct ReplayQuery {
+    /// Replay from this task run of the execution (Kestra `taskRunId`). Without
+    /// it, the whole execution is replayed.
+    #[serde(rename = "taskRunId")]
+    pub task_run_id: Option<String>,
+    /// `frozen` (default), `current`, or `version:N` (N ≥ 1).
+    pub source: Option<String>,
+    /// Kestra's spelling of `version:N`: an integer N ≥ 1. Not with `source`.
+    pub revision: Option<String>,
+    /// **Not supported** (spec Q3): any value answers 400
+    /// `replay_breakpoints_unsupported`.
+    pub breakpoints: Option<String>,
 }
 
 /// The four states Kestra's UI offers as the target of a state change (D11).
@@ -3762,57 +4110,119 @@ fn state_change_body_refusal(r: axum::extract::rejection::JsonRejection) -> Exec
         RestartQuery,
     ),
     responses(
-        (status = 200, description = "The execution was restarted in place, as Kestra restarts one: it keeps its id, its `FAILED` and `PAUSED` runs are reset, runs that ended `SUCCESS` keep their outputs and are not run again, and it carries the label `system.restarted: true` and `attempt_number + 1`. The body is its detail afterwards.", body = ExecutionDto),
-        (status = 400, description = "The query has a `revision` (code `restart_revision_unsupported`; restarting an older revision is package 7b); or the execution is a **loop iteration** (no code; the message names its loop root, which is restarted instead); or the flow runs `egret.sql` and the caller is not its creator (no code; the tasks run as the creator, as for a replay)", body = egret_core::http::ErrorBody),
+        (status = 200, description = "`source` absent or `frozen`: the execution was restarted in place, as Kestra restarts one: it keeps its id, its `FAILED` and `PAUSED` runs are reset, runs that ended `SUCCESS` keep their outputs and are not run again, and it carries the label `system.restarted: true` and `attempt_number + 1`. The body is its detail afterwards.", body = ExecutionDto),
+        (status = 201, description = "`source=current`, `source=version:N` or `revision=N`: the restart runs in a NEW execution of the chosen source (Kestra's restart with a revision). The old execution is untouched. Its runs are copied with their outputs, the `FAILED` and `PAUSED` ones reset; the new execution carries the label `system.restarted: true`, `attempt_number + 1` and `replayed_from_execution_id` = the old id. The body is the NEW execution — read its `id`.", body = ExecutionDto),
+        (status = 400, description = "`invalid_source`: `source` is not `frozen`, `current` or `version:N` (N ≥ 1), `revision` is not an integer ≥ 1, or both are given. `replay_task_not_in_source`: a task the new execution keeps or runs again is missing from the chosen source, sits under another parent or list there, or is of another kind (the message names the task). No code: the execution is a **loop iteration** (the message names its loop root, which is restarted instead); the flow runs `egret.sql` in the source that would run and the caller is not its creator (the tasks run as the creator, as for a replay); or the chosen source does not parse or plan.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
-        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash or was deleted (as for a replay)", body = egret_core::http::ErrorBody),
-        (status = 409, description = "Nothing is written. The flow is disabled (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the execution's files.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash or was deleted (as for a replay). `flow_version_not_found`: the flow has no published version N.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "Nothing is written. The flow is disabled, or the chosen source (`current` or `version:N`) itself says `disabled: true` (no code, as for a replay). `not_restartable`: the execution is not `FAILED` or `PAUSED` (the message names its state). `nothing_to_restart`: no run is `FAILED` or `PAUSED`. `after_execution_running`: the execution has ended but its `afterExecution:` tasks still run. `files_pruned`: the retention pruner deleted the files of the execution, or of an execution it was replayed from.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
-/// Restart a `FAILED` or `PAUSED` execution in place (Kestra's restart).
+/// Restart a `FAILED` or `PAUSED` execution (Kestra's restart): in place on
+/// its frozen source (the default), or into a new execution on another
+/// source (package 7b, spec D3).
 ///
 /// The scoped read keeps a foreign id from reaching the worker, which is
-/// unscoped; every other check is
-/// [`worker::restart_execution`](crate::worker::restart_execution)'s, made under
-/// the execution's lock, and its answer is authoritative.
+/// unscoped; every other check is the worker's
+/// ([`worker::restart_execution`](crate::worker::restart_execution) in place,
+/// [`worker::replay_execution`](crate::worker::replay_execution) into a new
+/// execution), made under the execution's lock, and its answer is
+/// authoritative.
 async fn restart_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<RestartQuery>,
-) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
+) -> std::result::Result<(StatusCode, Json<ExecutionDto>), ExecOpError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
-    let before = st.executions.get(ctx.workspace_id.0, id).await?;
-    if q.revision.is_some() {
-        return Err(ExecOpError::Coded(
-            StatusCode::BAD_REQUEST,
-            RESTART_REVISION_UNSUPPORTED_CODE,
-            "restarting from a revision is not supported yet; it arrives with package 7b".into(),
+    let choice = source_choice(q.source.as_deref(), q.revision.as_deref())?;
+    let ws = ctx.workspace_id.0;
+    let caller = ctx.principal.user_id.0;
+    let before = st.executions.get(ws, id).await?;
+    if choice == SourceChoice::Frozen {
+        rerun_gate(&st, ws, caller, &before, &before.source).await?;
+        match crate::worker::restart_execution(&st.db.pool, id).await? {
+            crate::worker::Restarted::Done => {}
+            crate::worker::Restarted::Refused(r) => {
+                return Err(ExecOpError::from_restart_refusal(id, r));
+            }
+        }
+        st.audit.emit(egret_audit::mutation_for(
+            &ctx.principal,
+            Some(ws),
+            "workflow_execution:restart",
+            "workflow_execution",
+            Some(id.to_string()),
+            serde_json::json!({ "from_state": before.execution.state }),
+        ));
+        let detail = st.executions.get(ws, id).await?;
+        return Ok((
+            StatusCode::OK,
+            Json(ExecutionDto::new(
+                detail,
+                true,
+                st.trigger_flags.worker_enabled,
+            )),
         ));
     }
-    rerun_gate(&st, ctx.workspace_id.0, ctx.principal.user_id.0, &before).await?;
-    match crate::worker::restart_execution(&st.db.pool, id).await? {
-        crate::worker::Restarted::Done => {}
-        crate::worker::Restarted::Refused(r) => {
-            return Err(ExecOpError::from_restart_refusal(id, r));
-        }
+    // Into a new execution (D3). A loop iteration has no flow of its own to
+    // choose a source of: refused naming its root, as the in-place restart is.
+    if let (Some(root), Some(_)) = (
+        before.execution.parent_execution_id,
+        before.execution.loop_index,
+    ) {
+        return Err(ExecOpError::loop_iteration(id, root, "cannot be restarted"));
     }
+    let flow_id = before
+        .execution
+        .flow_id
+        .ok_or_else(|| Error::NotFound("flow".into()))?;
+    let flow = startable_flow(&st, ws, flow_id).await?;
+    let source = source_text(&st, ws, &before, &flow, choice).await?;
+    refuse_disabled_source(choice, &source)?;
+    rerun_gate(&st, ws, caller, &before, &source).await?;
+    let new_id = Uuid::new_v4();
+    let replaced = crate::worker::replay_execution(
+        &st.db.pool,
+        &crate::worker::ReplayRequest {
+            workspace_id: ws,
+            from: id,
+            source: &source,
+            kind: crate::worker::ReplayKind::RestartOnSource,
+            inputs: crate::worker::ReplayInputs::Reuse,
+            started_by: caller,
+            id: new_id,
+            input_files: Vec::new(),
+        },
+    )
+    .await?
+    .map_err(|r| ExecOpError::from_replay_refusal(id, r, None))?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
-        Some(ctx.workspace_id.0),
+        Some(ws),
         "workflow_execution:restart",
         "workflow_execution",
-        Some(id.to_string()),
-        serde_json::json!({ "from_state": before.execution.state }),
+        Some(replaced.to_string()),
+        // Both ids, as the replay record names them: the record is filed
+        // under the new execution, and `replayed_from` is the one restarted.
+        serde_json::json!({
+            "from_state": before.execution.state,
+            "replayed_from": id,
+            "replacement": replaced,
+            "source": choice.wire(),
+        }),
     ));
-    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(ExecutionDto::new(
-        detail,
-        true,
-        st.trigger_flags.worker_enabled,
-    )))
+    let detail = st.executions.get(ws, replaced).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ExecutionDto::new(
+            detail,
+            true,
+            st.trigger_flags.worker_enabled,
+        )),
+    ))
 }
 
 #[utoipa::path(
@@ -3857,7 +4267,14 @@ async fn set_task_run_state(
         .ok_or_else(|| Error::NotFound("task run".into()))?;
     let from_state = run.state.clone();
     let target = body.state.run_state();
-    rerun_gate(&st, ctx.workspace_id.0, ctx.principal.user_id.0, &before).await?;
+    rerun_gate(
+        &st,
+        ctx.workspace_id.0,
+        ctx.principal.user_id.0,
+        &before,
+        &before.source,
+    )
+    .await?;
     match crate::worker::set_task_run_state(&st.db.pool, id, task_run_id, target).await? {
         Ok(()) => {}
         Err(r) => return Err(ExecOpError::from_state_change_refusal(id, r)),
@@ -4473,7 +4890,10 @@ pub fn management_router() -> Router<WorkflowState> {
         )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/replay",
-            post(replay_execution),
+            // As the start route: the handler applies its own limit per
+            // content type -- 2 MiB for JSON, `max_file_bytes` + 1 MiB for
+            // multipart -- so the router's default is off here.
+            post(replay_execution).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/kill",

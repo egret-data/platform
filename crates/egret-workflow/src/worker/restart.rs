@@ -54,6 +54,29 @@ pub const RESTARTED_LABEL_KEY: &str = "system.restarted";
 /// The value of [`RESTARTED_LABEL_KEY`].
 pub const RESTARTED_LABEL_VALUE: &str = "true";
 
+/// The label a replay puts on its new execution (package 7b D10, Kestra
+/// `Label.REPLAY`, `Label.java:29`).
+pub const REPLAY_LABEL_KEY: &str = "system.replay";
+/// The value of [`REPLAY_LABEL_KEY`].
+pub const REPLAY_LABEL_VALUE: &str = "true";
+
+/// `labels` (the column's `[{"key", "value"}]`, as `labels::own_labels`
+/// reads it) with `key: value` appended unless a label of that key is there.
+pub(super) fn with_label(
+    labels: Option<&serde_json::Value>,
+    key: &str,
+    value: &str,
+) -> serde_json::Value {
+    let mut list = crate::labels::own_labels(labels);
+    if !list.iter().any(|l| l.key == key) {
+        list.push(Label {
+            key: key.to_string(),
+            value: value.to_string(),
+        });
+    }
+    serde_json::to_value(&list).expect("labels serialise")
+}
+
 /// What [`restart_execution`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Restarted {
@@ -140,8 +163,12 @@ struct Prepared {
 /// Which pure function computed a [`Prepared`]'s commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
-    /// `executor::restart`: the execution ends on `RESTARTED`.
+    /// `executor::restart` (or, for a restart on another source, package
+    /// 7b's `executor::reset_copied`): the execution ends on `RESTARTED`.
     Restart,
+    /// Package 7b: `executor::reset_copied` on a replay's copy; ends on
+    /// `RESTARTED`, labelled `system.replay`.
+    Replay,
     /// `executor::mark_as` (D11): `RESTARTED`, `CANCELLED`, or unchanged
     /// while a run is still `PAUSED`.
     MarkAs,
@@ -243,6 +270,51 @@ async fn prepare(
         labels: row.labels,
         op: Op::Restart,
     }))
+}
+
+/// Which label a copy's reset job adds (package 7b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CopyOp {
+    /// A replay from a task run: `system.replay`.
+    Replay,
+    /// A restart on another source: `system.restarted`.
+    Restart,
+}
+
+/// **A copied execution's reset, as 7a's restart job** (package 7b): the
+/// new execution locked, its commands computed by `executor::reset_copied`
+/// on the copied runs (`reset`, new indexes), opened by the walk
+/// ([`open`]): the side writes (`attempt_number + 1`, the label, the reset
+/// runs' results and leases cleared), then the settle from `RESTARTED`.
+pub(super) async fn copy_job(
+    conn: &mut PgConnection,
+    id: Uuid,
+    stack: Stack,
+    reset: &[crate::executor::RunIx],
+    op: CopyOp,
+) -> Result<claim::Job> {
+    let Locked {
+        ctx,
+        state,
+        now,
+        row,
+    } = lock(conn, id, stack).await?;
+    let cmds = crate::executor::reset_copied(&ctx.plan, &state, reset, now);
+    let op = match op {
+        CopyOp::Replay => Op::Replay,
+        CopyOp::Restart => Op::Restart,
+    };
+    Ok(claim::Job::Restart(Box::new(Opening {
+        id,
+        prepared: Prepared {
+            ctx,
+            state,
+            now,
+            cmds,
+            labels: row.labels,
+            op,
+        },
+    })))
 }
 
 /// An execution loaded under its lock, its runs locked too, and the facts
@@ -447,10 +519,15 @@ pub(super) async fn open(
         apply(&mut state, cmd);
     }
     debug_assert!(
-        op != Op::Restart || state.history.last() == Some(&RunState::Restarted),
-        "executor::restart ends on RESTARTED"
+        !matches!(op, Op::Restart | Op::Replay)
+            || state.history.last() == Some(&RunState::Restarted),
+        "executor::restart and reset_copied end on RESTARTED"
     );
-    side_writes(conn, id, &cmds, labels.as_ref()).await?;
+    let label = match op {
+        Op::Replay => (REPLAY_LABEL_KEY, REPLAY_LABEL_VALUE),
+        Op::Restart | Op::MarkAs => (RESTARTED_LABEL_KEY, RESTARTED_LABEL_VALUE),
+    };
+    side_writes(conn, id, &cmds, labels.as_ref(), label).await?;
     for run in no_iteration {
         let run_id: Uuid = sqlx::query_scalar(
             "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND run_ix = $2",
@@ -487,6 +564,7 @@ async fn side_writes(
     id: Uuid,
     cmds: &RestartCommands,
     labels: Option<&serde_json::Value>,
+    (label_key, label_value): (&str, &str),
 ) -> Result<()> {
     sqlx::query("UPDATE workflow.executions SET attempt_number = attempt_number + 1 WHERE id = $1")
         .bind(id)
@@ -496,15 +574,14 @@ async fn side_writes(
 
     // The label, in the column's own shape (`[{"key", "value"}]`, as
     // `labels::own_labels` reads it back and `write_render_side` writes it).
-    let mut list = crate::labels::own_labels(labels);
-    if !list.iter().any(|l| l.key == RESTARTED_LABEL_KEY) {
-        list.push(Label {
-            key: RESTARTED_LABEL_KEY.to_string(),
-            value: RESTARTED_LABEL_VALUE.to_string(),
-        });
+    // Written only when the label is not there yet, as before package 7b.
+    if !crate::labels::own_labels(labels)
+        .iter()
+        .any(|l| l.key == label_key)
+    {
         sqlx::query("UPDATE workflow.executions SET labels = $2 WHERE id = $1")
             .bind(id)
-            .bind(serde_json::to_value(&list).expect("labels serialise"))
+            .bind(with_label(labels, label_key, label_value))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
