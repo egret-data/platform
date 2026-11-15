@@ -7,7 +7,7 @@ mod cli;
 use anyhow::Context;
 use chrono::Duration;
 use clap::Parser;
-use cli::{Cli, Command, WorkspaceAction};
+use cli::{BackfillAction, Cli, Command, WorkspaceAction};
 use egret_auth::groups::GroupRepo;
 use egret_auth::password::hash_password;
 use egret_auth::routes::AuthState;
@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Migrate => migrate(config).await,
         Command::Init { force } => init(config, force).await,
         Command::Workspace { action } => workspace_cmd(config, action).await,
+        Command::Backfill { action } => backfill_cmd(config, action).await,
     }
 }
 
@@ -206,6 +207,20 @@ async fn connect_db(config: &Config) -> anyhow::Result<Db> {
 // ---------------------------------------------------------------------------
 // Workspace membership management
 // ---------------------------------------------------------------------------
+
+async fn backfill_cmd(config: Config, action: BackfillAction) -> anyhow::Result<()> {
+    let db = connect_db(&config).await?;
+    match action {
+        BackfillAction::CatalogClientSa => {
+            let r = egret_bin::backfill_catalog_sa::backfill_catalog_client_sa(&db.pool).await?;
+            println!(
+                "Catalog clients given a service account: {} (already owned: {})",
+                r.created, r.skipped
+            );
+            Ok(())
+        }
+    }
+}
 
 async fn workspace_cmd(config: Config, action: WorkspaceAction) -> anyhow::Result<()> {
     let db = connect_db(&config).await?;

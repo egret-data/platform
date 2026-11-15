@@ -29,6 +29,18 @@ pub enum Command {
         #[command(subcommand)]
         action: WorkspaceAction,
     },
+    /// One-shot data backfills (idempotent).
+    Backfill {
+        #[command(subcommand)]
+        action: BackfillAction,
+    },
+}
+
+/// Backfill operations.
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum BackfillAction {
+    /// Give every catalog client without one an owning workspace service account.
+    CatalogClientSa,
 }
 
 /// Workspace membership operations.
@@ -66,6 +78,16 @@ mod tests {
         assert_eq!(
             Cli::parse_from(["egret", "init", "--force"]).command,
             Command::Init { force: true }
+        );
+    }
+
+    #[test]
+    fn parses_backfill_catalog_client_sa() {
+        assert_eq!(
+            Cli::parse_from(["egret", "backfill", "catalog-client-sa"]).command,
+            Command::Backfill {
+                action: BackfillAction::CatalogClientSa
+            }
         );
     }
 
