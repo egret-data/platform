@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, useLocation, useParams } from "react-router-dom";
 import {
-  Activity, ChevronDown, ChevronRight, Compass, Database,
+  Activity, Bot, ChevronDown, ChevronRight, Compass, Database,
   FolderKanban, FolderTree, Gauge, HardDrive, History, KeyRound, Library, ListChecks, type LucideIcon,
   PanelLeftClose, PanelLeftOpen, Plug, ScrollText, Server, Settings, Share2, ShieldCheck,
   Tags, UserCog, Users, UsersRound, Workflow, Zap,
@@ -112,6 +112,8 @@ const GOVERNANCE_GROUPS: NavGroup[] = [
       // DG redesign #2: people, groups and roles, directly after Data. Gated
       // `policy:read` only, as its route is (spec P2).
       { label: "People & groups", icon: UsersRound, perm: "policy:read", to: "people" },
+      // SA3: service accounts, the non-human principals; gated `user:read`, as its route is.
+      { label: "Service accounts", icon: Bot, perm: "user:read", to: "service-accounts" },
       { label: "Classifications", icon: Tags, perm: "tag:read", to: "classifications" },
       // Platform-wide (cross-workspace), so it lives here rather than inside a
       // single workspace. Admin-only until the real feature + its permission land.

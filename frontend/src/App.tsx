@@ -66,6 +66,9 @@ const OverviewPage = lazy(() => import("@/routes/governance/overview/OverviewPag
  */
 const PeopleRoutes = lazy(() => import("@/routes/governance/people/PeopleRoutes"));
 
+/** The Governance Service accounts area (SA3): list and detail, code-split like People (FE-ROUTE-2). */
+const ServiceAccountsRoutes = lazy(() => import("@/routes/governance/service-accounts/ServiceAccountsRoutes"));
+
 /**
  * One grant's and one rule's pages (spec §2 "Single items"): People area
  * modules, mounted at `/governance/grants/:id` and `/governance/rules/:id`
@@ -610,6 +613,17 @@ function GovernanceRoutes() {
               <RequirePermission perm="policy:read">
                 <LazyRouteArea area="People & groups" fallback={<PeopleFallback />}>
                   <PeopleRoutes />
+                </LazyRouteArea>
+              </RequirePermission>
+            }
+          />
+          {/* SA3: service accounts, gated `user:read`. */}
+          <Route
+            path="service-accounts/*"
+            element={
+              <RequirePermission perm="user:read">
+                <LazyRouteArea area="Service accounts" fallback={<PeopleFallback />}>
+                  <ServiceAccountsRoutes />
                 </LazyRouteArea>
               </RequirePermission>
             }
