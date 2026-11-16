@@ -13860,6 +13860,437 @@
         }
       }
     },
+    "/api/control-plane/service-accounts/{id}/credentials": {
+      "get": {
+        "tags": [
+          "control-plane-access"
+        ],
+        "operationId": "list_credentials",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Service account user id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account's credentials across both audiences, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Credential"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing user:read permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "control-plane-access"
+        ],
+        "operationId": "create_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Service account user id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCredentialBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Credential minted; client_secret is shown ONCE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedCredential"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad audience/binding, or the warehouse is in a different workspace than a workspace service account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing service_account:manage in the account's workspace (data-api) or catalog_registry:create (catalog)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service account or warehouse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/service-accounts/{id}/credentials/{cid}/expiry": {
+      "post": {
+        "tags": [
+          "control-plane-access"
+        ],
+        "operationId": "set_credential_expiry",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Service account user id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cid",
+            "in": "path",
+            "description": "Credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetExpiryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Expiry set (null clears it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Credential"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing user:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service account or credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/service-accounts/{id}/credentials/{cid}/revoke": {
+      "post": {
+        "tags": [
+          "control-plane-access"
+        ],
+        "operationId": "revoke_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Service account user id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cid",
+            "in": "path",
+            "description": "Credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked: the verifier refuses it from now on",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Credential"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing user:update permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service account or credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/service-accounts/{id}/credentials/{cid}/rotate": {
+      "post": {
+        "tags": [
+          "control-plane-access"
+        ],
+        "operationId": "rotate_credential",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Service account user id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "cid",
+            "in": "path",
+            "description": "Credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A replacement minted (same audience, name and binding) and the old one revoked; client_secret is shown ONCE",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedCredential"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing user:update, or the audience mint permission (service_account:manage in the account workspace / catalog_registry:create)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service account or credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The credential is already revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/service-accounts/{id}/disable": {
       "post": {
         "tags": [
@@ -42168,6 +42599,13 @@
           }
         }
       },
+      "Audience": {
+        "type": "string",
+        "enum": [
+          "data-api",
+          "catalog"
+        ]
+      },
       "AuditEntryDto": {
         "type": "object",
         "required": [
@@ -43049,6 +43487,29 @@
             "type": "string",
             "format": "date-time",
             "description": "When this attachment was recorded — `engine_catalog_attachments.created_at`.\n\nThe clock a `pending` attachment has been waiting on. `pending` is\nwritten only by the INSERT that creates the row (engine create and\nattach; nothing flips a settled attachment back), so this is the moment\nthe wait began. A UI deciding whether a `pending` has outlived the\nStarRocks bootstrap must measure against THIS and not against the\ncatalog's `updatedAt`: attaching an existing catalog never touches the\ncatalog row, so its `updatedAt` is already arbitrarily old."
+          }
+        }
+      },
+      "CatalogBinding": {
+        "type": "object",
+        "description": "What a catalog credential is bound to.",
+        "required": [
+          "warehouse_id",
+          "catalog_role_id",
+          "consumer_type"
+        ],
+        "properties": {
+          "warehouse_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "catalog_role_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "consumer_type": {
+            "type": "string",
+            "description": "`engine` or `external`."
           }
         }
       },
@@ -44479,6 +44940,42 @@
           }
         }
       },
+      "CreateCredentialBody": {
+        "type": "object",
+        "required": [
+          "audience"
+        ],
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/Audience"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to `<service account name> <audience> credential`."
+          },
+          "catalog": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CatalogBinding",
+                "description": "Required for `catalog`, forbidden for `data-api`."
+              }
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "CreateDashboard": {
         "type": "object",
         "required": [
@@ -45307,6 +45804,26 @@
           }
         }
       },
+      "CreatedCredential": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Credential"
+          },
+          {
+            "type": "object",
+            "required": [
+              "client_secret"
+            ],
+            "properties": {
+              "client_secret": {
+                "type": "string",
+                "description": "Shown ONCE; only a hash is stored."
+              }
+            }
+          }
+        ],
+        "description": "A freshly minted credential: the row plus its one-time secret."
+      },
       "CreatedPolicyId": {
         "type": "object",
         "description": "Doc-only mirror of the `{ \"id\": <n> }` body the create/update handlers return.",
@@ -45385,6 +45902,78 @@
             "$ref": "#/components/schemas/CompileResponse"
           }
         }
+      },
+      "Credential": {
+        "type": "object",
+        "description": "One credential of a service account, whichever table holds it.",
+        "required": [
+          "id",
+          "service_account_id",
+          "audience",
+          "name",
+          "client_id",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "service_account_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "audience": {
+            "$ref": "#/components/schemas/Audience"
+          },
+          "name": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string",
+            "description": "The OAuth2 `client_id` the client presents."
+          },
+          "status": {
+            "$ref": "#/components/schemas/CredentialStatus"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "catalog": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CatalogBinding"
+              }
+            ]
+          }
+        }
+      },
+      "CredentialStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "revoked",
+          "expired"
+        ]
       },
       "DashboardCardDto": {
         "type": "object",
@@ -58386,6 +58975,19 @@
           "details": {
             "type": "string",
             "description": "Ignored when `certified` is false — withdrawing clears the note rather than leaving a\nstale justification attached to an uncertified dataset."
+          }
+        }
+      },
+      "SetExpiryBody": {
+        "type": "object",
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "`null` clears the expiry. A time in the past expires the credential now."
           }
         }
       },
