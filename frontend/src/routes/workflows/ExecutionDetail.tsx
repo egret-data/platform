@@ -1,7 +1,7 @@
 import { lazy, useId, useMemo, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { CircleStop, History, Loader2, Pause as PauseIcon, Pencil, Play, RotateCcw, RotateCw } from "lucide-react";
+import { CircleStop, History, Loader2, Pause as PauseIcon, Pencil, Play, RotateCcw, RotateCw, Tag, Trash2 } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowGetExecution,
@@ -41,6 +41,8 @@ import ExecutionOutputsTab from "@/components/workflows/executions/outputs/Execu
 import { OutputsTree } from "@/components/workflows/executions/outputs/OutputsTree";
 import {
   canChangeStatus,
+  canDelete,
+  canEditLabels,
   canKill,
   canPause,
   canReplay,
@@ -58,6 +60,8 @@ import {
   stateChangeRefusal,
 } from "@/components/workflows/executions/actions";
 import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
+import { DeleteExecutionDialog } from "@/components/workflows/executions/DeleteExecutionDialog";
+import { EditLabelsDialog } from "@/components/workflows/executions/EditLabelsDialog";
 import { ResumeDialog } from "@/components/workflows/executions/ResumeDialog";
 import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
 import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
@@ -360,7 +364,7 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
   );
 }
 
-type Pending = "resume" | "pause" | "replay" | "kill" | "restart" | "status" | null;
+type Pending = "resume" | "pause" | "replay" | "kill" | "restart" | "status" | "labels" | "delete" | null;
 
 /** The kill route's 409 code: the execution ended before the kill reached it (workflow kill spec D3). */
 const EXECUTION_TERMINATED = "execution_terminated";
@@ -369,7 +373,9 @@ const KILL_NOT_APPLIED = "kill_not_applied";
 
 /**
  * Resume, Replay (spec §5.2) and Kill (workflow kill spec §7), each confirmed
- * first (FE-ACTION-1), each saying why when disabled (FE-ACTION-4).
+ * first (FE-ACTION-1), each saying why when disabled (FE-ACTION-4). Edit labels
+ * and Delete (package 7d D10, Q7) are always shown, enabled once the execution
+ * is idle.
  */
 function ExecutionActions({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
   const refresh = useRefreshExecution(ws, execution.id);
@@ -397,6 +403,8 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   const restartState = canRestart(execution);
   const statusShown = showsChangeStatus(execution);
   const statusState = canChangeStatus(execution);
+  const labelsState = canEditLabels(execution);
+  const deleteState = canDelete(execution);
 
   const runPause = () =>
     runExecutionAction({
@@ -491,6 +499,14 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
             {killState.ok ? "Kill" : "Killing…"}
           </ReasonButton>
         ) : null}
+        <ReasonButton enablement={labelsState} reasonId={`${reasonsId}-labels`} variant="outline" onClick={() => setOpen("labels")}>
+          <Tag aria-hidden />
+          Edit labels
+        </ReasonButton>
+        <ReasonButton enablement={deleteState} reasonId={`${reasonsId}-delete`} variant="outline" onClick={() => setOpen("delete")}>
+          <Trash2 aria-hidden />
+          Delete
+        </ReasonButton>
       </div>
       <DisabledReasons
         actions={[
@@ -500,8 +516,12 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
           ...(replayShown ? [{ id: `${reasonsId}-replay`, label: "Replay", enablement: replayState }] : []),
           ...(pauseShown ? [{ id: `${reasonsId}-pause`, label: "Pause", enablement: pauseState }] : []),
           ...(killShown ? [{ id: `${reasonsId}-kill`, label: "Kill", enablement: killState }] : []),
+          { id: `${reasonsId}-labels`, label: "Edit labels", enablement: labelsState },
+          { id: `${reasonsId}-delete`, label: "Delete", enablement: deleteState },
         ]}
       />
+      <EditLabelsDialog ws={ws} execution={execution} open={open === "labels"} onOpenChange={(o) => setOpen(o ? "labels" : null)} />
+      <DeleteExecutionDialog ws={ws} execution={execution} open={open === "delete"} onOpenChange={(o) => setOpen(o ? "delete" : null)} />
       <ResumeDialog ws={ws} execution={execution} open={open === "resume"} onOpenChange={(o) => setOpen(o ? "resume" : null)} />
       <ConfirmAction
         open={open === "pause"}

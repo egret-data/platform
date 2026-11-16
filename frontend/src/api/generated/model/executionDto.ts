@@ -44,7 +44,9 @@ export type ExecutionDto = ExecutionListItemDto & {
   can_manage: boolean;
   /**
      * What the run sees as `labels`: the flow's, then `labels`, the later key
-     * winning. Empty when the frozen source does not parse.
+     * winning; or, once a person replaced them (`POST …/labels`), exactly
+     * `labels`. Empty when the frozen source does not parse and nothing was
+     * replaced.
      */
   effective_labels: LabelDto[];
   /**
@@ -62,4 +64,10 @@ export type ExecutionDto = ExecutionListItemDto & {
      * every other state.
      */
   paused_by_hand: boolean;
+  /**
+     * `true` when the execution has ended and no task run of it is still
+     * running, `afterExecution:` runs included (`workflow.execution_is_idle`).
+     * Delete and Edit labels need it; the routes check again.
+     */
+  idle: boolean;
 };

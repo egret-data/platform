@@ -155,6 +155,9 @@ Mỗi gói đi qua quy trình thường lệ: spec (hoặc một mục spec) →
 16. **#7:** 7c xây pause thủ công (`POST …/pause`), resume với inputs `onResume` và resume-validate (`POST …/resume/validate`). "pause" và "Resume với inputs `onResume`, và resume-validate" ở dòng #7 thuộc 7c.
 17. **#9:** `onResume` của `Pause` chuyển sang 7c (quyết định của người dùng Q1, 2026-11-15). #9 giữ `behavior:`, `onPause:`, `errors:` và `finally:` của `Pause` (vẫn bị từ chối, `unsupported_pause_property`) và `retry:` của block `AllowFailure`.
 
+**Ghi chú, 2026-11-16 (gói 7d, `docs/en/specs/2026-11-16-workflow-delete-labels-logs-design.md`; các dòng ở trên không bị sửa).**
+18. **#7:** 7d xây xoá execution (`DELETE …/executions/{id}`, chỉ execution gốc đã kết thúc, từ chối khi còn phụ thuộc), API label (`POST …/executions/{id}/labels`, thay toàn bộ danh sách hiển thị, migration 0231 `labels_replaced`), tải log từ server (`GET …/executions/{id}/logs/download`) và xoá log (`DELETE …/executions/{id}/logs`). Các mục "delete (with logs and storage), labels API", "download and delete" của dòng #7 thuộc 7d; logs follow (SSE) vẫn mở.
+
 **Ghi chú, 2026-10-29 (gói #6, spec §5 và §7; các dòng ở trên không bị sửa).**
 13. **#11 thêm: gắn `trigger` trong render các task của flow được kích hoạt.** #6 chỉ gắn `trigger.outputs` trong `inputs:` của Flow trigger; `worker::render` không gắn root `trigger` cho loại trigger nào, nên `{{ trigger.outputs.x }}` (hoặc `{{ trigger.date }}`) trong một task của flow được kích hoạt vẫn render thất bại.
 14. **Việc tiếp theo của KI-112:** input SECRET vẫn bị lộ trong ngữ cảnh render của Flow trigger (#6 che các output SECRET ở đó).

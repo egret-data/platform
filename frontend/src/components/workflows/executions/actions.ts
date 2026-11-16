@@ -1,3 +1,4 @@
+import { ApiError } from "@/api/client";
 import type { ExecutionDto, ExecutionListItemDto } from "@/api/generated/model";
 import type { Enablement } from "@/components/workflows/draftState";
 import { executionLive, isTerminalState, type LiveExecution } from "@/components/workflows/executionState";
@@ -75,6 +76,49 @@ export function canPause(execution: Pick<ExecutionDto, "state" | "runs"> & LoopF
 /** One sentence for the pause route's coded refusal; `null` otherwise. */
 export function pauseRefusal(code: string | undefined): string | null {
   return code === "not_running" ? "The execution is no longer running, so it cannot be paused. Refresh to see its latest state." : null;
+}
+
+/** Delete and Edit labels (package 7d D10): the server needs the execution idle -- ended, afterExecution tasks included. */
+export const DELETE_NOT_IDLE_REASON = "The execution is still running, or its afterExecution tasks are. Kill it first, then delete it";
+export const LABELS_NOT_IDLE_REASON = "Labels can be edited once the execution has ended and its afterExecution tasks have finished";
+
+/** A loop iteration or retry is deleted with the execution it belongs to (D2), never alone. */
+export function canDelete(execution: Pick<ExecutionDto, "idle" | "parent_execution_id">): Enablement {
+  if (execution.parent_execution_id != null) {
+    return { ok: false, reason: "This execution belongs to another execution's run. Delete the run's first execution instead" };
+  }
+  return execution.idle ? { ok: true } : { ok: false, reason: DELETE_NOT_IDLE_REASON };
+}
+
+export function canEditLabels(execution: Pick<ExecutionDto, "idle">): Enablement {
+  return execution.idle ? { ok: true } : { ok: false, reason: LABELS_NOT_IDLE_REASON };
+}
+
+/** One sentence for each coded refusal of the delete route; `null` otherwise (the server's message is shown). */
+export function deleteRefusal(code: string | undefined): string | null {
+  switch (code) {
+    case "not_terminated":
+      return "The execution is running again, or its Flow triggers are still handling its end. Refresh, then try again.";
+    case "not_a_root":
+      return "This execution belongs to another execution's run. Delete the run's first execution instead.";
+    case "has_dependents":
+      return "Subflow executions, replays or restarts point at this one. Delete them first:";
+    default:
+      return null;
+  }
+}
+
+/** One sentence for the labels route's coded refusal; `null` otherwise (an `invalid_labels` message names the label). */
+export function labelsRefusal(code: string | undefined): string | null {
+  return code === "not_terminated" ? "The execution is running again, so its labels cannot be edited now. Refresh to see its state." : null;
+}
+
+/** `has_dependents`' `details` from an `ApiError` body; `null` for anything else. */
+export function dependentsOf(e: unknown): { executions: string[]; total: number } | null {
+  if (!(e instanceof ApiError) || e.code !== "has_dependents") return null;
+  const details = (e.body as { details?: { executions?: unknown; total?: unknown } } | undefined)?.details;
+  const executions = Array.isArray(details?.executions) ? details.executions.filter((x): x is string => typeof x === "string") : [];
+  return { executions, total: typeof details?.total === "number" ? details.total : executions.length };
 }
 
 /** One sentence for each coded refusal of the resume and resume-validate routes; `null` otherwise. */

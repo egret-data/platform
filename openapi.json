@@ -33974,6 +33974,135 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Delete an ended execution and its family (package 7d D1-D4, D9; Kestra\n`ExecutionController.delete`).",
+        "description": "Every check is the worker's, under the execution's lock\n([`worker::delete_execution`](crate::worker::delete_execution), plan S5):\nthe route reads nothing but the permission and the query.",
+        "operationId": "delete_execution",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "deleteStorage",
+            "in": "query",
+            "description": "Default true: also delete the stored files of the execution, its loop\niterations and its retries.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "deleteLogs",
+            "in": "query",
+            "description": "Default true. `false` is refused (400 `delete_logs_required`): an\nexecution's logs always go with it.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "deleteMetrics",
+            "in": "query",
+            "description": "Accepted for Kestra compatibility; egret keeps no metrics.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted, with its loop iterations and retries, their task runs, logs and file index; with `deleteStorage` (the default) their stored files too. Executions its Flow triggers fired are kept, their link to it cleared. Nothing is killed: only an ended execution can be deleted."
+          },
+          "400": {
+            "description": "`delete_logs_required`: `deleteLogs=false` (an execution's logs always go with it); or a flag that is not `true`/`false`, or a malformed `{id}` (no code)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed. A flow in the trash or deleted does not matter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`not_terminated`: the execution, or a loop iteration or retry of it, has not ended or still runs `afterExecution:` tasks; or its Flow triggers have not all heard it ended (try again in a minute). `has_dependents`: subflow children, replays or restarts into a new execution point at it; `details.executions` names up to 20, `details.total` counts them; delete them first. An execution a Flow trigger fired from it does not block: it is kept and its link to this execution is cleared. `not_a_root`: a loop iteration or retry; `details.root` is the execution to delete. Nothing is deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetailedErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error, including the file store failing: nothing was deleted, and the call can be repeated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/ws/{workspace}/workflows/executions/{id}/file": {
@@ -34551,6 +34680,130 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/{id}/labels": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Replace an ended execution's labels (package 7d D5; Kestra\n`ExecutionController.setLabelsOnTerminatedExecution`).",
+        "operationId": "set_execution_labels",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The whole list the execution shows afterwards: it replaces the visible labels, the flow's included. Each key is a lower-case letter then letters, digits, `.`, `_`, `-` (a key the execution already shows may be sent back as it is); values are non-empty; at most 50 labels, keys of 128 and values of 1024 characters. `system.*` labels the execution has are kept whether sent or not; one sent must be unchanged.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/LabelDto"
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Its detail afterwards; `effective_labels` is the new list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`invalid_labels`, naming the label; or a body that is not a list of `{key, value}` (no code)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed. A flow in the trash or deleted does not matter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`not_terminated`: it has not ended, or still runs `afterExecution:` tasks. Nothing is written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}/logs": {
       "get": {
         "tags": [
@@ -34698,6 +34951,292 @@
           },
           "404": {
             "description": "No such execution in this workspace. **An execution belonging to another workspace answers exactly this**, indistinguishably from one that never existed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Delete an execution's log lines by filter (package 7d D8, Q6; Kestra\n`LogController.deleteFromExecution`).",
+        "operationId": "delete_execution_logs",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "query",
+            "description": "Only lines of this task (the YAML's task `id`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "task_run_id",
+            "in": "query",
+            "description": "Only lines of this task run.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "attempt",
+            "in": "query",
+            "description": "Only lines of this attempt, 0-based as `LogLineDto.attempt`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int32"
+            }
+          },
+          {
+            "name": "min_level",
+            "in": "query",
+            "description": "Only lines at this level or above. The five names, upper case, compared\ncase-sensitively; anything else is a 400.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/LogLevel"
+                }
+              ]
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The matching lines are deleted; a line written after this call stays. Allowed while the execution runs."
+          },
+          "400": {
+            "description": "A `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`task_run_id`/`attempt`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}/logs/download": {
+      "get": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "An execution's log as one text file (package 7d D7; Kestra\n`LogController.download`). Authorisation is exactly `GET …/logs`'.",
+        "operationId": "download_execution_logs",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "query",
+            "description": "Only lines of this task (the YAML's task `id`).",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "task_run_id",
+            "in": "query",
+            "description": "Only lines of this task run.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "min_level",
+            "in": "query",
+            "description": "Only lines at this level or above. The five names, upper case, compared\ncase-sensitively; anything else is a 400.",
+            "required": false,
+            "schema": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/components/schemas/LogLevel"
+                }
+              ]
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One line per log line in id order, `<instant RFC 3339 UTC, ms> <LEVEL> <message>`, joined with `\\n`, as `<id>.log`. At most 100 000 lines; then the last line is `… truncated at 100000 lines`. `Cache-Control: no-cache` while the execution has not ended. While the execution runs, lines younger than the 2 s settle lag are left out (as in the paged log API); once it has ended, every committed line is served.",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`task_run_id`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:read permission, or the workflows module is disabled for this workspace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -47778,6 +48317,26 @@
           }
         }
       },
+      "DetailedErrorBody": {
+        "type": "object",
+        "description": "An `ErrorBody` that also carries `details` (package 7d D9, plan S3).",
+        "required": [
+          "error",
+          "code"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "description": "`has_dependents`: `{\"executions\": [uuid, …], \"total\": n}` (at most 20\nnamed, oldest first); `not_a_root`: `{\"root\": uuid}`. Absent for a\nrefusal that carries none (`not_terminated`, `delete_logs_required`)."
+          }
+        }
+      },
       "DiscoveryDoc": {
         "type": "object",
         "description": "OIDC discovery document served at `/.well-known/openid-configuration` so the\nembedded lakekeeper can locate this IdP's JWKS + token endpoint. Doc-only\nmirror of the `serde_json::Value` the handler builds.",
@@ -49177,7 +49736,8 @@
               "can_manage",
               "effective_labels",
               "worker_enabled",
-              "paused_by_hand"
+              "paused_by_hand",
+              "idle"
             ],
             "properties": {
               "source": {
@@ -49207,7 +49767,7 @@
                 "items": {
                   "$ref": "#/components/schemas/LabelDto"
                 },
-                "description": "What the run sees as `labels`: the flow's, then `labels`, the later key\nwinning. Empty when the frozen source does not parse."
+                "description": "What the run sees as `labels`: the flow's, then `labels`, the later key\nwinning; or, once a person replaced them (`POST …/labels`), exactly\n`labels`. Empty when the frozen source does not parse and nothing was\nreplaced."
               },
               "worker_enabled": {
                 "type": "boolean",
@@ -49216,6 +49776,10 @@
               "paused_by_hand": {
                 "type": "boolean",
                 "description": "`true` when the execution is `PAUSED` and no task run waits: it was\npaused by hand (`POST …/pause`). A resume sends it on; it takes no\ninputs. `false` for a `Pause` task or a `LoopUntil` waiting, and for\nevery other state."
+              },
+              "idle": {
+                "type": "boolean",
+                "description": "`true` when the execution has ended and no task run of it is still\nrunning, `afterExecution:` runs included (`workflow.execution_is_idle`).\nDelete and Edit labels need it; the routes check again."
               }
             }
           }
@@ -49395,7 +49959,7 @@
             "items": {
               "$ref": "#/components/schemas/LabelDto"
             },
-            "description": "The execution's own label column; `null` for none. At start it holds\nthe labels beyond the flow's own `labels:` (a backfill's, a replay's\ncopy); once a `Labels` task has run it holds the full merged list, the\nflow's labels included. The detail's `effective_labels` is the list to\ndisplay."
+            "description": "The execution's own label column; `null` for none. At start it holds\nthe labels beyond the flow's own `labels:` (a backfill's, a replay's\ncopy); once a `Labels` task has run it holds the full merged list, the\nflow's labels included. The detail's `effective_labels` is the list to\ndisplay. Once a person replaced the labels (`POST …/labels`, package\n7d), it holds the whole visible list, the flow's labels included or\nremoved."
           },
           "backfill_id": {
             "type": [

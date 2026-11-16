@@ -120,6 +120,7 @@ struct Old {
     files_pruned: bool,
     idle: bool,
     labels: Option<serde_json::Value>,
+    labels_replaced: bool,
     attempt_number: i32,
     seq: i64,
     inputs: serde_json::Value,
@@ -148,7 +149,7 @@ SELECT CASE WHEN x.loop_index IS NOT NULL THEN x.parent_execution_id END AS loop
        EXISTS (SELECT 1 FROM workflow.executions p JOIN chain c ON p.id = c.id \
                 WHERE p.files_pruned_at IS NOT NULL) AS files_pruned, \
        COALESCE(workflow.execution_is_idle(x.id), false) AS idle, \
-       x.labels, x.attempt_number, x.seq, x.inputs, x.secret_inputs, x.variables, x.flow_id \
+       x.labels, x.labels_replaced, x.attempt_number, x.seq, x.inputs, x.secret_inputs, x.variables, x.flow_id \
   FROM workflow.executions x WHERE x.id = $1";
 
 async fn replay_locked(
@@ -176,6 +177,7 @@ async fn replay_locked(
         files_pruned: row.get("files_pruned"),
         idle: row.get("idle"),
         labels: row.get("labels"),
+        labels_replaced: row.get("labels_replaced"),
         attempt_number: row.get("attempt_number"),
         seq: row.get("seq"),
         inputs: row.get("inputs"),
@@ -296,6 +298,16 @@ async fn replay_locked(
         },
     )
     .await?;
+    // Package 7d D6 (S6): the copy carries the whole visible list when the
+    // old execution's labels were replaced, so its flag goes with it. Before
+    // the first settle, which is the first render.
+    if old.labels_replaced {
+        sqlx::query("UPDATE workflow.executions SET labels_replaced = true WHERE id = $1")
+            .bind(ctx.id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    }
 
     let Some((target, mut copied)) = copied else {
         // 10. Whole: the old attempt plus one (D10), then the first settle.

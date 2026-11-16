@@ -3,7 +3,6 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { TaskRunDto } from "@/api/generated/model";
 import { LogView, type LogViewProps } from "@/components/workflows/executions/logs/LogView";
-import { formatLogLine } from "@/components/workflows/executions/logs/useLogFollow";
 import { EXEC, line, LogServer, WS } from "./logServer";
 
 /**
@@ -379,98 +378,33 @@ describe("LogView: states", () => {
   });
 });
 
-describe("LogView: Download", () => {
-  function captureSaves() {
-    const saved: { name: string; blob: Blob }[] = [];
-    let last: Blob | null = null;
-    vi.stubGlobal("URL", Object.assign(Object.create(URL), {
-      createObjectURL: (b: Blob) => {
-        last = b;
-        return "blob:log";
-      },
-      revokeObjectURL: () => {},
-    }));
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
-      saved.push({ name: this.download, blob: last! });
-    });
-    return saved;
-  }
+describe("LogView: Download (package 7d D7)", () => {
+  const link = () => screen.getByRole("link", { name: "Download" });
 
-  it("reads every page with the current filters and saves the lines as a .log file", async () => {
-    vi.useRealTimers();
-    server.lines = [
-      line(1, { level: "INFO", task_run_id: "r-0", task_id: "extract", message: "skip me" }),
-      line(2, { level: "WARN", task_run_id: "r-0", task_id: "extract", message: "keep me" }),
-      line(3, { level: "ERROR", task_run_id: "r-1", task_id: "load", message: "other run" }),
-      line(4, { level: "ERROR", task_run_id: "r-0", task_id: "extract", message: "and me" }),
-    ];
-    server.complete = true;
-    const saved = captureSaves();
-    view({ grouped: false, filters: { minLevel: "WARN", taskRunId: "r-0" }, downloadPageSize: 1 });
-    await screen.findByText("keep me");
-    const before = server.queries.length;
-    await userEvent.click(screen.getByRole("button", { name: "Download" }));
-    await vi.waitFor(() => expect(saved).toHaveLength(1));
-    expect(saved[0].name).toBe(`${EXEC}.log`);
-    expect(await saved[0].blob.text()).toBe(`${formatLogLine(server.lines[1])}\n${formatLogLine(server.lines[3])}\n`);
-    const reads = server.queries.slice(before);
-    // Page by page: none, 2, 4, then the empty page that ends it.
-    expect(reads.map((q) => q.get("after"))).toEqual([null, "2", "4"]);
-    expect(reads.every((q) => q.get("min_level") === "WARN" && q.get("task_run_id") === "r-0")).toBe(true);
-    expect(screen.queryByText(/The file holds the first/)).toBeNull();
+  it("links to the server's download with the current filters, saving <execution>.log", async () => {
+    server.lines = [line(1)];
+    view({ grouped: false, filters: { minLevel: "WARN", taskRunId: "r-0", taskId: "extract" } });
+    await settle();
+    const href = new URL(link().getAttribute("href")!, "http://x");
+    expect(href.pathname).toBe(`/api/ws/${WS}/workflows/executions/${EXEC}/logs/download`);
+    expect(Object.fromEntries(href.searchParams)).toEqual({ task_id: "extract", task_run_id: "r-0", min_level: "WARN" });
+    expect(link()).toHaveAttribute("download", `${EXEC}.log`);
+    expect(link()).toHaveAttribute("title", "Saves every line the filters select, up to 100,000 lines.");
   });
 
-  it("names the file as asked: a run's file is not the execution's", async () => {
-    vi.useRealTimers();
+  it("sends no filter it does not have, and names the file as asked", async () => {
     server.lines = [line(1)];
-    server.complete = true;
-    const saved = captureSaves();
     view({ grouped: false, downloadName: `${EXEC}-extract-run-0.log` });
-    await screen.findByText("line 1");
-    await userEvent.click(screen.getByRole("button", { name: "Download" }));
-    await vi.waitFor(() => expect(saved).toHaveLength(1));
-    expect(saved[0].name).toBe(`${EXEC}-extract-run-0.log`);
+    await settle();
+    expect(link().getAttribute("href")).toBe(`/api/ws/${WS}/workflows/executions/${EXEC}/logs/download`);
+    expect(link()).toHaveAttribute("download", `${EXEC}-extract-run-0.log`);
   });
 
-  it("stops paging when the view goes away mid-download", async () => {
-    vi.useRealTimers();
-    server.lines = Array.from({ length: 50 }, (_, i) => line(i + 1));
-    server.complete = true;
-    const saved = captureSaves();
-    const { unmount } = view({ grouped: false, downloadPageSize: 1 });
-    await screen.findByText("line 50");
-    const before = server.queries.length;
-    // Synchronously, so it unmounts while the first page is being read.
-    fireEvent.click(screen.getByRole("button", { name: "Download" }));
-    unmount();
-    await new Promise((r) => setTimeout(r, 100));
-    // At most the read in flight when it unmounted, not the 50 pages.
-    expect(server.queries.length - before).toBeLessThan(5);
-    expect(saved).toHaveLength(0);
-  });
-
-  it("says so when the file stops at the cap", async () => {
-    vi.useRealTimers();
-    server.lines = Array.from({ length: 5 }, (_, i) => line(i + 1));
-    server.complete = true;
-    const saved = captureSaves();
-    view({ grouped: false, downloadMaxLines: 3 });
-    await screen.findByText("line 5");
-    await userEvent.click(screen.getByRole("button", { name: "Download" }));
-    await vi.waitFor(() => expect(saved).toHaveLength(1));
-    expect((await saved[0].blob.text()).trimEnd().split("\n")).toHaveLength(3);
-    expect(screen.getByRole("status")).toHaveTextContent("The file holds the first 3 lines; the execution has more.");
-  });
-
-  it("a failed download says what happened", async () => {
-    vi.useRealTimers();
+  it("renders the toolbar slot before Download", async () => {
     server.lines = [line(1)];
-    server.complete = true;
-    captureSaves();
-    view({ grouped: false });
-    await screen.findByText("line 1");
-    server.failures = 1;
-    await userEvent.click(screen.getByRole("button", { name: "Download" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("The logs could not be downloaded: the database is unavailable. Try again.");
+    view({ grouped: false, toolbar: <button type="button">More</button> });
+    await settle();
+    const more = screen.getByRole("button", { name: "More" });
+    expect(more.compareDocumentPosition(link()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

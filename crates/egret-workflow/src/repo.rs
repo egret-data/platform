@@ -1018,7 +1018,7 @@ macro_rules! execution_cols {
          execution_trigger, trigger_execution_id, trigger_run_ix, \
          parent_execution_id, parent_run_ix, loop_index, loop_value, \
          attempt_number, origin_offset_ms, replayed_from_execution_id, \
-         started_at, ended_at, created_at, updated_at, labels, backfill_id"
+         started_at, ended_at, created_at, updated_at, labels, labels_replaced, backfill_id"
     };
 }
 
@@ -1090,6 +1090,10 @@ pub struct ExecutionRow {
     /// The labels this execution was started with beyond its flow's own
     /// (migration 0192): a backfill's, a replay's copy. `NULL` for none.
     pub labels: Option<serde_json::Value>,
+    /// Package 7d (migration 0231): `labels` holds the whole visible list --
+    /// a person replaced it -- and the flow's `labels:` are not merged in.
+    /// `labels::visible_labels` is the one place that reads the two together.
+    pub labels_replaced: bool,
     /// The backfill that fired this execution (migration 0192), `NULL` otherwise.
     pub backfill_id: Option<Uuid>,
 }
@@ -1544,15 +1548,19 @@ impl ExecutionRepo {
     /// `afterExecution:` run, or an `Exit` sibling, logs after its execution
     /// is terminal.
     pub async fn log_status(&self, ws: Uuid, id: Uuid) -> Result<ExecutionLogStatus> {
-        let row: Option<(String, bool)> = sqlx::query_as(
+        let row: Option<(String, bool, bool)> = sqlx::query_as(
             "SELECT e.state, \
-                    COALESCE(workflow.execution_is_idle(e.id), false) \
+                    i.idle, \
+                    i.idle \
                       AND GREATEST(e.updated_at, \
                                    (SELECT max(COALESCE(r.ended_at, r.updated_at)) \
                                       FROM workflow.task_runs r \
                                      WHERE r.execution_id = e.id)) \
-                          < now() - make_interval(secs => $3) \
-               FROM workflow.executions e WHERE e.id = $1 AND e.workspace_id = $2",
+                          < now() - make_interval(secs => $3) AS complete \
+               FROM workflow.executions e \
+              CROSS JOIN LATERAL \
+                    (SELECT COALESCE(workflow.execution_is_idle(e.id), false) AS idle) i \
+              WHERE e.id = $1 AND e.workspace_id = $2",
         )
         .bind(id)
         .bind(ws)
@@ -1560,8 +1568,12 @@ impl ExecutionRepo {
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
-        let (state, complete) = row.ok_or_else(|| Error::NotFound("execution".into()))?;
-        Ok(ExecutionLogStatus { state, complete })
+        let (state, idle, complete) = row.ok_or_else(|| Error::NotFound("execution".into()))?;
+        Ok(ExecutionLogStatus {
+            state,
+            complete,
+            idle,
+        })
     }
 }
 
@@ -1680,4 +1692,7 @@ pub struct ExecutionLogStatus {
     /// Idle (terminal, no task run live), and its last work ended longer
     /// ago than the settle lag.
     pub complete: bool,
+    /// Package 7d D7: terminal, and no task run live (`workflow.execution_is_idle`);
+    /// `complete` without the settle lag.
+    pub idle: bool,
 }

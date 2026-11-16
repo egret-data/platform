@@ -882,6 +882,8 @@ async fn every_repository_column_reaches_the_wire() {
         "worker_enabled",
         // Not a repository column: derived from the states (package 7c D1).
         "paused_by_hand",
+        // Not a repository column: derived from the states (package 7d D10).
+        "idle",
     ];
     let got: std::collections::BTreeSet<&str> = detail
         .as_object()
@@ -1039,6 +1041,8 @@ async fn every_repository_column_reaches_the_wire() {
                     | "outputs"
                     // Package 7c D11: detail only, derived from the runs.
                     | "paused_by_hand"
+                    // Package 7d D10: detail only, derived from the runs.
+                    | "idle"
             )
         })
         .collect();
