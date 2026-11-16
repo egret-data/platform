@@ -1,8 +1,0 @@
-# SA4 final-review fix wave
-
-1. Critical: `Authorizer::replace_platform_roles` (rbac.rs) now, when the new set contains `platform_admin` and the target is `provider='service'`, returns `Error::Conflict("a service account cannot hold platform_admin")` before any write. Route maps Conflict to 409. Test: crates/egret-workspace/tests/sa4_platform_roles.rs (service+platform_admin refused/nothing written; service+data_steward ok; mixed set refused; human+platform_admin ok). Tested at the Authorizer level, not over HTTP.
-2. TOCTOU: both chokepoints take `SELECT 1 FROM groups WHERE id=$1 FOR UPDATE` before their check (table `groups`, PK `id uuid`, migrations/0002_identity.sql). Role path: in `refuse_service_account_admin` for ptype='group'. Add path: `GroupRepo::change_member` when the member is a service account. No concurrency test (hard); code + comments only.
-3. `RoleRepo::assign`: GUARDED (not hidden; roles_db.rs integration test calls it, so cfg(test) would break). Refuses platform_admin for a service user / group with a service member (Conflict).
-4. Login test: positive control (local user with password gets 200 on same router) added.
-
-Gates: egret-workspace + egret-auth full cargo test green (incl. sa4_platform_roles, service_account_guarantees, roles_db). egret-perm-compile green except 3-5 tests in tests/routes.rs that panic at routes.rs:127 "waited 60s for TAG_FANOUT_LOCK": a DB-wide advisory lock contended by another session's concurrent tests on the shared DB; different tests fail per run; unrelated. fmt + clippy -D warnings clean. SA1 service_account_principals: 5 passed.
