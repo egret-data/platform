@@ -17,10 +17,10 @@ describe("canDelete", () => {
   it("says why while it runs", () => {
     expect(canDelete({ idle: false, parent_execution_id: null })).toEqual({ ok: false, reason: DELETE_NOT_IDLE_REASON });
   });
-  it("names the execution an iteration or retry belongs to", () => {
+  it("points an iteration or retry at the run, not at its direct parent", () => {
     const got = canDelete({ idle: true, parent_execution_id: "root-1" });
     expect(got.ok).toBe(false);
-    expect(!got.ok && got.reason).toContain("root-1");
+    expect(!got.ok && got.reason).toBe("This execution belongs to another execution's run. Delete the run's first execution instead");
   });
 });
 

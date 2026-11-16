@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type MutableRefObject } from "react";
 import { toast } from "sonner";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 import { useWorkflowSetExecutionLabels } from "@/api/generated/workflow/workflow";
@@ -30,14 +30,16 @@ const FALLBACK = "The labels could not be saved. Try again.";
  * labels each time.
  */
 export function EditLabelsDialog(props: Props) {
+  // Escape and the overlay close through the Dialog: ignored while a save is in flight (FE-ACTION-3).
+  const saving = useRef(false);
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogContent>{props.open ? <LabelsForm {...props} /> : null}</DialogContent>
+    <Dialog open={props.open} onOpenChange={(o) => (o || !saving.current) && props.onOpenChange(o)}>
+      <DialogContent>{props.open ? <LabelsForm {...props} saving={saving} /> : null}</DialogContent>
     </Dialog>
   );
 }
 
-function LabelsForm({ ws, execution, open, onOpenChange }: Props) {
+function LabelsForm({ ws, execution, open, onOpenChange, saving }: Props & { saving: MutableRefObject<boolean> }) {
   const id = useId();
   const refresh = useRefreshExecution(ws, execution.id);
   const save = useWorkflowSetExecutionLabels();
@@ -66,6 +68,7 @@ function LabelsForm({ ws, execution, open, onOpenChange }: Props) {
     setError(null);
     if (rowErrors(rows).size > 0) return;
     setPending(true);
+    saving.current = true;
     try {
       await runExecutionAction({
         call: () => save.mutateAsync({ workspace: ws, id: execution.id, data: labelsFromRows(rows) }),
@@ -80,6 +83,7 @@ function LabelsForm({ ws, execution, open, onOpenChange }: Props) {
       // The rows stay as typed (FE-ACTION-3); an `invalid_labels` message names the label.
       setError(e instanceof Error && e.message ? e.message : FALLBACK);
     } finally {
+      saving.current = false;
       setPending(false);
     }
   };

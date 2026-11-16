@@ -85,7 +85,7 @@ export const LABELS_NOT_IDLE_REASON = "Labels can be edited once the execution h
 /** A loop iteration or retry is deleted with the execution it belongs to (D2), never alone. */
 export function canDelete(execution: Pick<ExecutionDto, "idle" | "parent_execution_id">): Enablement {
   if (execution.parent_execution_id != null) {
-    return { ok: false, reason: `This execution is part of the run of execution ${execution.parent_execution_id}. Delete that execution instead` };
+    return { ok: false, reason: "This execution belongs to another execution's run. Delete the run's first execution instead" };
   }
   return execution.idle ? { ok: true } : { ok: false, reason: DELETE_NOT_IDLE_REASON };
 }
@@ -100,7 +100,7 @@ export function deleteRefusal(code: string | undefined): string | null {
     case "not_terminated":
       return "The execution is running again, or its Flow triggers are still handling its end. Refresh, then try again.";
     case "not_a_root":
-      return "This execution is part of another execution's run. Delete that execution instead.";
+      return "This execution belongs to another execution's run. Delete the run's first execution instead.";
     case "has_dependents":
       return "Subflow executions, replays or restarts point at this one. Delete them first:";
     default:

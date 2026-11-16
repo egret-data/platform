@@ -30,12 +30,15 @@ type Call = { method: string; path: string; body: unknown };
 class Server {
   calls: Call[] = [];
   reply: Reply = { status: 200, body: execution };
+  /** When set, a write waits for it before answering. */
+  gate: Promise<void> | null = null;
   constructor() {
     vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
       const method = (init?.method ?? "GET").toUpperCase();
       const [path] = String(input).split("?");
       const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body;
       this.calls.push({ method, path, body });
+      if (method !== "GET" && this.gate) await this.gate;
       const { status, body: out } = path === PATH ? this.reply : { status: 404, body: { error: "no route" } };
       return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
     }));
@@ -123,5 +126,19 @@ describe("EditLabelsDialog", () => {
     expect(within(dialog).getByRole("textbox", { name: "Key of label 1" })).toHaveValue("team");
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("ignores Escape and Cancel while the save is in flight, then closes when it lands", async () => {
+    let release!: () => void;
+    server.gate = new Promise<void>((r) => (release = r));
+    const { onOpenChange } = renderDialog();
+    const dialog = screen.getByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(server.writes()).toHaveLength(1));
+    await userEvent.keyboard("{Escape}");
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    release();
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   });
 });

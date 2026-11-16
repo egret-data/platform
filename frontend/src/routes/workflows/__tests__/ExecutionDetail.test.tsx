@@ -1189,12 +1189,12 @@ describe("ExecutionDetail: Edit labels and Delete (package 7d D10)", () => {
     expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
   });
 
-  it("disables Delete on a loop iteration, naming the execution to delete instead", async () => {
+  it("disables Delete on a loop iteration, pointing at the run's first execution", async () => {
     new Server(ok(execution("SUCCESS", { parent_execution_id: NEW, loop_index: 1 })));
     renderPage();
     const del = await screen.findByRole("button", { name: "Delete" });
     expect(del).toBeDisabled();
-    expect(del).toHaveAccessibleDescription(new RegExp(`part of the run of execution ${NEW}`));
+    expect(del).toHaveAccessibleDescription(/belongs to another execution's run\. Delete the run's first execution instead/);
     expect(screen.getByRole("button", { name: "Edit labels" })).toBeEnabled();
   });
 
