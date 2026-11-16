@@ -153,6 +153,10 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 
 **Row #7, 2026-11-14:** 7b (replay from a task run, replay on a chosen source with new inputs, restart on a source) built on `feat/workflow-replay-from-task`, PR pending. Spec `docs/en/specs/2026-11-14-workflow-replay-from-task-design.md` (§5 divergences, §7 "As built"), plan `docs/en/plans/2026-11-14-workflow-replay-from-task.md`. No migration. Breakpoints stay refused (`replay_breakpoints_unsupported`).
 
+**Notes, 2026-11-15 (package 7c, `docs/en/specs/2026-11-15-workflow-pause-resume-design.md` Q1; the rows above are not edited).**
+16. **#7:** 7c builds pause by hand (`POST …/pause`), resume with `onResume` inputs and resume-validate (`POST …/resume/validate`). Row #7's "pause" and "Resume with `onResume` inputs, and resume-validate" are 7c's.
+17. **#9:** `Pause` `onResume` moved to 7c (user decision Q1, 2026-11-15). #9 keeps `Pause` `behavior:`, `onPause:`, `errors:` and `finally:` (still refused, `unsupported_pause_property`) and `AllowFailure` block `retry:`.
+
 **Notes, 2026-10-29 (package #6, spec §5 and §7; the rows above are not edited).**
 13. **#11 gains: `trigger` bound in the fired flow's task renders.** #6 binds `trigger.outputs` only in a Flow trigger's `inputs:`; `worker::render` binds no `trigger` root for any trigger type, so `{{ trigger.outputs.x }}` (or `{{ trigger.date }}`) in a task of the fired flow still fails to render.
 14. **KI-112 follow-up:** SECRET inputs are still revealed in a Flow trigger's render context (#6 masks the SECRET outputs there).
@@ -422,7 +426,7 @@ Out of the count are: abstract classes and interfaces; the purge-behaviour subty
 | flow.Loop | partial: no `errors:`/`finally:`, and STORE-mode `outputs` stays baselined | plan.rs:1345, models/task.rs:407; programme spec §9 W9a "What is still not true" |
 | flow.LoopUntil (+ `WaitFor` alias) | supported. An unparseable `checkFrequency.*` or `failOnMaxReached` is refused | plan.rs:1415, plan.rs:1495-1515 (`loop_until_gap`) |
 | flow.Parallel | partial: no `finally:` | plan.rs:1280, models/task.rs:274 |
-| flow.Pause | partial: `tasks`, `errors`, `behavior` and `onPause` are refused; `onResume` (resume with inputs) is not supported; `finally` is absent | plan.rs:825-839 (`pause_gap`), flowable/pause.rs:52-58, routes.rs:2747 (resume takes no body) |
+| flow.Pause | partial: `tasks`, `errors`, `behavior` and `onPause` are refused; `onResume` (resume with inputs) is not supported; `finally` is absent | plan.rs:825-839 (`pause_gap`), flowable/pause.rs:52-58, routes.rs:2747 (resume takes no body) *Corrected 2026-11-15 (7c): `onResume` and resume with inputs are supported; resume-validate exists; resume-from-breakpoint is still not.* |
 | flow.PurgeFlows | **missing** | not in TASK_TYPES |
 | flow.Sequential | partial: no `finally:`, and the key is silently dropped by serde | plan.rs:1260, models/task.rs:253-261 |
 | flow.Sleep | supported | registry.rs:235, handlers/sleep.rs |
@@ -553,8 +557,8 @@ egret routes are under `/api/ws/{ws}/workflows`.
 | logs GET /{id} | supported (paged) | routes.rs:2064 |
 | logs follow (SSE), logs download, logs delete | missing (polling only) | W7b §10 |
 | GET /{id}/follow, /follow-dependencies (SSE) | missing | W7b §10 |
-| POST /{id}/actions/resume | partial: resumes all Pause runs; no `onResume` inputs; no resume/validate; no resume-from-breakpoint | routes.rs:2747 |
-| POST /{id}/actions/pause | missing | – |
+| POST /{id}/actions/resume | partial: resumes all Pause runs; no `onResume` inputs; no resume/validate; no resume-from-breakpoint | routes.rs:2747 *Corrected 2026-11-15 (7c): `onResume` and resume with inputs are supported; resume-validate exists; resume-from-breakpoint is still not.* |
+| POST /{id}/actions/pause | missing | – *Corrected 2026-11-16 (7c): pause by hand exists: `POST …/executions/{id}/pause`.* |
 | DELETE /{id}/actions/kill (cascade) | supported (KILLING to KILLED, cascade default true) | routes.rs:3025; kill-and-exit spec D1-D6 |
 | POST /{id}/actions/replay, /actions/replay-with-inputs | partial: egret's "replay" re-runs the WHOLE execution from the frozen source. There is no replay from a chosen taskRunId, no replay-with-inputs and no revision choice. *(2026-11-14, 7b: supported. Replay from a task run, on a chosen source (frozen, current or `version:N`, with the `revision` alias) and with new inputs; breakpoints are refused.)* | routes.rs:2822-2850; now `routes.rs` `replay_execution` (`POST /api/ws/{ws}/workflows/executions/{id}/replay?taskRunId=&source=`) |
 | POST /{id}/actions/restart (resume failed tasks in place) | **missing** *(2026-11-13, 7a: supported. Restart in place of a FAILED or PAUSED execution, same ids; end-hook runs removed)* *(2026-11-14, 7b: restart with a revision supported. `source=current` or `version:N` (or `revision=N`) creates a new execution that copies the task runs and resets the failed ones, labelled `system.restarted`)* | `routes.rs` `restart_execution` (`POST /api/ws/{ws}/workflows/executions/{id}/restart?source=`) |

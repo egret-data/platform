@@ -880,6 +880,8 @@ async fn every_repository_column_reaches_the_wire() {
         "can_manage",
         // Not a repository column: the deployment's worker flag (KI-013).
         "worker_enabled",
+        // Not a repository column: derived from the states (package 7c D1).
+        "paused_by_hand",
     ];
     let got: std::collections::BTreeSet<&str> = detail
         .as_object()
@@ -1035,6 +1037,8 @@ async fn every_repository_column_reaches_the_wire() {
                     | "worker_enabled"
                     // Package #6 fix wave 6 (final review I4): detail only.
                     | "outputs"
+                    // Package 7c D11: detail only, derived from the runs.
+                    | "paused_by_hand"
             )
         })
         .collect();
@@ -1926,19 +1930,25 @@ async fn resume_on_a_non_paused_execution_is_a_conflict_not_a_silent_success() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:manage"]).await;
+    // Package 7c D9: a resume answers to the execution's flow, so each
+    // execution has one (a flow-less one is 404, `pause_resume_routes`).
+    let running_flow =
+        common::seed_flow(&db, ws, user, &runnable_source("resume-running"), "draft").await;
     let running = insert_execution_with(
         &db,
         ws,
-        None,
+        Some(running_flow),
         "RUNNING",
         &runnable_source("resume-running"),
         serde_json::json!({}),
     )
     .await;
+    let done_flow =
+        common::seed_flow(&db, ws, user, &runnable_source("resume-done"), "draft").await;
     let done = insert_execution_with(
         &db,
         ws,
-        None,
+        Some(done_flow),
         "SUCCESS",
         &runnable_source("resume-done"),
         serde_json::json!({}),
@@ -2002,7 +2012,23 @@ async fn resume_on_a_non_paused_execution_is_a_conflict_not_a_silent_success() {
         "the two refusals emitted nothing; the start and the resume emitted one each"
     );
     assert_eq!(audit[1].1.as_deref(), Some(paused.to_string().as_str()));
-    assert_eq!(audit[1].2, serde_json::json!({ "from_state": "PAUSED" }));
+    // Package 7c: the resume's payload names what was resumed, never inputs.
+    let pause_run: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND run_ix = 0",
+    )
+    .bind(paused)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audit[1].2,
+        serde_json::json!({
+            "from_state": "PAUSED",
+            "by_hand": false,
+            "task_run_id": pause_run,
+            "inputs_given": false,
+        })
+    );
 }
 
 /// **A replay runs the replayed execution's FROZEN source and inputs, not the

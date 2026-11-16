@@ -469,14 +469,27 @@ pub(crate) fn reveal_subflow_outputs(
     outputs: Value,
     sealed: Option<&[u8]>,
 ) -> Result<(Value, Vec<String>)> {
+    reveal_keyed_outputs(outputs, "outputs", sealed)
+}
+
+/// A run's stored `outputs` with a sealed `{id: value}` object put back into
+/// the map under `key`: `outputs` for a `Subflow` run
+/// ([`reveal_subflow_outputs`]), `onResume` for a `Pause` run's SECRET
+/// `onResume` values (package 7c S7). Only the worker's render surface calls
+/// it.
+pub(crate) fn reveal_keyed_outputs(
+    outputs: Value,
+    key: &str,
+    sealed: Option<&[u8]>,
+) -> Result<(Value, Vec<String>)> {
     let (Some(sealed), Value::Object(mut run)) = (sealed, outputs.clone()) else {
         return Ok((outputs, Vec::new()));
     };
-    let Some(map) = run.remove("outputs") else {
+    let Some(map) = run.remove(key) else {
         return Ok((outputs, Vec::new()));
     };
     let (map, values) = reveal_flow_outputs(map, Some(sealed))?;
-    run.insert("outputs".to_string(), map);
+    run.insert(key.to_string(), map);
     Ok((Value::Object(run), values))
 }
 

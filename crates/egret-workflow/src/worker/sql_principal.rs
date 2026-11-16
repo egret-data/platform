@@ -112,6 +112,43 @@ pub(crate) async fn check_start(
     }
 }
 
+/// The refusal a resume with `onResume` inputs by someone who is not the
+/// creator gets (package 7c D7).
+const NOT_THE_CREATOR_RESUME: &str = "the flow contains an `egret.sql` task, which runs as the \
+     flow's creator, and the waiting Pause takes onResume inputs that task can read, so only \
+     the flow's creator can resume it";
+
+/// Package 7c D7 (7a/7b's D24, door 2): a resume of a `Pause` with a non-empty
+/// `onResume` on a flow that runs `egret.sql` is its creator's alone. The
+/// posted values become template values the creator's SQL can read. `flow`
+/// is the execution's frozen source, which is what runs; the caller decides
+/// whether `onResume` is non-empty. A flow with no creator (the user was
+/// deleted) is not refused here, as [`check_start`] does not.
+pub(crate) async fn check_resume_inputs(
+    conn: &mut PgConnection,
+    flow: &Flow,
+    flow_id: Option<Uuid>,
+    caller: Uuid,
+) -> Result<()> {
+    let Some(flow_id) = flow_id else {
+        return Ok(());
+    };
+    if !runs_sql(flow) {
+        return Ok(());
+    }
+    let creator: Option<Uuid> =
+        sqlx::query_scalar("SELECT created_by FROM workflow.flows WHERE id = $1")
+            .bind(flow_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| Error::Internal(anyhow::Error::new(e)))?
+            .flatten();
+    match creator {
+        Some(c) if c != caller => Err(Error::InvalidInput(NOT_THE_CREATOR_RESUME.into())),
+        _ => Ok(()),
+    }
+}
+
 /// Door 3 for a `Subflow` child: `Some(reason)` when the child runs
 /// `egret.sql` and either its source is not one its creator published or the
 /// parent execution's flow has another creator.

@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   canChangeStatus,
   canChangeTaskRunState,
+  canPause,
+  canResume,
+  LOOP_WAIT_REASON,
+  PAUSE_KILLING_REASON,
+  PAUSE_TASK_WAITING_REASON,
+  pauseRefusal,
+  resumeRefusal,
+  showsPause,
   canRestart,
   changeTargets,
   isLoopIteration,
@@ -125,5 +133,44 @@ describe("replay from a task and the version choice (package 7b)", () => {
   it("says replay_task_not_in_source in restart terms: a restart has no task to start from", () => {
     expect(restartRefusal("replay_task_not_in_source")).not.toEqual(replayRefusal("replay_task_not_in_source"));
     expect(restartRefusal("replay_task_not_in_source")).not.toMatch(/start from/);
+  });
+});
+
+describe("pause by hand and resume (package 7c)", () => {
+  const run = (state: string, resume_with: string | null = null) => ({ state, resume_with }) as never;
+  const root = { parent_execution_id: null, loop_index: null };
+
+  it("shows Pause while the execution runs or is being killed, and not otherwise", () => {
+    expect(ALL_STATES.filter((state) => showsPause({ state }))).toEqual(["RESTARTED", "RUNNING", "KILLING"]);
+    expect(showsPause({ state: "PAUSED" })).toBe(false);
+    expect(showsPause({ state: "SUCCESS" })).toBe(false);
+    expect(showsPause({ state: "CREATED" })).toBe(false);
+  });
+
+  it("disables Pause with the reason while killing, while a task waits, and on a loop iteration", () => {
+    expect(canPause({ state: "KILLING", runs: [], ...root })).toEqual({ ok: false, reason: PAUSE_KILLING_REASON });
+    expect(canPause({ state: "RUNNING", runs: [run("PAUSED", "ITERATE")], ...root })).toEqual({
+      ok: false,
+      reason: PAUSE_TASK_WAITING_REASON,
+    });
+    const refused = canPause({ state: "RUNNING", runs: [], ...iteration });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.reason).toContain(ROOT);
+    expect(canPause({ state: "RUNNING", runs: [run("RUNNING")], ...root })).toEqual({ ok: true });
+  });
+
+  it("enables Resume for a pause by hand or a Pause task, and not for a LoopUntil alone", () => {
+    expect(canResume({ paused_by_hand: true, runs: [] })).toEqual({ ok: true });
+    expect(canResume({ paused_by_hand: false, runs: [run("PAUSED", "NEVER")] })).toEqual({ ok: true });
+    expect(canResume({ paused_by_hand: false, runs: [run("PAUSED", "ITERATE")] })).toEqual({ ok: false, reason: LOOP_WAIT_REASON });
+  });
+
+  it("has a distinct sentence for each coded refusal and none for another code", () => {
+    const sentences = [pauseRefusal("not_running"), resumeRefusal("not_paused"), resumeRefusal("resume_inputs_unexpected")];
+    expect(sentences.every((s) => typeof s === "string" && s.length > 0)).toBe(true);
+    expect(new Set(sentences).size).toBe(3);
+    expect(pauseRefusal("other")).toBeNull();
+    expect(pauseRefusal(undefined)).toBeNull();
+    expect(resumeRefusal("other")).toBeNull();
   });
 });

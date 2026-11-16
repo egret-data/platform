@@ -34719,6 +34719,117 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/{id}/pause": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Pause a running execution by hand (package 7c D3; Kestra\n`ExecutionService.pause`, `ES:907-916`).",
+        "description": "One `SetExecutionState { PAUSED }` under the execution's lock\n([`worker::pause_by_hand`](crate::worker::pause_by_hand)), which re-checks\nthe state and the runs there. A disabled flow does not block it (D9).",
+        "operationId": "pause_execution",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The execution is `PAUSED`. Runs already running finish and record their results; no run is created or started until it is resumed. The body is its detail afterwards, with `paused_by_hand: true`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The execution is a loop iteration: pause its loop root instead (the message names it). Nothing is written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash, or no longer exists at all.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`not_running`: the execution is not `RUNNING` or `RESTARTED` (`KILLING`, `PAUSED` and every terminal state included; the message names the state), or a `Pause` or `LoopUntil` task is already waiting (resume that task instead). Nothing is written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}/replay": {
       "post": {
         "tags": [
@@ -35074,8 +35185,8 @@
         "tags": [
           "workflow"
         ],
-        "summary": "Resume a `PAUSED` execution by hand.",
-        "description": "W7b Task 3 fix round 1, the user's ruling of 2026-10-11, after review\nfound the old route released nothing a human needs: it only re-settled,\nwhich ends a pause whose deadline had passed -- what the waker does anyway.\nIt now calls [`worker::resume_by_hand`](crate::worker::resume_by_hand),\nKestra's `ExecutionService.resume`: every paused `Pause` run ends `SUCCESS`\nnow, through the natural end's own path, and the execution settles on.\n\nThe `PAUSED` check is made twice: here off the scoped read (so a foreign id\nnever reaches the unscoped worker, and the common refusal is cheap), and\nagain by the worker under the execution's lock, which decides the race with\nthe waker. A pause the waker ended first is a 409, like any execution that\nis not paused.",
+        "summary": "Resume a `PAUSED` execution by hand, with `onResume` inputs when the\nwaiting `Pause` declares them (package 7c D5-D7, D9; Kestra\n`ExecutionService.resume`, `ES:880-897`).",
+        "description": "The `PAUSED` check is made twice: here off the scoped read (so a foreign\nid never reaches the unscoped worker, and the common refusal is cheap),\nand again by [`worker::resume_with`](crate::worker::resume_with) under the\nexecution's lock, which decides the race with the waker and with another\nresume. The `egret.sql` gate (D7) and the trash gate (D9) come before the\nbody is read, so a refused resume stores nothing; once files are stored\nunder the `Pause` run (S2), every answer but a success deletes them.",
         "operationId": "resume_execution",
         "parameters": [
           {
@@ -35106,13 +35217,39 @@
             }
           }
         ],
+        "requestBody": {
+          "description": "Optional. No body, `{}`, or `\"inputs\": null` resumes with no inputs. With `inputs` (JSON, `StartExecutionRequest`, at most 2 MiB; no `Content-Type` is read as JSON) or `multipart/form-data` (`StartExecutionMultipart`; one part per input id, a file part stored under the Pause run, at most `workflow.storage.max_file_bytes` + 1 MiB), the values are checked against the first waiting Pause's `onResume` as a start checks the flow's `inputs:`, and written to its outputs as `onResume`. **A Pause whose `onResume` has a required input with no default needs a body**: without one the resume is refused (400) naming that input.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionMultipart"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
-            "description": "Every paused `Pause` run was released at once and ends `SUCCESS`, whatever its `pauseDuration:` or `timeout:` (Kestra: a pause resumed by hand always succeeds); the execution then runs on. The body is its detail afterwards.",
+            "description": "Paused by hand: the execution is `RUNNING` again and runs on. A `Pause` waiting: the first one in run order ends `SUCCESS` with `outputs.onResume` (the checked values; a SECRET value is `******`, a FILE value the URI of the file stored under the Pause run) and `outputs.resumed` (`by`, `on`, `to`), whatever its `pauseDuration:` or `timeout:`; every other waiting `Pause` ends `SUCCESS` with `onResume: {}`; the execution then runs on. The body is its detail afterwards.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`resume_inputs_unexpected`: inputs (or any multipart part) were sent, and the execution is paused by hand, the waiting Pause declares no `onResume`, or no Pause waits (only a `LoopUntil`). No code: `inputs` is not a JSON object; an input is refused by the start check, or names no `onResume` input of the Pause (the message names it) -- including a required input with no default when no body was sent; the flow runs `egret.sql`, the waiting Pause declares `onResume`, and the caller is not the flow's creator; a SECRET input was given and this deployment has no `secrets.master_key`; or a multipart part is refused (it names no `onResume` input, names one twice, carries a file for a non-`FILE` input, or a file whose extension is not allowed). Nothing is written, and a file the request uploaded is deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -35138,7 +35275,7 @@
             }
           },
           "404": {
-            "description": "No such execution in this workspace, indistinguishably from one that never existed",
+            "description": "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash, or no longer exists at all. A disabled flow is not refused.",
             "content": {
               "application/json": {
                 "schema": {
@@ -35148,7 +35285,183 @@
             }
           },
           "409": {
-            "description": "The execution is not PAUSED (or its pause ended before the resume took the execution's lock), or it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting. A resume that changes nothing must not answer 200.",
+            "description": "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or what waits changed between the request's read and the execution's lock (another request resumed the Pause first, the execution was paused by hand since, or a Pause started waiting that declares `onResume` or while inputs were sent to an execution read as having none): reload it and resume again. A resume that changes nothing must not answer 200.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "An uploaded file is over `workflow.storage.max_file_bytes`, a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Internal storage failed while an uploaded file was being stored. Nothing is written; the request can be retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}/resume/validate": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Check the inputs a resume would be given, without resuming (package 7c\nD8; Kestra's `validateResume` with `uploadFiles=false`): the start's\nvalidate answer for the first waiting `Pause`'s `onResume`.",
+        "operationId": "validate_resume_inputs",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The inputs a resume would be given, as the resume's body: none, JSON (`StartExecutionRequest`, at most 2 MiB; no `Content-Type` is read as JSON) or `multipart/form-data` (`StartExecutionMultipart`). A file part is read and dropped: nothing is stored.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/StartExecutionMultipart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Every `onResume` input of the first waiting Pause, with the start check's errors; an empty body answers each with its default; an empty list when the execution is paused by hand or the Pause has no `onResume`. Nothing is stored: a file part is read and dropped, and its value is its file name. No audit. A SECRET input's `value` is `******`. `id` and `namespace` are the flow's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateInputsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`inputs` is not a JSON object, or a multipart part names no `onResume` input of the waiting Pause, names one twice, carries a file for a non-`FILE` input or with an extension that input does not allow, or is not readable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission (the resume's), or the workflows module is disabled for this workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace; or its flow is in the trash, or no longer exists at all, as the resume answers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`not_paused`: the execution is not PAUSED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "A part or the body is over its cap, as the resume's.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -48863,7 +49176,8 @@
               "runs",
               "can_manage",
               "effective_labels",
-              "worker_enabled"
+              "worker_enabled",
+              "paused_by_hand"
             ],
             "properties": {
               "source": {
@@ -48898,6 +49212,10 @@
               "worker_enabled": {
                 "type": "boolean",
                 "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
+              },
+              "paused_by_hand": {
+                "type": "boolean",
+                "description": "`true` when the execution is `PAUSED` and no task run waits: it was\npaused by hand (`POST …/pause`). A resume sends it on; it takes no\ninputs. `false` for a `Pause` task or a `LoopUntil` waiting, and for\nevery other state."
               }
             }
           }

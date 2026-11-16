@@ -9,6 +9,7 @@ const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.
 vi.mock("sonner", () => ({ toast }));
 
 import { AFTER_RUN_FOLLOW_MS } from "@/components/workflows/executionState";
+import { PAUSE_KILLING_REASON, pauseRefusal } from "@/components/workflows/executions/actions";
 import ExecutionDetail from "@/routes/workflows/ExecutionDetail";
 
 const WS = "eng";
@@ -70,6 +71,7 @@ function execution(state: string, extra: Record<string, unknown> = {}) {
     runs: [run("extract", "SUCCESS", 0), run("load", state === "RUNNING" ? "RUNNING" : "SUCCESS", 1)],
     can_manage: true,
     worker_enabled: true,
+    paused_by_hand: false,
     ...extra,
   };
 }
@@ -90,6 +92,9 @@ class Server {
   children: unknown[] = [];
   childTotal: number | null = null;
   resume: Reply = { status: 200, body: execution("RUNNING") };
+  pause: Reply = { status: 200, body: execution("RUNNING", { paused_by_hand: true }) };
+  /** `POST …/resume/validate`: the waiting Pause's `onResume` inputs, none by default. */
+  resumeValidate: Reply = { status: 200, body: { id: "f", namespace: "n", inputs: [], checks: [] } };
   replay: Reply = { status: 201, body: { ...execution("RUNNING"), id: NEW } };
   kill: Reply = { status: 202, body: execution("KILLING", { ended_at: null }) };
   /** `GET …/executions/{EXEC}/graph` (W7c): a graph with no tasks. */
@@ -120,6 +125,8 @@ class Server {
     }
     if (method === "GET" && path === `${EXEC_PATH}/graph`) return this.graph;
     if (method === "POST" && path === `${EXEC_PATH}/resume`) return this.resume;
+    if (method === "POST" && path === `${EXEC_PATH}/resume/validate`) return this.resumeValidate;
+    if (method === "POST" && path === `${EXEC_PATH}/pause`) return this.pause;
     if (method === "POST" && path === `${EXEC_PATH}/replay`) return this.replay;
     if (method === "POST" && path === `${EXEC_PATH}/kill`) return this.kill;
     const extra = this.extra[`${method} ${path}`];
@@ -460,9 +467,10 @@ describe("ExecutionDetail: Resume", () => {
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Resume" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Resume this execution?" });
-    // Nothing sent until confirmed.
-    expect(server.calls.some((c) => c.method === "POST")).toBe(false);
+    // Nothing resumed until confirmed (the dialog only reads the inputs).
+    expect(server.calls.some((c) => c.method === "POST" && c.path === `${EXEC_PATH}/resume`)).toBe(false);
     const readsBefore = server.executionReads();
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Resume" })).toBeEnabled());
     await userEvent.click(within(dialog).getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(server.calls.filter((c) => c.method === "POST" && c.path === `${EXEC_PATH}/resume`)).toHaveLength(1));
     await waitFor(() => expect(server.executionReads()).toBeGreaterThan(readsBefore));
@@ -477,10 +485,69 @@ describe("ExecutionDetail: Resume", () => {
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Resume" }));
     const dialog = await screen.findByRole("alertdialog");
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Resume" })).toBeEnabled());
     await userEvent.click(within(dialog).getByRole("button", { name: "Resume" }));
     expect(await within(dialog).findByText(/only a paused execution can be resumed/)).toBeInTheDocument();
     expect(screen.getByRole("alertdialog")).toBeInTheDocument();
     expect(toast.success).not.toHaveBeenCalled();
+  });
+});
+
+describe("ExecutionDetail: Resume after a pause by hand (package 7c)", () => {
+  it("says Paused by hand in the header and offers an enabled Resume", async () => {
+    new Server(ok(execution("PAUSED", { paused_by_hand: true, runs: [] })));
+    renderPage();
+    expect(await screen.findByText("Paused by hand")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume" })).toBeEnabled();
+  });
+
+  it("does not say Paused by hand for a Pause task's wait", async () => {
+    new Server(ok(execution("PAUSED", { runs: [run("gate", "PAUSED", 0, { resume_with: "NEVER" })] })));
+    renderPage();
+    await screen.findByRole("button", { name: "Resume" });
+    expect(screen.queryByText("Paused by hand")).toBeNull();
+  });
+});
+
+describe("ExecutionDetail: Pause (package 7c)", () => {
+  it("is shown on a RUNNING execution, asks first, then pauses and says so", async () => {
+    const server = new Server(ok(execution("RUNNING")));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Pause" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Pause this execution?" });
+    expect(server.calls.some((c) => c.method === "POST")).toBe(false);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(server.calls.filter((c) => c.method === "POST" && c.path === `${EXEC_PATH}/pause`)).toHaveLength(1));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Paused the execution"));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  });
+
+  it("keeps the dialog open with the refusal's sentence on a 409 not_running", async () => {
+    const server = new Server(ok(execution("RUNNING")));
+    server.pause = { status: 409, body: { code: "not_running", error: "execution is not running" } };
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Pause" }));
+    const dialog = await screen.findByRole("alertdialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Pause" }));
+    expect(await within(dialog).findByText(pauseRefusal("not_running")!)).toBeInTheDocument();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("is disabled with its reason while the execution is being killed", async () => {
+    new Server(ok(execution("KILLING", { ended_at: null })));
+    renderPage();
+    const button = await screen.findByRole("button", { name: "Pause" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(PAUSE_KILLING_REASON)).toBeVisible();
+    expect(button).toHaveAccessibleDescription(PAUSE_KILLING_REASON);
+  });
+
+  it("is not shown once the execution is PAUSED", async () => {
+    new Server(ok(execution("PAUSED", { paused_by_hand: true })));
+    renderPage();
+    await screen.findByRole("button", { name: "Resume" });
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
   });
 });
 
