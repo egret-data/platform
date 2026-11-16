@@ -504,8 +504,11 @@ fn statement_for_audience(
     let mut privileges: Vec<Privilege> = Vec::new();
     for a in &g.actions {
         let p = match a {
+            Action::Browse => Privilege::Browse,
             Action::Read => Privilege::Read,
             Action::Write => Privilege::Write,
+            Action::Create => Privilege::Create,
+            Action::Manage => Privilege::Manage,
         };
         if !privileges.contains(&p) {
             privileges.push(p);

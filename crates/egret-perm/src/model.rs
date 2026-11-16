@@ -11,15 +11,21 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The two actions SP4a knows. `read` compiles to `select` on every engine;
-/// `write` compiles to `insert,delete` on Trino (no `update` access type
-/// exists there) and `insert,update,delete` on StarRocks. DDL is out of
-/// scope for SP4a — see the programme's global constraints.
+/// The grant privilege vocabulary (SP5a, concepts spec D4; `OWNER` is not an
+/// action). `read` compiles to `select` on every engine; `write` compiles to
+/// `insert,delete` on Trino (no `update` access type exists there) and
+/// `insert,update,delete` on StarRocks; `create` and `manage` compile to the
+/// engines' DDL/ownership access types; `browse` has no distinct grantable
+/// access type on either engine and is lowered. See
+/// [`crate::engine_accesses`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
+    Browse,
     Read,
     Write,
+    Create,
+    Manage,
 }
 
 impl Action {
@@ -27,15 +33,21 @@ impl Action {
     /// Postgres enum — see the migration).
     pub fn as_str(self) -> &'static str {
         match self {
+            Action::Browse => "browse",
             Action::Read => "read",
             Action::Write => "write",
+            Action::Create => "create",
+            Action::Manage => "manage",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "browse" => Some(Action::Browse),
             "read" => Some(Action::Read),
             "write" => Some(Action::Write),
+            "create" => Some(Action::Create),
+            "manage" => Some(Action::Manage),
             _ => None,
         }
     }

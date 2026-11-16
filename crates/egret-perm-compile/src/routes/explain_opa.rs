@@ -150,6 +150,11 @@ fn accesses_for(action: Action) -> &'static [(&'static str, DataPrivilege)] {
             ("insert", DataPrivilege::Write),
             ("delete", DataPrivilege::Write),
         ],
+        // SP5a: the OPA evaluator decides only data privileges (read/write);
+        // browse/create/manage verdicts arrive with the matrix lowering (T4).
+        // Explicitly NO accesses, so an explain of one says nothing rather
+        // than answering as a read or a write.
+        Action::Browse | Action::Create | Action::Manage => &[],
     }
 }
 

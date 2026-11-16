@@ -103,6 +103,9 @@ pub(crate) fn read_write_accesses(
         let action = match p {
             Privilege::Read => Action::Read,
             Privilege::Write => Action::Write,
+            Privilege::Browse => Action::Browse,
+            Privilege::Create => Action::Create,
+            Privilege::Manage => Action::Manage,
             Privilege::CreateMaterializedView => {
                 return Err(CompileError::Db(format!(
                     "{caller} handed a CreateMaterializedView privilege"

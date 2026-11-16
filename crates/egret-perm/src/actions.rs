@@ -736,12 +736,30 @@ impl CompileError {
 /// The Ranger access types `a` compiles to on `e`. Every engine declares
 /// `select` for `read`; `write` differs by engine because Trino's
 /// service-def declares no `update` access type.
+///
+/// SP5a: `create` and `manage` map to access types BOTH service-defs declare
+/// (`crates/egret-policy/tests/fixtures/trino-servicedef.json`,
+/// `crates/egret-policy/src/service-defs/starrocks.json`). `browse` has no
+/// distinct grantable access type on either engine (Trino's `use`/`show` and
+/// StarRocks' `usage` are statement-level rights that `read`/`write` already
+/// need and that Ranger does not scope to "see metadata"), so it is LOWERED:
+/// `UnsupportedAction`, never an empty list. Browse implication is SP5a T2.
 pub fn engine_accesses(a: Action, e: EngineType) -> Result<Vec<&'static str>, CompileError> {
     match (a, e) {
         (Action::Read, EngineType::Trino) => Ok(vec!["select"]),
         (Action::Read, EngineType::StarRocks) => Ok(vec!["select"]),
         (Action::Write, EngineType::Trino) => Ok(vec!["insert", "delete"]),
         (Action::Write, EngineType::StarRocks) => Ok(vec!["insert", "update", "delete"]),
+        (Action::Create, EngineType::Trino) => Ok(vec!["create"]),
+        (Action::Create, EngineType::StarRocks) => {
+            Ok(vec!["create database", "create table", "create view"])
+        }
+        (Action::Manage, EngineType::Trino) => Ok(vec!["drop", "alter", "grant", "revoke"]),
+        (Action::Manage, EngineType::StarRocks) => Ok(vec!["drop", "alter", "grant"]),
+        (Action::Browse, e) => Err(CompileError::UnsupportedAction {
+            action: Action::Browse,
+            engine: e,
+        }),
     }
 }
 

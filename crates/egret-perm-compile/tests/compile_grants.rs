@@ -178,6 +178,35 @@ fn write_maps_to_two_accesses_on_trino_and_three_on_starrocks() {
 }
 
 #[test]
+fn sp5a_create_and_manage_map_to_ddl_access_types_and_browse_is_lowered() {
+    assert_eq!(
+        engine_accesses(Action::Create, EngineType::Trino).unwrap(),
+        vec!["create"]
+    );
+    assert_eq!(
+        engine_accesses(Action::Create, EngineType::StarRocks).unwrap(),
+        vec!["create database", "create table", "create view"]
+    );
+    assert_eq!(
+        engine_accesses(Action::Manage, EngineType::Trino).unwrap(),
+        vec!["drop", "alter", "grant", "revoke"]
+    );
+    assert_eq!(
+        engine_accesses(Action::Manage, EngineType::StarRocks).unwrap(),
+        vec!["drop", "alter", "grant"]
+    );
+    for engine in [EngineType::Trino, EngineType::StarRocks] {
+        assert!(matches!(
+            engine_accesses(Action::Browse, engine),
+            Err(egret_perm::CompileError::UnsupportedAction {
+                action: Action::Browse,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
 fn every_access_type_the_map_emits_is_declared_by_that_service_def() {
     // The map is only correct relative to the service-defs, so read them
     // rather than trusting the table above. An access type Ranger does not
@@ -191,7 +220,7 @@ fn every_access_type_the_map_emits_is_declared_by_that_service_def() {
             .iter()
             .map(|a| a["name"].as_str().unwrap().to_string())
             .collect();
-        for action in [Action::Read, Action::Write] {
+        for action in [Action::Read, Action::Write, Action::Create, Action::Manage] {
             for acc in engine_accesses(action, engine).unwrap() {
                 assert!(
                     declared.iter().any(|d| d == acc),

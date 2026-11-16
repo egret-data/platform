@@ -159,7 +159,12 @@ pub(crate) struct EffectInput<'a> {
 pub(crate) fn effect_lines(input: &EffectInput<'_>) -> Vec<ExplainEffectLine> {
     let b = Builder { input };
     match input.action {
-        Action::Write => vec![b.write_line()],
+        Action::Write => vec![b.access_line("can write")],
+        Action::Create => vec![b.access_line("can create under")],
+        Action::Manage => vec![b.access_line("can manage")],
+        // SP5a: browse has no engine access type (it is lowered, see
+        // `egret_perm::engine_accesses`), so there is no verdict to word.
+        Action::Browse => Vec::new(),
         Action::Read => {
             let first = match &input.target.column {
                 Some(column) => b.column_line(column),
@@ -1071,8 +1076,9 @@ impl Builder<'_> {
         l.code(filter_expr);
     }
 
-    /// A `write` is a summary of its access verdicts (spec §12).
-    fn write_line(&self) -> ExplainEffectLine {
+    /// A `write` (and, SP5a, a `create` or `manage`) is a summary of its
+    /// access verdicts (spec §12); `allowed_verb` words the allowed case.
+    fn access_line(&self, allowed_verb: &str) -> ExplainEffectLine {
         let p = self.input.profile;
         let target = match &self.input.target.column {
             Some(c) => format!("{}.{c}", self.table_label()),
@@ -1102,7 +1108,7 @@ impl Builder<'_> {
         }
         self.subject(&mut l);
         l.text(" ");
-        l.strong("can write");
+        l.strong(allowed_verb);
         l.text(" ");
         l.code(target);
         l.finish(EffectAbout::Access, EffectOutcome::Allowed)

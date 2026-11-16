@@ -108,6 +108,11 @@ pub enum Privilege {
     Read,
     Write,
     CreateMaterializedView,
+    // SP5a: the grant vocabulary's other privileges (concepts spec D4).
+    // Appended so the derived `Ord` of the existing variants is unchanged.
+    Browse,
+    Create,
+    Manage,
 }
 
 /// What a statement does to its audience on its target.
