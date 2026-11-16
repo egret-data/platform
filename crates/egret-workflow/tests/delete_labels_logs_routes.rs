@@ -317,9 +317,11 @@ async fn delete_refusals_are_coded_with_details(pool: sqlx::PgPool) {
     assert!(
         exists(&pool, running).await && exists(&pool, iteration).await && exists(&pool, one).await
     );
-    assert!(common::audit_mutations(&app)
-        .iter()
-        .all(|(action, _, _)| action != "workflow_execution:delete"));
+    let actions: Vec<String> = common::audit_mutations(&app)
+        .into_iter()
+        .map(|(action, _, _)| action)
+        .collect();
+    assert_eq!(actions, vec!["workflow_execution:replay".to_string()]);
     assert_eq!(
         common::delete(&app, &exec_path(ws, replay), user)
             .await

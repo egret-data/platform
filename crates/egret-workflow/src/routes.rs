@@ -2515,7 +2515,9 @@ async fn set_execution_labels(
             ))
         }
     };
-    // Keys only: a label value can carry anything a person typed.
+    // Keys only: a label value can carry anything a person typed. The audit
+    // precedes the read-back, so a delete in between gives a 404 after an
+    // audited (committed) write.
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ws),
@@ -2635,6 +2637,9 @@ fn log_download(
         {
             Ok(batch) => batch,
             Err(e) => {
+                // hyper drops the connection and logs at most at debug: say
+                // it here, as a file download's `NamedErrors` does.
+                tracing::error!(execution = %c.id, error = %e, "a log download failed mid-body");
                 c.done = true;
                 return Some((Err(std::io::Error::other(e.to_string())), c));
             }
@@ -4801,9 +4806,11 @@ pub struct DetailedErrorBody {
     pub error: String,
     pub code: String,
     /// `has_dependents`: `{"executions": [uuid, …], "total": n}` (at most 20
-    /// named, oldest first); `not_a_root`: `{"root": uuid}`.
-    #[schema(value_type = Object)]
-    pub details: serde_json::Value,
+    /// named, oldest first); `not_a_root`: `{"root": uuid}`. Absent for a
+    /// refusal that carries none (`not_terminated`, `delete_logs_required`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object, required = false)]
+    pub details: Option<serde_json::Value>,
 }
 
 /// Which source a replay or a restart into a new execution runs (spec D6,
@@ -5185,7 +5192,7 @@ impl axum::response::IntoResponse for ExecOpError {
                     Json(DetailedErrorBody {
                         error,
                         code: code.to_string(),
-                        details,
+                        details: Some(details),
                     }),
                 )
                     .into_response()
@@ -6239,4 +6246,37 @@ struct WorkflowApi;
 pub fn openapi() -> utoipa::openapi::OpenApi {
     use utoipa::OpenApi as _;
     WorkflowApi::openapi()
+}
+
+#[cfg(test)]
+mod log_download_tests {
+    use futures_util::StreamExt;
+
+    /// A database error ends the download with an error item, then nothing:
+    /// no truncation line, no further batch (plan S11). The pool is closed,
+    /// so the first batch fails without a server.
+    #[tokio::test]
+    async fn a_database_error_ends_the_stream_with_an_error() {
+        // Arrange
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .expect("a lazy pool");
+        pool.close().await;
+        let repo = super::LogRepo::new(pool);
+        let filter = crate::logs::LogFilter {
+            task_id: None,
+            task_run_id: None,
+            attempt: None,
+            min_level: None,
+        };
+
+        // Act
+        let items: Vec<_> = super::log_download(repo, uuid::Uuid::nil(), uuid::Uuid::nil(), filter)
+            .collect()
+            .await;
+
+        // Assert
+        assert_eq!(items.len(), 1, "one error item, then the end");
+        assert!(items[0].is_err());
+    }
 }

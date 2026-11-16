@@ -48322,8 +48322,7 @@
         "description": "An `ErrorBody` that also carries `details` (package 7d D9, plan S3).",
         "required": [
           "error",
-          "code",
-          "details"
+          "code"
         ],
         "properties": {
           "error": {
@@ -48334,7 +48333,7 @@
           },
           "details": {
             "type": "object",
-            "description": "`has_dependents`: `{\"executions\": [uuid, …], \"total\": n}` (at most 20\nnamed, oldest first); `not_a_root`: `{\"root\": uuid}`."
+            "description": "`has_dependents`: `{\"executions\": [uuid, …], \"total\": n}` (at most 20\nnamed, oldest first); `not_a_root`: `{\"root\": uuid}`. Absent for a\nrefusal that carries none (`not_terminated`, `delete_logs_required`)."
           }
         }
       },
