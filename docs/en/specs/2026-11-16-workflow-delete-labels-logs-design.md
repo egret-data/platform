@@ -70,6 +70,14 @@ From the implementation plan `docs/en/plans/2026-11-16-workflow-delete-labels-lo
 - **S14.** The delete's toast after navigating stays (FE-ACTION-2 forbids a toast only when navigating to the result).
 - **S15.** The log delete's `attempt` is 0-based, as the log API serves it.
 
+**As-built deviations, 2026-11-16 (T1-T8):**
+
+- The migration is `0231_execution_labels_replaced.sql` (S1 confirmed).
+- T3 locks the delete's family to a fixpoint: after locking it re-reads the descendants and repeats until no new member appears, so a concurrent insert under a member cannot slip in.
+- T4 locks the row first and then checks idle in a second statement, not in the lock query.
+- T6 made `DetailedErrorBody.details` optional (absent on `not_terminated`) and logs a download error that happens mid-body.
+- T8 appends new label rows after the `system.*` rows in the label editor.
+
 ## 3. Shape of the change
 
 - Migration `0231_execution_labels_replaced.sql`: the column (*corrected 2026-11-16, plan S1:* 0230 is taken by `feat/svc-accounts-sa2`).
@@ -103,3 +111,7 @@ Other:
 ## 6. Out of scope
 
 Delete logs by flow (`LC:204`), bulk by ids or query (7f), a label filter on the executions list, metrics.
+
+## 7. As built
+
+(Filled in at the end of the implementation.)

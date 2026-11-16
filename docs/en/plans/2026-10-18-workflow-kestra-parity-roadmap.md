@@ -157,6 +157,9 @@ Each package goes through the usual flow: spec (or a spec section) → plan → 
 16. **#7:** 7c builds pause by hand (`POST …/pause`), resume with `onResume` inputs and resume-validate (`POST …/resume/validate`). Row #7's "pause" and "Resume with `onResume` inputs, and resume-validate" are 7c's.
 17. **#9:** `Pause` `onResume` moved to 7c (user decision Q1, 2026-11-15). #9 keeps `Pause` `behavior:`, `onPause:`, `errors:` and `finally:` (still refused, `unsupported_pause_property`) and `AllowFailure` block `retry:`.
 
+**Notes, 2026-11-16 (package 7d, `docs/en/specs/2026-11-16-workflow-delete-labels-logs-design.md`; the rows above are not edited).**
+18. **#7:** 7d builds delete (`DELETE …/executions/{id}`, ended roots only, with dependents refused), the labels API (`POST …/executions/{id}/labels`, replacing the visible list, migration 0231 `labels_replaced`), the server log download (`GET …/executions/{id}/logs/download`) and log delete (`DELETE …/executions/{id}/logs`). Row #7's "delete (with logs and storage), labels API", "download and delete" are 7d's; logs follow (SSE) is still open.
+
 **Notes, 2026-10-29 (package #6, spec §5 and §7; the rows above are not edited).**
 13. **#11 gains: `trigger` bound in the fired flow's task renders.** #6 binds `trigger.outputs` only in a Flow trigger's `inputs:`; `worker::render` binds no `trigger` root for any trigger type, so `{{ trigger.outputs.x }}` (or `{{ trigger.date }}`) in a task of the fired flow still fails to render.
 14. **KI-112 follow-up:** SECRET inputs are still revealed in a Flow trigger's render context (#6 masks the SECRET outputs there).
@@ -555,7 +558,7 @@ egret routes are under `/api/ws/{ws}/workflows`.
 | GET /{id}/graph | supported | routes.rs:1314 |
 | GET /{id}/file, /file/metas, /file/preview | supported | storage/routes.rs:255,322,350 |
 | logs GET /{id} | supported (paged) | routes.rs:2064 |
-| logs follow (SSE), logs download, logs delete | missing (polling only) | W7b §10 |
+| logs follow (SSE), logs download, logs delete | missing (polling only) | W7b §10 *Corrected 2026-11-16 (7d): download is `GET …/executions/{id}/logs/download` (`workflow:read`, capped at 100 000 lines with a truncation line, streamed) and delete is `DELETE …/executions/{id}/logs` (`workflow:manage`); spec §5 divergences 5 and 7. Logs follow (SSE) is still missing.* |
 | GET /{id}/follow, /follow-dependencies (SSE) | missing | W7b §10 |
 | POST /{id}/actions/resume | partial: resumes all Pause runs; no `onResume` inputs; no resume/validate; no resume-from-breakpoint | routes.rs:2747 *Corrected 2026-11-15 (7c): `onResume` and resume with inputs are supported; resume-validate exists; resume-from-breakpoint is still not.* |
 | POST /{id}/actions/pause | missing | – *Corrected 2026-11-16 (7c): pause by hand exists: `POST …/executions/{id}/pause`.* |
@@ -563,8 +566,8 @@ egret routes are under `/api/ws/{ws}/workflows`.
 | POST /{id}/actions/replay, /actions/replay-with-inputs | partial: egret's "replay" re-runs the WHOLE execution from the frozen source. There is no replay from a chosen taskRunId, no replay-with-inputs and no revision choice. *(2026-11-14, 7b: supported. Replay from a task run, on a chosen source (frozen, current or `version:N`, with the `revision` alias) and with new inputs; breakpoints are refused.)* | routes.rs:2822-2850; now `routes.rs` `replay_execution` (`POST /api/ws/{ws}/workflows/executions/{id}/replay?taskRunId=&source=`) |
 | POST /{id}/actions/restart (resume failed tasks in place) | **missing** *(2026-11-13, 7a: supported. Restart in place of a FAILED or PAUSED execution, same ids; end-hook runs removed)* *(2026-11-14, 7b: restart with a revision supported. `source=current` or `version:N` (or `revision=N`) creates a new execution that copies the task runs and resets the failed ones, labelled `system.restarted`)* | `routes.rs` `restart_execution` (`POST /api/ws/{ws}/workflows/executions/{id}/restart?source=`) |
 | POST /{id}/actions/change-status, /actions/state (force a task-run state) | **missing** *(2026-11-13, 7a: supported (7a). Task-run state to SUCCESS, WARNING, FAILED or CANCELLED, then restart in place; execution status; no-op change is 409)* | `routes.rs` `set_task_run_state` (`POST /executions/{id}/task-runs/{task_run_id}/state`), `set_execution_status` (`POST /executions/{id}/status`) |
-| POST /{id}/actions/labels | missing (C2 adds the task, not the API) | – |
-| DELETE /{id} (delete execution + logs/metrics/storage) | **missing** | – |
+| POST /{id}/actions/labels | missing (C2 adds the task, not the API) | – *Corrected 2026-11-16 (7d): `POST …/executions/{id}/labels` replaces the visible label list; waits for the execution to be idle, caps count and lengths, `workflow:manage` (spec §5 divergences 5, 6, 8).* |
+| DELETE /{id} (delete execution + logs/metrics/storage) | **missing** | – *Corrected 2026-11-16 (7d): `DELETE …/executions/{id}` deletes an ended root with its logs (and storage with `deleteStorage`); refuses a running one (409 `not_terminated`), one with dependents (409 `has_dependents`) and a non-root (409 `not_a_root`); `deleteLogs=false` is refused, `deleteMetrics` does nothing (spec §5 divergences 1-4, 9).* |
 | POST /{id}/actions/eval (expression debugger) | missing (`ExpressionController.render` is missing too) | – |
 | unqueue, force-run (concurrency queue) | missing, because concurrency is not enforced | – |
 | every `by-ids`/`by-query` bulk op (kill, restart, replay, resume, pause, labels, delete, change-status) | missing | W7b §10 |

@@ -72,6 +72,14 @@ Lấy từ plan triển khai `docs/en/plans/2026-11-16-workflow-delete-labels-lo
 - **S14.** Toast sau khi điều hướng của việc xoá được giữ (FE-ACTION-2 chỉ cấm toast khi điều hướng tới kết quả).
 - **S15.** `attempt` của việc xoá log tính từ 0, như API log trả về.
 
+**Các điểm lệch khi xây, 2026-11-16 (T1-T8):**
+
+- Migration là `0231_execution_labels_replaced.sql` (S1 được xác nhận).
+- T3 khoá họ execution của lệnh xoá đến điểm cố định: sau khi khoá, nó đọc lại các hậu duệ và lặp lại đến khi không còn thành viên mới, để một insert đồng thời dưới một thành viên không lọt qua.
+- T4 khoá dòng trước rồi kiểm tra idle ở câu lệnh thứ hai, không gộp trong câu khoá.
+- T6 làm `DetailedErrorBody.details` thành tuỳ chọn (vắng ở `not_terminated`) và ghi log khi lỗi tải xảy ra giữa chừng body.
+- T8 thêm các dòng label mới sau các dòng `system.*` trong bộ sửa label.
+
 ## 3. Hình dạng của thay đổi
 
 - Migration `0231_execution_labels_replaced.sql`: cột mới (*đính chính 2026-11-16, plan S1:* 0230 đã bị `feat/svc-accounts-sa2` dùng).
@@ -105,3 +113,7 @@ Khác:
 ## 6. Ngoài phạm vi
 
 Xoá log theo flow (`LC:204`), bulk theo ids hoặc query (7f), bộ lọc label trên danh sách execution, metric.
+
+## 7. Như đã xây
+
+(Sẽ điền khi kết thúc triển khai.)
