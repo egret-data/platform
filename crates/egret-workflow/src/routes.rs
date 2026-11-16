@@ -2570,7 +2570,8 @@ async fn download_execution_logs(
         attempt: None,
         min_level: q.min_level,
     };
-    let body = axum::body::Body::from_stream(log_download(st.logs.clone(), ws, id, filter));
+    let body =
+        axum::body::Body::from_stream(log_download(st.logs.clone(), ws, id, filter, !status.idle));
     let mut res = axum::response::Response::new(body);
     let h = res.headers_mut();
     h.insert(
@@ -2596,7 +2597,8 @@ async fn download_execution_logs(
 /// The download's body (plan S11): batches of `LOG_DOWNLOAD_BATCH` lines in
 /// id order, joined with `\n`, no trailing newline; at most
 /// `LOG_DOWNLOAD_MAX_LINES` lines, counted across batches, then
-/// `truncated_line()` only when there were more. A database error ends the
+/// `truncated_line()` only when there were more. While `running`, the read stops
+/// at the settle watermark (`LogRepo::download_batch`). A database error ends the
 /// stream with an error, so the client's download fails rather than ending
 /// short.
 fn log_download(
@@ -2604,6 +2606,7 @@ fn log_download(
     ws: Uuid,
     id: Uuid,
     filter: crate::logs::LogFilter,
+    running: bool,
 ) -> impl futures_util::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static {
     use crate::logs::{download_line, truncated_line, LOG_DOWNLOAD_BATCH, LOG_DOWNLOAD_MAX_LINES};
     struct Cursor {
@@ -2611,6 +2614,7 @@ fn log_download(
         ws: Uuid,
         id: Uuid,
         filter: crate::logs::LogFilter,
+        running: bool,
         after: Option<i64>,
         served: i64,
         done: bool,
@@ -2620,6 +2624,7 @@ fn log_download(
         ws,
         id,
         filter,
+        running,
         after: None,
         served: 0,
         done: false,
@@ -2632,7 +2637,7 @@ fn log_download(
         let want = (LOG_DOWNLOAD_MAX_LINES + 1 - c.served).min(LOG_DOWNLOAD_BATCH);
         let batch = match c
             .repo
-            .download_batch(c.ws, c.id, &c.filter, c.after, want)
+            .download_batch(c.ws, c.id, &c.filter, c.after, want, c.running)
             .await
         {
             Ok(batch) => batch,
@@ -6271,9 +6276,10 @@ mod log_download_tests {
         };
 
         // Act
-        let items: Vec<_> = super::log_download(repo, uuid::Uuid::nil(), uuid::Uuid::nil(), filter)
-            .collect()
-            .await;
+        let items: Vec<_> =
+            super::log_download(repo, uuid::Uuid::nil(), uuid::Uuid::nil(), filter, false)
+                .collect()
+                .await;
 
         // Assert
         assert_eq!(items.len(), 1, "one error item, then the end");

@@ -2357,6 +2357,54 @@ async fn delete_for_execution_never_reaches_another_workspace() {
     assert_eq!(fx.count(exec).await, 1);
 }
 
+/// M3: a running execution's download stops at the settle watermark, like
+/// `page`; an idle one's does not.
+#[tokio::test]
+async fn download_batch_applies_the_settle_watermark_only_while_running() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    fx.repo
+        .insert_batch(&[
+            fx.line(exec, LogLevel::Info, "S"),
+            fx.line(exec, LogLevel::Info, "A"),
+            fx.line(exec, LogLevel::Info, "B"),
+        ])
+        .await
+        .unwrap();
+    let ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id")
+            .bind(exec)
+            .fetch_all(&fx.db.pool)
+            .await
+            .unwrap();
+    // S and B settled, A (between them) still inside the lag.
+    sqlx::query(
+        "UPDATE workflow.task_logs SET inserted_at = inserted_at - interval '3 seconds' \
+          WHERE id = ANY($1)",
+    )
+    .bind(vec![ids[0], ids[2]])
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    let all = LogFilter::default();
+    let running = fx
+        .repo
+        .download_batch(fx.ws, exec, &all, None, 10, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        messages(&running),
+        vec!["S"],
+        "running: B sits above the unsettled A and is held back"
+    );
+    let idle = fx
+        .repo
+        .download_batch(fx.ws, exec, &all, None, 10, false)
+        .await
+        .unwrap();
+    assert_eq!(messages(&idle), vec!["S", "A", "B"], "idle: no lag");
+}
+
 /// D7, S11: id order, the cursor, the limit and the filters; no settle lag.
 #[tokio::test]
 async fn download_batch_reads_what_is_committed_in_id_order() {
@@ -2380,13 +2428,20 @@ async fn download_batch_reads_what_is_committed_in_id_order() {
     // Not settled: `page` would hold these back for 2 s; the download does not.
     let first = fx
         .repo
-        .download_batch(fx.ws, exec, &LogFilter::default(), None, 2)
+        .download_batch(fx.ws, exec, &LogFilter::default(), None, 2, false)
         .await
         .unwrap();
     assert_eq!(messages(&first), vec!["m0", "m1"]);
     let rest = fx
         .repo
-        .download_batch(fx.ws, exec, &LogFilter::default(), Some(first[1].id), 10)
+        .download_batch(
+            fx.ws,
+            exec,
+            &LogFilter::default(),
+            Some(first[1].id),
+            10,
+            false,
+        )
         .await
         .unwrap();
     assert_eq!(messages(&rest), vec!["m2", "m3", "m4"]);
@@ -2399,7 +2454,7 @@ async fn download_batch_reads_what_is_committed_in_id_order() {
     assert_eq!(
         messages(
             &fx.repo
-                .download_batch(fx.ws, exec, &LogFilter::default(), None, 10)
+                .download_batch(fx.ws, exec, &LogFilter::default(), None, 10, false)
                 .await
                 .unwrap()
         ),
@@ -2408,7 +2463,7 @@ async fn download_batch_reads_what_is_committed_in_id_order() {
     let (foreign_ws, _) = common::seed_workspace(&fx.db).await;
     assert!(fx
         .repo
-        .download_batch(foreign_ws, exec, &LogFilter::default(), None, 10)
+        .download_batch(foreign_ws, exec, &LogFilter::default(), None, 10, false)
         .await
         .unwrap()
         .is_empty());
@@ -2432,7 +2487,11 @@ async fn download_batch_reads_what_is_committed_in_id_order() {
     let get = |f: LogFilter| {
         let repo = fx.repo.clone();
         let (ws, e) = (fx.ws, exec2);
-        async move { repo.download_batch(ws, e, &f, None, 10).await.unwrap() }
+        async move {
+            repo.download_batch(ws, e, &f, None, 10, false)
+                .await
+                .unwrap()
+        }
     };
     let by_task = get(LogFilter {
         task_id: Some("y".into()),
@@ -2459,7 +2518,7 @@ async fn download_batch_reads_what_is_committed_in_id_order() {
     assert_eq!(
         messages(
             &fx.repo
-                .download_batch(fx.ws, exec, &errors, None, 10)
+                .download_batch(fx.ws, exec, &errors, None, 10, false)
                 .await
                 .unwrap()
         ),

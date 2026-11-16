@@ -320,9 +320,13 @@ impl LogRepo {
     }
 
     /// **One batch of `GET …/logs/download`** (package 7d D7, S11): the
-    /// matching lines after `after`, in id order, at most `limit`. Unlike
-    /// [`Self::page`] there is no settle watermark: a download is one read of
-    /// what is committed now, not a cursor a client keeps.
+    /// matching lines after `after`, in id order, at most `limit`.
+    ///
+    /// `running` is "the execution is not idle". A running execution's lines
+    /// are bounded by the same settle watermark as [`Self::page`] (see there
+    /// and [`SETTLE_LAG`]): batches are separate statements keyed on `id`, and
+    /// a line with a lower id that commits late would be skipped for good. An
+    /// idle execution writes no more lines, so it is read with no lag.
     pub async fn download_batch(
         &self,
         ws: Uuid,
@@ -330,11 +334,20 @@ impl LogRepo {
         f: &LogFilter,
         after: Option<i64>,
         limit: i64,
+        running: bool,
     ) -> Result<Vec<StoredLine>> {
         let rows = sqlx::query(
             "SELECT id, task_run_id, task_id, attempt, level, ts, message \
            FROM workflow.task_logs \
           WHERE workspace_id = $1 AND execution_id = $2 AND id > COALESCE($3, 0) \
+            AND id < COALESCE( \
+                  (SELECT min(u.id) FROM workflow.task_logs u \
+                    WHERE $9::float8 IS NOT NULL \
+                      AND u.workspace_id = $1 \
+                      AND u.execution_id = $2 \
+                      AND u.id > COALESCE($3, 0) \
+                      AND u.inserted_at >= now() - make_interval(secs => $9)), \
+                  9223372036854775807) \
             AND ($4::text IS NULL OR task_id = $4) \
             AND ($5::uuid IS NULL OR task_run_id = $5) \
             AND ($6::int4 IS NULL OR attempt = $6) \
@@ -350,6 +363,7 @@ impl LogRepo {
         .bind(f.attempt)
         .bind(f.min_level.map(LogLevel::as_i16))
         .bind(limit.max(0))
+        .bind(running.then(|| SETTLE_LAG.as_secs_f64()))
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;

@@ -732,8 +732,9 @@ impl Surface {
         self.files = Some(files);
     }
 
-    /// The current merged labels, flow then own (`labels::execution_labels`),
-    /// as a `Labels` task merges into them.
+    /// The labels the execution shows, from `labels::visible_labels` (the flow's
+    /// then its own; its own only once replaced), as a `Labels` task merges
+    /// into them.
     pub(super) fn current_labels(&self) -> &[crate::models::Label] {
         &self.labels_list
     }
