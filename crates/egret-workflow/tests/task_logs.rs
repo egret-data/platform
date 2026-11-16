@@ -2284,6 +2284,8 @@ async fn delete_for_execution_ands_its_filters() {
             mk(Some("a"), Some(r1), Some(1), LogLevel::Warn, "a1-warn"),
             mk(Some("a"), Some(r1), Some(1), LogLevel::Info, "a1-info"),
             mk(Some("a"), Some(r2), Some(0), LogLevel::Error, "a2-error"),
+            mk(Some("b"), Some(r1), Some(1), LogLevel::Warn, "b1-warn"),
+            mk(Some("a"), Some(r2), Some(1), LogLevel::Warn, "a2-1-warn"),
             fx.line(other, LogLevel::Error, "other"),
         ])
         .await
@@ -2302,7 +2304,14 @@ async fn delete_for_execution_ands_its_filters() {
     let left = fx.page(exec, &q(None, 100)).await;
     assert_eq!(
         messages(&left),
-        vec!["exec-error", "a0-warn", "a1-info", "a2-error"]
+        vec![
+            "exec-error",
+            "a0-warn",
+            "a1-info",
+            "a2-error",
+            "b1-warn",
+            "a2-1-warn"
+        ]
     );
     // min_level alone: WARN and ERROR go.
     let f = LogFilter {
@@ -2311,7 +2320,7 @@ async fn delete_for_execution_ands_its_filters() {
     };
     assert_eq!(
         fx.repo.delete_for_execution(fx.ws, exec, &f).await.unwrap(),
-        3
+        5
     );
     assert_eq!(
         messages(&fx.page(exec, &q(None, 100)).await),
@@ -2381,6 +2390,68 @@ async fn download_batch_reads_what_is_committed_in_id_order() {
         .await
         .unwrap();
     assert_eq!(messages(&rest), vec!["m2", "m3", "m4"]);
+    // Another execution's line, another workspace's call.
+    let other = fx.execution().await;
+    fx.repo
+        .insert_batch(&[fx.line(other, LogLevel::Info, "other")])
+        .await
+        .unwrap();
+    assert_eq!(
+        messages(
+            &fx.repo
+                .download_batch(fx.ws, exec, &LogFilter::default(), None, 10)
+                .await
+                .unwrap()
+        ),
+        vec!["m0", "m1", "m2", "m3", "m4"]
+    );
+    let (foreign_ws, _) = common::seed_workspace(&fx.db).await;
+    assert!(fx
+        .repo
+        .download_batch(foreign_ws, exec, &LogFilter::default(), None, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    // task_id, task_run_id and attempt each narrow it.
+    let exec2 = fx.execution().await;
+    let (r1, r2) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut ls = Vec::new();
+    for (m, task, run, att) in [
+        ("x-r1-0", "x", r1, 0),
+        ("x-r1-1", "x", r1, 1),
+        ("x-r2-1", "x", r2, 1),
+        ("y-r1-1", "y", r1, 1),
+    ] {
+        let mut l = fx.line(exec2, LogLevel::Info, m);
+        l.task_id = Some(task.into());
+        l.task_run_id = Some(run);
+        l.attempt = Some(att);
+        ls.push(l);
+    }
+    fx.repo.insert_batch(&ls).await.unwrap();
+    let get = |f: LogFilter| {
+        let repo = fx.repo.clone();
+        let (ws, e) = (fx.ws, exec2);
+        async move { repo.download_batch(ws, e, &f, None, 10).await.unwrap() }
+    };
+    let by_task = get(LogFilter {
+        task_id: Some("y".into()),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(messages(&by_task), vec!["y-r1-1"]);
+    let by_run = get(LogFilter {
+        task_run_id: Some(r2),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(messages(&by_run), vec!["x-r2-1"]);
+    let by_attempt = get(LogFilter {
+        attempt: Some(0),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(messages(&by_attempt), vec!["x-r1-0"]);
     let errors = LogFilter {
         min_level: Some(LogLevel::Error),
         ..LogFilter::default()

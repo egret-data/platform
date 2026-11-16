@@ -159,8 +159,6 @@ pub struct LogLine {
     pub message: String,
 }
 
-/// W11 Task 1's measured fixture, for the tests that assert its typed
-/// `egret_expected` values rather than a reading of its prose.
 /// Package 7d D7: the most lines `GET …/executions/{id}/logs/download`
 /// writes (the frontend's former client-side cap).
 pub const LOG_DOWNLOAD_MAX_LINES: i64 = 100_000;
@@ -186,6 +184,8 @@ pub fn download_line(line: &StoredLine) -> String {
     )
 }
 
+/// W11 Task 1's measured fixture, for the tests that assert its typed
+/// `egret_expected` values rather than a reading of its prose.
 #[cfg(test)]
 pub(crate) mod fixture {
     /// The whole of `oracle-exec/w11-logs.json`.

@@ -1550,14 +1550,17 @@ impl ExecutionRepo {
     pub async fn log_status(&self, ws: Uuid, id: Uuid) -> Result<ExecutionLogStatus> {
         let row: Option<(String, bool, bool)> = sqlx::query_as(
             "SELECT e.state, \
-                    COALESCE(workflow.execution_is_idle(e.id), false) AS idle, \
-                    COALESCE(workflow.execution_is_idle(e.id), false) \
+                    i.idle, \
+                    i.idle \
                       AND GREATEST(e.updated_at, \
                                    (SELECT max(COALESCE(r.ended_at, r.updated_at)) \
                                       FROM workflow.task_runs r \
                                      WHERE r.execution_id = e.id)) \
                           < now() - make_interval(secs => $3) AS complete \
-               FROM workflow.executions e WHERE e.id = $1 AND e.workspace_id = $2",
+               FROM workflow.executions e \
+              CROSS JOIN LATERAL \
+                    (SELECT COALESCE(workflow.execution_is_idle(e.id), false) AS idle) i \
+              WHERE e.id = $1 AND e.workspace_id = $2",
         )
         .bind(id)
         .bind(ws)
