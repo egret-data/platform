@@ -90,6 +90,23 @@ impl Authorizer {
             }
         }
         let mut tx = self.db.pool.begin().await.map_err(db_err)?;
+        // SA4: this path writes `access_grants` itself, bypassing the
+        // `with_recompile_in_tx` chokepoint, so it carries the same refusal: a
+        // service account can never hold `platform_admin`. Before any write.
+        if roles.iter().any(|r| r == "platform_admin") {
+            let is_service: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND provider = 'service')",
+            )
+            .bind(user_id.0)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            if is_service {
+                return Err(Error::Conflict(
+                    "a service account cannot hold platform_admin".to_string(),
+                ));
+            }
+        }
         // KI-284: taken before the reads below and the profile locks
         // (`LastAdminGuard`'s doc for the lock order).
         let guard = egret_auth::roles::LastAdminGuard::lock_via(&mut tx).await?;

@@ -400,7 +400,31 @@ impl RoleRepo {
     /// rather than ON CONFLICT: the UNIQUE index includes `scope_id`, which is NULL
     /// for platform grants, and Postgres treats NULLs as distinct — so ON CONFLICT
     /// would never fire and re-assign would duplicate the row.
+    ///
+    /// SA4: this non-tx writer has no production callers, but it must not become
+    /// a way round the service-account chokepoint in
+    /// `egret_perm_compile::role_membership`, so it refuses `platform_admin` for
+    /// a service user or a group with a service member (`Conflict`).
     pub async fn assign(&self, ptype: &str, pid: Uuid, role_id: Uuid) -> Result<()> {
+        let refused: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM roles WHERE id = $3 AND name = 'platform_admin') \
+             AND CASE $1 \
+               WHEN 'user' THEN EXISTS (SELECT 1 FROM users WHERE id = $2 AND provider = 'service') \
+               WHEN 'group' THEN EXISTS (SELECT 1 FROM user_groups ug JOIN users u ON u.id = ug.user_id \
+                                         WHERE ug.group_id = $2 AND u.provider = 'service') \
+               ELSE false END",
+        )
+        .bind(ptype)
+        .bind(pid)
+        .bind(role_id)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        if refused {
+            return Err(egret_core::Error::Conflict(
+                "a service account cannot hold platform_admin".to_string(),
+            ));
+        }
         sqlx::query(
             "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
              SELECT $1, $2, $3, 'platform', NULL \

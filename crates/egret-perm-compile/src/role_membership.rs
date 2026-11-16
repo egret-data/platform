@@ -257,6 +257,17 @@ async fn refuse_service_account_admin(
     ptype: &str,
     pid: Uuid,
 ) -> Result<(), CompileError> {
+    if ptype == "group" {
+        // Cross-chokepoint TOCTOU: `GroupRepo::change_member` (add) reads this
+        // group's platform_admin grant while this path reads its service
+        // members; without a shared lock both can pass and commit. Both take
+        // the group's row lock before their check, so they serialise on it.
+        sqlx::query("SELECT 1 FROM groups WHERE id = $1 FOR UPDATE")
+            .bind(pid)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(CompileError::from_db)?;
+    }
     let (sql, msg) = match ptype {
         "user" => (
             "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND provider = 'service')",

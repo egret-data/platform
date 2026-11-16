@@ -113,6 +113,23 @@ async fn a_service_account_cannot_log_in() {
         .unwrap();
     let app = login_app(&db);
 
+    // Positive control: the same router admits a local user WITH a password, so
+    // the 401s below cannot come from a globally broken login path.
+    let local_email = format!("local-{}@t.test", tag());
+    UserRepo::new(db.clone())
+        .insert_local(
+            &local_email,
+            "L",
+            &egret_auth::password::hash_password("pw-12345").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        post_login(&app, &local_email, "pw-12345").await,
+        StatusCode::OK,
+        "a local user with a password logs in through the same router"
+    );
+
     for pw in ["", "password", "svc", &email] {
         assert_eq!(
             post_login(&app, &email, pw).await,
