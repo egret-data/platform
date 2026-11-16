@@ -724,6 +724,102 @@ async fn a_retry_replacement_goes_with_its_root(pool: sqlx::PgPool) {
     assert!(listed_under(&fs, &own_r).await.objects.is_empty());
 }
 
+/// The family is locked to a fixpoint (fix round 1): a member inserted under
+/// a not-yet-locked member while the delete reads the family is found, so
+/// it is idle-checked, its objects go, and it is counted.
+///
+/// Deterministic: a second transaction holds the replacement `Y1`'s row
+/// (as the wake that settles it does) and inserts `Y2` under it,
+/// uncommitted. The delete locks the root, reads the family without `Y2`,
+/// and waits on `Y1`'s lock; the test sees it waiting in `pg_stat_activity`
+/// (this test's database only) and only then commits `Y2`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_member_inserted_while_the_family_is_read_is_deleted_with_it(pool: sqlx::PgPool) {
+    // Arrange: R -> Y1 (a CREATE_NEW_EXECUTION replacement), all ended.
+    let (db, ws, user) = setup(&pool).await;
+    let fs = mem_fs(Arc::new(MemStore::new()));
+    let src = "id: cne\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+               \x20   message: hi\n    retry:\n      behavior: CREATE_NEW_EXECUTION\n\
+               \x20     type: constant\n      interval: PT1S\n      maxAttempts: 2\n";
+    let root = start(&pool, &db, ws, user, src).await;
+    settle_everything(&pool, &Fails).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    egret_workflow::worker::wake(&pool, 16).await.expect("wake");
+    settle_everything(&pool, &Fails).await;
+    let y1: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 AND parent_run_ix IS NULL",
+    )
+    .bind(root)
+    .fetch_one(&pool)
+    .await
+    .expect("the replacement exists");
+    let y2 = Uuid::new_v4();
+    let (own_y2, wd_y2) = seed_objects(&fs, ws, y2, "cne").await;
+
+    // The "wake": Y1's row held, Y2 inserted under it (a copy of Y1's row
+    // with Y1 as its parent), not committed.
+    let mut wake = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(y1)
+        .execute(&mut *wake)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow.executions \
+         SELECT (jsonb_populate_record(e, jsonb_build_object('id', $2::uuid, 'parent_execution_id', $1::uuid))).* \
+           FROM workflow.executions e WHERE e.id = $1",
+    )
+    .bind(y1)
+    .bind(y2)
+    .execute(&mut *wake)
+    .await
+    .expect("insert Y2 under Y1");
+
+    // Act: the delete runs until it waits on Y1's lock.
+    let deleting = {
+        let pool = pool.clone();
+        let fs = mem_fs(fs.store.clone());
+        tokio::spawn(async move { delete_execution(&pool, Some(&fs), req(ws, root, true)).await })
+    };
+    let mut waited = false;
+    for _ in 0..500 {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                AND query LIKE '%FOR UPDATE%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if n > 0 {
+            waited = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(waited, "control: the delete waited on Y1's lock");
+    wake.commit().await.unwrap();
+    let done = deleting
+        .await
+        .unwrap()
+        .expect("delete")
+        .expect("not refused");
+
+    // Assert
+    assert_eq!(done.executions, 3, "Y2 is a member");
+    for id in [root, y1, y2] {
+        assert!(!exists(&pool, id).await, "{id} is gone");
+    }
+    assert!(
+        listed_under(&fs, &own_y2).await.objects.is_empty(),
+        "{own_y2}"
+    );
+    assert!(
+        listed_under(&fs, &wd_y2).await.objects.is_empty(),
+        "{wd_y2}"
+    );
+}
+
 /// tests/execution_timestamps.rs:56-70, without the sleep.
 struct Fails;
 

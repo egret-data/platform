@@ -11,6 +11,17 @@
 //! fails its own insert. Every refusal comes before the first write but
 //! one: the S8 detach, which a later refusal rolls back with the rest.
 //!
+//! **The family is locked to a fixpoint.** The recursive read that finds
+//! the family runs under `READ COMMITTED` before its rows are locked, so a
+//! child being inserted under a member that is not yet locked (a retry
+//! replacement's wake holds that member's row and inserts the next
+//! replacement, needing only `KEY SHARE` on it, not on the root) is not
+//! seen. The `FOR UPDATE` on that member waits for the insert to commit;
+//! the read is then run again and any new id locked, until a read finds
+//! nothing that is not locked yet. From then on no member can gain a
+//! child, so the family the checks, the objects and the counts use is the
+//! one the cascade deletes.
+//!
 //! Not `claim::load`: nothing is settled, and an execution whose frozen
 //! source no longer plans must still be deletable (plan S5).
 //!
@@ -19,6 +30,13 @@
 //! and the call can be repeated. A member whose prefix is not provably its
 //! own (`own_prefix` is `None`) keeps its objects, logged, as the pruner
 //! does. Each member's `_wd/` snapshots are deleted too (plan S4).
+//!
+//! The store is not transactional: a failure after some objects are gone
+//! (the store failing on member k of N, or the final `DELETE` or the commit
+//! failing after every object was deleted) rolls back the rows but not the
+//! objects, so rows can remain whose files are already gone. Repeating the
+//! call is the recovery: deleting an absent prefix succeeds, and the rows
+//! then go.
 
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
@@ -255,38 +273,52 @@ async fn root_of(conn: &mut PgConnection, ws: Uuid, id: Uuid) -> Result<Uuid> {
 
 /// The root and every `parent_execution_id` descendant (plan S2: not
 /// `storage::index::loop_family`, which stops at rows without a
-/// `loop_index`), each row locked `FOR UPDATE` in id order.
+/// `loop_index`), each row locked `FOR UPDATE`, in id order within each
+/// pass, read again until no unlocked member is left (the module doc's
+/// fixpoint). Returned in id order.
 async fn family(conn: &mut PgConnection, ws: Uuid, root: Uuid) -> Result<Vec<Member>> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "WITH RECURSIVE fam(id) AS ( \
-           SELECT $1::uuid \
-           UNION \
-           SELECT e.id FROM workflow.executions e JOIN fam f ON e.parent_execution_id = f.id \
-            WHERE e.workspace_id = $2) \
-         SELECT id FROM fam",
-    )
-    .bind(root)
-    .bind(ws)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(db_err)?;
-    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, namespace, flow_key FROM workflow.executions \
-          WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE",
-    )
-    .bind(ws)
-    .bind(&ids)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(db_err)?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, namespace, flow_key)| Member {
+    let mut locked: Vec<Member> = Vec::new();
+    loop {
+        let ids: Vec<Uuid> = sqlx::query_scalar(
+            "WITH RECURSIVE fam(id) AS ( \
+               SELECT $1::uuid \
+               UNION \
+               SELECT e.id FROM workflow.executions e JOIN fam f ON e.parent_execution_id = f.id \
+                WHERE e.workspace_id = $2) \
+             SELECT id FROM fam",
+        )
+        .bind(root)
+        .bind(ws)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        let new: Vec<Uuid> = ids
+            .into_iter()
+            .filter(|id| !locked.iter().any(|m| m.id == *id))
+            .collect();
+        // Every member read is locked: none can gain a child any more. (A
+        // row deleted between the read and its lock is not locked, and the
+        // next read no longer lists it.)
+        if new.is_empty() {
+            break;
+        }
+        let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT id, namespace, flow_key FROM workflow.executions \
+              WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE",
+        )
+        .bind(ws)
+        .bind(&new)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(db_err)?;
+        locked.extend(rows.into_iter().map(|(id, namespace, flow_key)| Member {
             id,
             namespace,
             flow_key,
-        })
-        .collect())
+        }));
+    }
+    locked.sort_by_key(|m| m.id);
+    Ok(locked)
 }
 
 /// How many executions outside `family` point at a member, and the first
