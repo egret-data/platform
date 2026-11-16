@@ -2544,7 +2544,7 @@ async fn set_execution_labels(
         LogDownloadQuery,
     ),
     responses(
-        (status = 200, description = "One line per log line in id order, `<instant RFC 3339 UTC, ms> <LEVEL> <message>`, joined with `\\n`, as `<id>.log`. At most 100 000 lines; then the last line is `… truncated at 100000 lines`. `Cache-Control: no-cache` while the execution has not ended. No settle lag: the lines committed now.", content_type = "text/plain", body = String),
+        (status = 200, description = "One line per log line in id order, `<instant RFC 3339 UTC, ms> <LEVEL> <message>`, joined with `\\n`, as `<id>.log`. At most 100 000 lines; then the last line is `… truncated at 100000 lines`. `Cache-Control: no-cache` while the execution has not ended. While the execution runs, lines younger than the 2 s settle lag are left out (as in the paged log API); once it has ended, every committed line is served.", content_type = "text/plain", body = String),
         (status = 400, description = "A `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`task_run_id`", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),

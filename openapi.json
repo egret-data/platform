@@ -35196,7 +35196,7 @@
         ],
         "responses": {
           "200": {
-            "description": "One line per log line in id order, `<instant RFC 3339 UTC, ms> <LEVEL> <message>`, joined with `\\n`, as `<id>.log`. At most 100 000 lines; then the last line is `… truncated at 100000 lines`. `Cache-Control: no-cache` while the execution has not ended. No settle lag: the lines committed now.",
+            "description": "One line per log line in id order, `<instant RFC 3339 UTC, ms> <LEVEL> <message>`, joined with `\\n`, as `<id>.log`. At most 100 000 lines; then the last line is `… truncated at 100000 lines`. `Cache-Control: no-cache` while the execution has not ended. While the execution runs, lines younger than the 2 s settle lag are left out (as in the paged log API); once it has ended, every committed line is served.",
             "content": {
               "text/plain": {
                 "schema": {
