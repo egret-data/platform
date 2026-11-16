@@ -12,9 +12,11 @@
 //! revoke is `revoked_at = now()` in both audiences, exactly as the Data-API
 //! store does it, and both verifiers already refuse revoked/expired rows.
 //!
-//! Permissions: listing is `user:read`; rotate/revoke/expiry are `user:update`;
-//! minting reuses the permission the audience's own issue route takes —
-//! `service_account:manage` (data-api) and `catalog_registry:create` (catalog).
+//! Permissions: listing is `user:read`; revoke/expiry are `user:update` (they
+//! only reduce access). Anything that mints a live secret — create AND rotate —
+//! needs the permission the audience's own issue route takes: `service_account:manage`
+//! against the account's workspace (data-api) and `catalog_registry:create`
+//! (catalog). Rotate additionally needs `user:update`.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -435,6 +437,37 @@ fn default_name(sa: &ServiceAccount, audience: Audience) -> String {
     format!("{} {a} credential", sa.name)
 }
 
+/// The permission that lets a caller mint a live secret for `audience`, checked
+/// where the audience's own issue route checks it: `service_account:manage`
+/// against the SA's WORKSPACE for data-api (as `issue_client` does through its
+/// `WsContext`; a platform SA has no workspace and is refused by `mint` anyway,
+/// so the bare principal is checked), `catalog_registry:create` against the
+/// platform for catalog (as the warehouse-admin `create_client` does).
+async fn require_mint(
+    st: &CpState,
+    p: &egret_core::Principal,
+    sa: &ServiceAccount,
+    audience: Audience,
+) -> Result<(), CpError> {
+    match (audience, sa.workspace_id) {
+        (Audience::DataApi, Some(ws)) => {
+            let ctx = egret_core::WorkspaceContext {
+                workspace_id: egret_core::ids::WorkspaceId(ws),
+                principal: p.clone(),
+                workspace_role: String::new(),
+            };
+            egret_core::authz::require(&*st.pdp, &ctx, "service_account:manage").await?;
+        }
+        (Audience::DataApi, None) => {
+            egret_core::authz::require(&*st.pdp, p, "service_account:manage").await?;
+        }
+        (Audience::Catalog, _) => {
+            egret_core::authz::require(&*st.pdp, p, "catalog_registry:create").await?;
+        }
+    }
+    Ok(())
+}
+
 async fn require_credential(st: &CpState, sa: Uuid, cid: Uuid) -> Result<Credential, CpError> {
     CredentialRepo::new(st.roles.pool())
         .get(sa, cid)
@@ -475,7 +508,7 @@ pub(super) async fn list_credentials(
         (status = 201, description = "Credential minted; client_secret is shown ONCE", body = CreatedCredential),
         (status = 400, description = "Bad audience/binding, or the warehouse is in a different workspace than a workspace service account", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing service_account:manage (data-api) or catalog_registry:create (catalog) permission", body = ErrorBody),
+        (status = 403, description = "Missing service_account:manage in the account's workspace (data-api) or catalog_registry:create (catalog)", body = ErrorBody),
         (status = 404, description = "No such service account or warehouse", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
@@ -486,12 +519,10 @@ pub(super) async fn create_credential(
     Path(id): Path<Uuid>,
     Json(body): Json<CreateCredentialBody>,
 ) -> Result<(StatusCode, Json<CreatedCredential>), CpError> {
-    let perm = match body.audience {
-        Audience::DataApi => "service_account:manage",
-        Audience::Catalog => "catalog_registry:create",
-    };
-    egret_core::authz::require(&*st.pdp, &p, perm).await?;
+    // The data-api permission is workspace-scoped, so the account is read before
+    // the check (a missing account answers 404 to any caller).
     let sa = require_sa(&st, id).await?;
+    require_mint(&st, &p, &sa, body.audience).await?;
     let name = body
         .name
         .clone()
@@ -522,7 +553,7 @@ pub(super) async fn create_credential(
     responses(
         (status = 200, description = "A replacement minted (same audience, name and binding) and the old one revoked; client_secret is shown ONCE", body = CreatedCredential),
         (status = 401, description = "Not authenticated", body = ErrorBody),
-        (status = 403, description = "Missing user:update permission", body = ErrorBody),
+        (status = 403, description = "Missing user:update, or the audience mint permission (service_account:manage in the account workspace / catalog_registry:create)", body = ErrorBody),
         (status = 404, description = "No such service account or credential", body = ErrorBody),
         (status = 409, description = "The credential is already revoked", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -536,6 +567,9 @@ pub(super) async fn rotate_credential(
     egret_core::authz::require(&*st.pdp, &p, "user:update").await?;
     let sa = require_sa(&st, id).await?;
     let old = require_credential(&st, id, cid).await?;
+    // Rotation mints a live secret: it needs the audience's mint permission, not
+    // just `user:update`, and the check precedes any mint.
+    require_mint(&st, &p, &sa, old.audience).await?;
     if old.status == CredentialStatus::Revoked {
         return Err(CpError::Conflict(
             "the credential is already revoked".into(),

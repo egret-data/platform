@@ -39,6 +39,10 @@ impl egret_core::authz::Pdp for AllowAllPdp {
 }
 
 async fn setup() -> Option<Fixture> {
+    setup_with(std::sync::Arc::new(AllowAllPdp)).await
+}
+
+async fn setup_with(pdp: std::sync::Arc<dyn egret_core::authz::Pdp>) -> Option<Fixture> {
     let dsn = egret_test_db::url().await?;
     let db = Db::connect(&dsn, 5).await.expect("connect");
     db.migrate().await.expect("migrate");
@@ -66,7 +70,7 @@ async fn setup() -> Option<Fixture> {
         secrets: workspace_secrets,
         sessions: sessions.clone(),
         browser: None,
-        pdp: std::sync::Arc::new(AllowAllPdp),
+        pdp,
         audit,
         audit_store: egret_audit::AuditStore::new(db.clone()),
         tags: egret_bi::TagRepo::new(db.clone()),
@@ -442,4 +446,112 @@ async fn rotate_revoke_and_expiry_reach_the_verifier() {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+/// Allows only the listed actions (mutable mid-test) and records every
+/// `(action, resource type, resource id)` it is asked about.
+struct ScriptedPdp {
+    allowed: std::sync::Mutex<std::collections::HashSet<String>>,
+    asked: std::sync::Mutex<Vec<(String, String, Option<String>)>>,
+}
+
+#[async_trait::async_trait]
+impl egret_core::authz::Pdp for ScriptedPdp {
+    async fn authorize(
+        &self,
+        _s: &egret_core::authz::Subject,
+        a: &str,
+        r: &egret_core::authz::Resource,
+    ) -> egret_core::Result<egret_core::authz::Decision> {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((a.to_string(), r.type_str().to_string(), r.id_str()));
+        let allow = self.allowed.lock().unwrap().contains(a);
+        Ok(egret_core::authz::Decision {
+            allow,
+            reasons: vec![],
+        })
+    }
+}
+
+impl ScriptedPdp {
+    fn allow(&self, actions: &[&str]) {
+        *self.allowed.lock().unwrap() = actions.iter().map(|a| a.to_string()).collect();
+    }
+}
+
+#[tokio::test]
+async fn rotate_needs_the_audience_mint_permission_and_data_api_is_workspace_scoped() {
+    let pdp = std::sync::Arc::new(ScriptedPdp {
+        allowed: Default::default(),
+        asked: Default::default(),
+    });
+    let Some(f) = setup_with(pdp.clone()).await else {
+        return;
+    };
+    let t = session_for(&f, "cred_user", false).await;
+    let (ws, wh, role) = warehouse_with_role(&f).await;
+    // Everything allowed while seeding.
+    pdp.allow(&[
+        "user:create",
+        "user:read",
+        "user:update",
+        "service_account:manage",
+        "catalog_registry:create",
+    ]);
+    let sa = workspace_sa(&f, &t, ws).await;
+    let base = format!("/service-accounts/{sa}/credentials");
+    let (s, c) = call(&f, "POST", &base, &t, Some(catalog_body(wh, role))).await;
+    assert_eq!(s, StatusCode::CREATED, "{c}");
+    pdp.asked.lock().unwrap().clear();
+    let (s, d) = call(
+        &f,
+        "POST",
+        &base,
+        &t,
+        Some(serde_json::json!({"audience": "data-api"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{d}");
+    // data-api create is checked against the SA's WORKSPACE, not the platform.
+    let asked = pdp.asked.lock().unwrap().clone();
+    assert!(
+        asked.contains(&(
+            "service_account:manage".to_string(),
+            "workspace".to_string(),
+            Some(ws.to_string())
+        )),
+        "{asked:?}"
+    );
+
+    // user:update alone: rotate is refused for BOTH audiences; nothing is minted.
+    pdp.allow(&["user:read", "user:update"]);
+    for cred in [&c, &d] {
+        let id = cred["id"].as_str().unwrap();
+        let (s, j) = call(&f, "POST", &format!("{base}/{id}/rotate"), &t, None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{j}");
+    }
+    let (_, list) = call(&f, "GET", &base, &t, None).await;
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "no credential was minted");
+    assert!(arr.iter().all(|r| r["status"] == "active"), "none revoked");
+    assert!(verifies(&f, &c).await);
+
+    // revoke / expiry stay on user:update alone.
+    let cid = c["id"].as_str().unwrap();
+    let (s, _) = call(&f, "POST", &format!("{base}/{cid}/revoke"), &t, None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // With the mint permission, rotate works (catalog audience).
+    let (_, c2) = call(&f, "POST", &base, &t, Some(catalog_body(wh, role))).await;
+    assert!(
+        c2["id"].is_null(),
+        "create now needs catalog_registry:create"
+    );
+    pdp.allow(&["user:read", "user:update", "catalog_registry:create"]);
+    let (_, c2) = call(&f, "POST", &base, &t, Some(catalog_body(wh, role))).await;
+    let id2 = c2["id"].as_str().unwrap();
+    let (s, j) = call(&f, "POST", &format!("{base}/{id2}/rotate"), &t, None).await;
+    assert_eq!(s, StatusCode::OK, "{j}");
 }
