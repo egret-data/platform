@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use egret_perm::CompileError;
-use egret_perm_ir::statement::{Lowered, Lowering, Source};
+use egret_perm_ir::statement::{Lowered, Lowering, Source, Statement};
 use egret_policy::admin::access_to_ranger_json;
 use serde_json::Value;
 use uuid::Uuid;
@@ -64,6 +64,20 @@ pub(crate) fn skipped(l: &Lowering) -> SkippedItem {
     }
 }
 
+/// A grant statement whose every privilege is `browse` (direct or implied by
+/// `egret_perm_ir::lower::grants::implied_browse`): Ranger has nothing to emit
+/// for it, so it is lowered away instead of rendered as an access-less policy.
+fn is_browse_only(s: &Statement) -> bool {
+    use egret_perm_ir::statement::{Effect, Privilege};
+    matches!(s.source, Source::Grant { .. })
+        && match &s.effect {
+            Effect::Allow { privileges } | Effect::Deny { privileges } => {
+                !privileges.is_empty() && privileges.iter().all(|p| *p == Privilege::Browse)
+            }
+            _ => false,
+        }
+}
+
 /// Render one family's lowering for the profile `l` loaded: each statement
 /// into the desired set, under the service its body names (one the profile may
 /// write into, `l.writable`), and each lowering into `skips`, in order. An
@@ -78,6 +92,9 @@ pub(crate) fn emit(
     let engine = l.ep.kind.engine;
     let profile = l.profile_name.as_str();
     for s in &lowered.statements {
+        if is_browse_only(s) {
+            continue; // lowered: no Ranger access type to emit
+        }
         let (key, policy) = match &s.source {
             Source::Grant { .. } => {
                 let r = grants::render(s, profile, engine)?;
@@ -159,4 +176,76 @@ pub(crate) fn emit(
         skips.push(item);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod browse_lowering_tests {
+    use super::*;
+    use egret_perm::{
+        Action, Effect, EngineType, Grant, GrantOrigin, Principal, PrincipalKind, PrincipalSet,
+        Scope,
+    };
+    use egret_perm_ir::audience::Directory;
+    use egret_perm_ir::ep::{EpInput, EpKind, Mechanism};
+
+    #[test]
+    fn implied_browse_is_lowered_and_the_read_policy_is_unchanged() {
+        let c = Uuid::from_u128(9);
+        let ep = EpInput {
+            profile_id: 1,
+            profile_name: "p".into(),
+            kind: EpKind {
+                engine: EngineType::Trino,
+                mechanism: Mechanism::Ranger,
+            },
+            engines: vec![],
+            default_version: Err("unread".into()),
+            default_image_level: None,
+            classification_channel: false,
+            catalogs: [(c, "sales".to_string())].into_iter().collect(),
+        };
+        let g = Grant {
+            id: Uuid::from_u128(1),
+            effect: Effect::Allow,
+            actions: vec![Action::Read],
+            scope: Scope {
+                catalog_id: c,
+                schema: Some("s".into()),
+                table: Some("t".into()),
+                column: None,
+            },
+            principals: PrincipalSet {
+                include: vec![Principal {
+                    kind: PrincipalKind::User,
+                    r#ref: "a".into(),
+                }],
+                exclude: vec![],
+            },
+            origin: GrantOrigin::Explicit,
+        };
+        let lowered = egret_perm_ir::lower::grants::lower_grants(
+            &ep,
+            std::slice::from_ref(&g),
+            &Directory::default(),
+        )
+        .unwrap();
+        assert!(lowered.statements.len() > 1, "browse was implied");
+        let kept: Vec<_> = lowered
+            .statements
+            .iter()
+            .filter(|s| !is_browse_only(s))
+            .collect();
+        assert_eq!(kept.len(), 1, "every implied browse is lowered away");
+        let body = grants::render(kept[0], "trino-1", EngineType::Trino).unwrap();
+        let direct =
+            crate::ranger::grants::compile_grant(&g, "sales", "trino-1", EngineType::Trino)
+                .unwrap();
+        assert_eq!(body.name, direct.name);
+        // Every statement, implied browse included, renders without error or is skipped.
+        for s in &lowered.statements {
+            if !is_browse_only(s) {
+                grants::render(s, "trino-1", EngineType::Trino).unwrap();
+            }
+        }
+    }
 }

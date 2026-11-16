@@ -433,7 +433,11 @@ pub fn lower_grants(ep: &EpInput, grants: &[Grant], dir: &Directory) -> LowerRes
             continue;
         }
         match statement_for_audience(g, a, catalog_name, g.scope.catalog_id) {
-            Ok(s) => out.statements.push(s),
+            Ok(s) => {
+                let implied = implied_browse(&s);
+                out.statements.push(s);
+                out.statements.extend(implied);
+            }
             Err(CompileError::UnexpandedPrincipalKind { kind }) => {
                 let reason = format!(
                     "principal kind {kind:?} reached the compiler unexpanded — a bug in \
@@ -455,6 +459,70 @@ pub fn lower_grants(ep: &EpInput, grants: &[Grant], dir: &Directory) -> LowerRes
         }
     }
     Ok(out)
+}
+
+/// BROWSE implication (concepts spec D4): an ALLOW of `read`, `write`,
+/// `create` or `manage` also lets the audience see what it can use, so each
+/// such statement implies an allow of `browse` on its object and on every
+/// ancestor (catalog, schema, table; the object itself last). One statement
+/// per level, all carrying the grant's source and audience, in
+/// catalog-to-object order. A deny implies nothing: denying `read` does not
+/// hide the object, and a deny of `browse` is its own statement. A target
+/// that cannot express `browse` lowers these statements away
+/// (`egret-perm-compile`'s Ranger `emit`).
+///
+/// The new actions need no inheritance code of their own: a statement on a
+/// path covers everything beneath it for every privilege, as `read`/`write`
+/// always have.
+pub fn implied_browse(s: &Statement) -> Vec<Statement> {
+    let Effect::Allow { privileges } = &s.effect else {
+        return Vec::new();
+    };
+    let implies = privileges.iter().any(|p| {
+        matches!(
+            p,
+            Privilege::Read | Privilege::Write | Privilege::Create | Privilege::Manage
+        )
+    });
+    let Target::Path(path) = &s.target else {
+        return Vec::new();
+    };
+    if !implies {
+        return Vec::new();
+    }
+    let levels = [&path.schema, &path.table, &path.column];
+    // How many levels beneath the catalog the object names, stopping at the
+    // first unnamed one.
+    let depth = levels
+        .iter()
+        .take_while(|l| matches!(l, Level::Named(_)))
+        .count();
+    (0..=depth)
+        .map(|n| {
+            let at = |i: usize| {
+                if i < n {
+                    levels[i].clone()
+                } else {
+                    Level::Unnamed
+                }
+            };
+            Statement {
+                source: s.source.clone(),
+                audience: s.audience.clone(),
+                target: Target::Path(Path {
+                    catalog_id: path.catalog_id,
+                    catalog: path.catalog.clone(),
+                    schema: at(0),
+                    table: at(1),
+                    column: at(2),
+                }),
+                effect: Effect::Allow {
+                    privileges: vec![Privilege::Browse],
+                },
+                derivation: Derivation::AsDeclared,
+            }
+        })
+        .collect()
 }
 
 /// The statement one grant lowers to, on catalog `catalog` (the
@@ -717,5 +785,159 @@ mod tests {
             "the rule must still refuse `('*','orders')`, or everything above is \
              measuring an inert function"
         );
+    }
+
+    fn grant_on(
+        catalog: Uuid,
+        scope: (Option<&str>, Option<&str>),
+        actions: Vec<Action>,
+        effect: Effect,
+    ) -> Grant {
+        let mut g = grant(catalog, vec![user("a")], vec![], effect);
+        g.actions = actions;
+        g.scope.schema = scope.0.map(Into::into);
+        g.scope.table = scope.1.map(Into::into);
+        g
+    }
+
+    fn path_of(s: &Statement) -> (&Level, &Level, &Level) {
+        let Target::Path(p) = &s.target else {
+            panic!("not a path")
+        };
+        (&p.schema, &p.table, &p.column)
+    }
+
+    #[test]
+    fn a_usage_grant_implies_browse_on_the_object_and_every_ancestor() {
+        let c = Uuid::from_u128(9);
+        for action in [Action::Read, Action::Write, Action::Create, Action::Manage] {
+            let out = lower_grants(
+                &ep(c),
+                &[grant_on(
+                    c,
+                    (Some("sch"), Some("tbl")),
+                    vec![action],
+                    Effect::Allow,
+                )],
+                &Directory::default(),
+            )
+            .unwrap();
+            // The declared statement first, then browse on cat, cat.sch, cat.sch.tbl.
+            assert_eq!(out.statements.len(), 4, "{action:?}");
+            let named = |v: &str| Level::Named(v.into());
+            let want = [
+                (Level::Unnamed, Level::Unnamed),
+                (named("sch"), Level::Unnamed),
+                (named("sch"), named("tbl")),
+            ];
+            for (s, (schema, table)) in out.statements[1..].iter().zip(want) {
+                assert_eq!(
+                    s.effect,
+                    crate::statement::Effect::Allow {
+                        privileges: vec![Privilege::Browse]
+                    }
+                );
+                assert_eq!(path_of(s), (&schema, &table, &Level::Unnamed));
+                assert_eq!(s.source, out.statements[0].source);
+            }
+        }
+    }
+
+    #[test]
+    fn a_catalog_wide_usage_grant_implies_browse_on_the_catalog_only() {
+        let c = Uuid::from_u128(9);
+        let out = lower_grants(
+            &ep(c),
+            &[grant_on(
+                c,
+                (None, None),
+                vec![Action::Create],
+                Effect::Allow,
+            )],
+            &Directory::default(),
+        )
+        .unwrap();
+        assert_eq!(out.statements.len(), 2);
+    }
+
+    #[test]
+    fn a_create_grant_on_a_schema_covers_its_tables_like_read_does() {
+        // Inheritance is structural: one statement on the schema path, for any
+        // privilege; the new actions add no per-action tree code.
+        let c = Uuid::from_u128(9);
+        let out = lower_grants(
+            &ep(c),
+            &[grant_on(
+                c,
+                (Some("sch"), None),
+                vec![Action::Create],
+                Effect::Allow,
+            )],
+            &Directory::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            out.statements[0].effect,
+            crate::statement::Effect::Allow {
+                privileges: vec![Privilege::Create]
+            }
+        );
+        assert_eq!(
+            path_of(&out.statements[0]),
+            (
+                &Level::Named("sch".into()),
+                &Level::Unnamed,
+                &Level::Unnamed
+            )
+        );
+    }
+
+    #[test]
+    fn a_deny_and_a_browse_only_allow_imply_nothing() {
+        let c = Uuid::from_u128(9);
+        for (actions, effect) in [
+            (vec![Action::Read], Effect::Deny),
+            (vec![Action::Browse], Effect::Allow),
+            (vec![Action::Browse], Effect::Deny),
+        ] {
+            let out = lower_grants(
+                &ep(c),
+                &[grant_on(c, (Some("sch"), Some("tbl")), actions, effect)],
+                &Directory::default(),
+            )
+            .unwrap();
+            assert_eq!(out.statements.len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_browse_deny_on_an_ancestor_stays_its_own_deny_statement() {
+        // Deny-wins is the evaluator's rule (no priority, no exclude): the
+        // lowering only has to keep the deny a Deny{Browse} on the ancestor,
+        // beside the implied allow below.
+        let c = Uuid::from_u128(9);
+        let out = lower_grants(
+            &ep(c),
+            &[
+                grant_on(c, (Some("sch"), None), vec![Action::Browse], Effect::Deny),
+                grant_on(
+                    c,
+                    (Some("sch"), Some("tbl")),
+                    vec![Action::Read],
+                    Effect::Allow,
+                ),
+            ],
+            &Directory::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            out.statements[0].effect,
+            crate::statement::Effect::Deny {
+                privileges: vec![Privilege::Browse]
+            }
+        );
+        assert!(out.statements[1..]
+            .iter()
+            .all(|s| matches!(s.effect, crate::statement::Effect::Allow { .. })));
     }
 }

@@ -1018,3 +1018,14 @@ fn a_compiled_body_is_unchanged() {
 }
 
 type AccessPolicyInputProbe = egret_policy::admin::AccessPolicyInput;
+
+#[test]
+fn sp5a_a_browse_privilege_is_lowered_on_ranger_not_refused() {
+    // A direct browse alongside read compiles; only `select` is emitted.
+    for engine in [EngineType::Trino, EngineType::StarRocks] {
+        let mut g = grant_allow_read(&["finance"], &[]);
+        g.actions = vec![Action::Browse, Action::Read];
+        let out = compile_grant(&g, "warehouse", "svc", engine).unwrap();
+        assert_eq!(out.items[0].accesses, vec!["select"]);
+    }
+}

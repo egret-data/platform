@@ -103,7 +103,10 @@ pub(crate) fn read_write_accesses(
         let action = match p {
             Privilege::Read => Action::Read,
             Privilege::Write => Action::Write,
-            Privilege::Browse => Action::Browse,
+            // Lowered, not refused: Ranger has no distinct browse access (the
+            // engines already list what a user holds some grant on), so a
+            // direct or implied browse names no access type.
+            Privilege::Browse => continue,
             Privilege::Create => Action::Create,
             Privilege::Manage => Action::Manage,
             Privilege::CreateMaterializedView => {
