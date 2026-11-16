@@ -441,3 +441,4 @@ jobs:
       - run: npm run test:bundle:governance-data
       # The same for the Governance People area (the People & groups index and principal pages).
       - run: npm run test:bundle:governance-people
+      - run: npm run test:bundle:governance-service-accounts
