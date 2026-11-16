@@ -141,7 +141,7 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onSelect={() => setDeleting(true)}>
                   <Trash2 aria-hidden className="mr-2 size-4" />
-                  Delete logs…
+                  Delete logs
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

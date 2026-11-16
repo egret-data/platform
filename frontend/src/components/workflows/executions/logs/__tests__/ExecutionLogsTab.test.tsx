@@ -195,7 +195,7 @@ describe("ExecutionLogsTab: download and delete (package 7d D7, D8)", () => {
     renderAt("logs?level=WARN&task=extract");
     await screen.findByText("extract #1 fails");
     await userEvent.click(screen.getByRole("button", { name: "More log actions" }));
-    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete logs…" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete logs" }));
     const dialog = await screen.findByRole("alertdialog", { name: "Delete these logs?" });
     expect(dialog).toHaveTextContent("every log line of this execution");
     expect(dialog).toHaveTextContent("at WARN and above");
