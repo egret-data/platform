@@ -30,6 +30,7 @@ import type {
   CreateBackfillRequest,
   CreateFlowRequest,
   DeleteBackfillsRequest,
+  DetailedErrorBody,
   ErrorBody,
   ExecutionDto,
   ExecutionGraph,
@@ -47,6 +48,7 @@ import type {
   KvInheritedDto,
   KvKeysBody,
   KvRevisionDto,
+  LabelDto,
   LogPageDto,
   NamespaceDependenciesDto,
   NsFileRevisionDto,
@@ -67,8 +69,11 @@ import type {
   ValidateInputsDto,
   ValidationReportDto,
   WorkflowCreateNamespaceDirectoryParams,
+  WorkflowDeleteExecutionLogsParams,
+  WorkflowDeleteExecutionParams,
   WorkflowDeleteNamespaceFileParams,
   WorkflowDownloadExecutionFileParams,
+  WorkflowDownloadExecutionLogsParams,
   WorkflowDownloadNamespaceFileParams,
   WorkflowExecutionFileMetasParams,
   WorkflowGetExecutionGraphParams,
@@ -406,7 +411,137 @@ export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workfl
 
 
 
-export type workflowDownloadExecutionFileResponse200 = {
+export type workflowDeleteExecutionResponse204 = {
+  data: void
+  status: 204
+}
+
+export type workflowDeleteExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDeleteExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowDeleteExecutionResponse409 = {
+  data: DetailedErrorBody
+  status: 409
+}
+
+export type workflowDeleteExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDeleteExecutionResponseSuccess = (workflowDeleteExecutionResponse204) & {
+  headers: Headers;
+};
+export type workflowDeleteExecutionResponseError = (workflowDeleteExecutionResponse400 | workflowDeleteExecutionResponse401 | workflowDeleteExecutionResponse403 | workflowDeleteExecutionResponse404 | workflowDeleteExecutionResponse409 | workflowDeleteExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowDeleteExecutionResponse = (workflowDeleteExecutionResponseSuccess | workflowDeleteExecutionResponseError)
+
+export const getWorkflowDeleteExecutionUrl = (workspace: string,
+    id: string,
+    params?: WorkflowDeleteExecutionParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}`
+}
+
+/**
+ * Every check is the worker's, under the execution's lock
+ * ([`worker::delete_execution`](crate::worker::delete_execution), plan S5):
+ * the route reads nothing but the permission and the query.
+ * @summary Delete an ended execution and its family (package 7d D1-D4, D9; Kestra
+`ExecutionController.delete`).
+ */
+export const workflowDeleteExecution = async (workspace: string,
+    id: string,
+    params?: WorkflowDeleteExecutionParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteExecutionResponse> => {
+
+  return customInstance<workflowDeleteExecutionResponse>(getWorkflowDeleteExecutionUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteExecutionMutationOptions = <TError = ErrorBody | DetailedErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecution>>, TError,{workspace: string;id: string;params?: WorkflowDeleteExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecution>>, TError,{workspace: string;id: string;params?: WorkflowDeleteExecutionParams}, TContext> => {
+
+const mutationKey = ['workflowDeleteExecution'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteExecution>>, {workspace: string;id: string;params?: WorkflowDeleteExecutionParams}> = (props) => {
+          const {workspace,id,params} = props ?? {};
+
+          return  workflowDeleteExecution(workspace,id,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteExecution>>>
+
+    export type WorkflowDeleteExecutionMutationError = ErrorBody | DetailedErrorBody
+
+    /**
+ * @summary Delete an ended execution and its family (package 7d D1-D4, D9; Kestra
+`ExecutionController.delete`).
+ */
+export const useWorkflowDeleteExecution = <TError = ErrorBody | DetailedErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecution>>, TError,{workspace: string;id: string;params?: WorkflowDeleteExecutionParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteExecution>>,
+        TError,
+        {workspace: string;id: string;params?: WorkflowDeleteExecutionParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowDownloadExecutionFileResponse200 = {
   data: Blob
   status: 200
 }
@@ -1168,6 +1303,125 @@ export const useWorkflowKillExecution = <TError = ErrorBody,
       > => {
       return useMutation(getWorkflowKillExecutionMutationOptions(options), queryClient);
     }
+    export type workflowSetExecutionLabelsResponse200 = {
+  data: ExecutionDto
+  status: 200
+}
+
+export type workflowSetExecutionLabelsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowSetExecutionLabelsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowSetExecutionLabelsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowSetExecutionLabelsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowSetExecutionLabelsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowSetExecutionLabelsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowSetExecutionLabelsResponseSuccess = (workflowSetExecutionLabelsResponse200) & {
+  headers: Headers;
+};
+export type workflowSetExecutionLabelsResponseError = (workflowSetExecutionLabelsResponse400 | workflowSetExecutionLabelsResponse401 | workflowSetExecutionLabelsResponse403 | workflowSetExecutionLabelsResponse404 | workflowSetExecutionLabelsResponse409 | workflowSetExecutionLabelsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowSetExecutionLabelsResponse = (workflowSetExecutionLabelsResponseSuccess | workflowSetExecutionLabelsResponseError)
+
+export const getWorkflowSetExecutionLabelsUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/labels`
+}
+
+/**
+ * @summary Replace an ended execution's labels (package 7d D5; Kestra
+`ExecutionController.setLabelsOnTerminatedExecution`).
+ */
+export const workflowSetExecutionLabels = async (workspace: string,
+    id: string,
+    labelDto: LabelDto[], options?: Parameters<typeof customInstance>[1]): Promise<workflowSetExecutionLabelsResponse> => {
+
+  return customInstance<workflowSetExecutionLabelsResponse>(getWorkflowSetExecutionLabelsUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(labelDto)
+  }
+);}
+
+
+
+
+
+export const getWorkflowSetExecutionLabelsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetExecutionLabels>>, TError,{workspace: string;id: string;data: LabelDto[]}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowSetExecutionLabels>>, TError,{workspace: string;id: string;data: LabelDto[]}, TContext> => {
+
+const mutationKey = ['workflowSetExecutionLabels'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowSetExecutionLabels>>, {workspace: string;id: string;data: LabelDto[]}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  workflowSetExecutionLabels(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowSetExecutionLabelsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowSetExecutionLabels>>>
+    export type WorkflowSetExecutionLabelsMutationBody = LabelDto[]
+    export type WorkflowSetExecutionLabelsMutationError = ErrorBody
+
+    /**
+ * @summary Replace an ended execution's labels (package 7d D5; Kestra
+`ExecutionController.setLabelsOnTerminatedExecution`).
+ */
+export const useWorkflowSetExecutionLabels = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowSetExecutionLabels>>, TError,{workspace: string;id: string;data: LabelDto[]}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowSetExecutionLabels>>,
+        TError,
+        {workspace: string;id: string;data: LabelDto[]},
+        TContext
+      > => {
+      return useMutation(getWorkflowSetExecutionLabelsMutationOptions(options), queryClient);
+    }
     export type workflowGetExecutionLogsResponse200 = {
   data: LogPageDto
   status: 200
@@ -1348,6 +1602,292 @@ export function useWorkflowGetExecutionLogs<TData = Awaited<ReturnType<typeof wo
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getWorkflowGetExecutionLogsQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowDeleteExecutionLogsResponse204 = {
+  data: void
+  status: 204
+}
+
+export type workflowDeleteExecutionLogsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDeleteExecutionLogsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteExecutionLogsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteExecutionLogsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowDeleteExecutionLogsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDeleteExecutionLogsResponseSuccess = (workflowDeleteExecutionLogsResponse204) & {
+  headers: Headers;
+};
+export type workflowDeleteExecutionLogsResponseError = (workflowDeleteExecutionLogsResponse400 | workflowDeleteExecutionLogsResponse401 | workflowDeleteExecutionLogsResponse403 | workflowDeleteExecutionLogsResponse404 | workflowDeleteExecutionLogsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowDeleteExecutionLogsResponse = (workflowDeleteExecutionLogsResponseSuccess | workflowDeleteExecutionLogsResponseError)
+
+export const getWorkflowDeleteExecutionLogsUrl = (workspace: string,
+    id: string,
+    params?: WorkflowDeleteExecutionLogsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs`
+}
+
+/**
+ * @summary Delete an execution's log lines by filter (package 7d D8, Q6; Kestra
+`LogController.deleteFromExecution`).
+ */
+export const workflowDeleteExecutionLogs = async (workspace: string,
+    id: string,
+    params?: WorkflowDeleteExecutionLogsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteExecutionLogsResponse> => {
+
+  return customInstance<workflowDeleteExecutionLogsResponse>(getWorkflowDeleteExecutionLogsUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteExecutionLogsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionLogs>>, TError,{workspace: string;id: string;params?: WorkflowDeleteExecutionLogsParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionLogs>>, TError,{workspace: string;id: string;params?: WorkflowDeleteExecutionLogsParams}, TContext> => {
+
+const mutationKey = ['workflowDeleteExecutionLogs'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteExecutionLogs>>, {workspace: string;id: string;params?: WorkflowDeleteExecutionLogsParams}> = (props) => {
+          const {workspace,id,params} = props ?? {};
+
+          return  workflowDeleteExecutionLogs(workspace,id,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteExecutionLogsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteExecutionLogs>>>
+
+    export type WorkflowDeleteExecutionLogsMutationError = ErrorBody
+
+    /**
+ * @summary Delete an execution's log lines by filter (package 7d D8, Q6; Kestra
+`LogController.deleteFromExecution`).
+ */
+export const useWorkflowDeleteExecutionLogs = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionLogs>>, TError,{workspace: string;id: string;params?: WorkflowDeleteExecutionLogsParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteExecutionLogs>>,
+        TError,
+        {workspace: string;id: string;params?: WorkflowDeleteExecutionLogsParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteExecutionLogsMutationOptions(options), queryClient);
+    }
+    export type workflowDownloadExecutionLogsResponse200 = {
+  data: string
+  status: 200
+}
+
+export type workflowDownloadExecutionLogsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowDownloadExecutionLogsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDownloadExecutionLogsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDownloadExecutionLogsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowDownloadExecutionLogsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDownloadExecutionLogsResponseSuccess = (workflowDownloadExecutionLogsResponse200) & {
+  headers: Headers;
+};
+export type workflowDownloadExecutionLogsResponseError = (workflowDownloadExecutionLogsResponse400 | workflowDownloadExecutionLogsResponse401 | workflowDownloadExecutionLogsResponse403 | workflowDownloadExecutionLogsResponse404 | workflowDownloadExecutionLogsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowDownloadExecutionLogsResponse = (workflowDownloadExecutionLogsResponseSuccess | workflowDownloadExecutionLogsResponseError)
+
+export const getWorkflowDownloadExecutionLogsUrl = (workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionLogsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs/download?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs/download`
+}
+
+/**
+ * @summary An execution's log as one text file (package 7d D7; Kestra
+`LogController.download`). Authorisation is exactly `GET …/logs`'.
+ */
+export const workflowDownloadExecutionLogs = async (workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionLogsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDownloadExecutionLogsResponse> => {
+
+  return customInstance<workflowDownloadExecutionLogsResponse>(getWorkflowDownloadExecutionLogsUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDownloadExecutionLogsQueryKey = (workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionLogsParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs/download`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowDownloadExecutionLogsQueryOptions = <TData = Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError = ErrorBody>(workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowDownloadExecutionLogsQueryKey(workspace,id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>> = ({ signal }) => workflowDownloadExecutionLogs(workspace,id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowDownloadExecutionLogsQueryResult = NonNullable<Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>>
+export type WorkflowDownloadExecutionLogsQueryError = ErrorBody
+
+
+export function useWorkflowDownloadExecutionLogs<TData = Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params: undefined |  WorkflowDownloadExecutionLogsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>,
+          TError,
+          Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowDownloadExecutionLogs<TData = Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>,
+          TError,
+          Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowDownloadExecutionLogs<TData = Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary An execution's log as one text file (package 7d D7; Kestra
+`LogController.download`). Authorisation is exactly `GET …/logs`'.
+ */
+
+export function useWorkflowDownloadExecutionLogs<TData = Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string,
+    params?: WorkflowDownloadExecutionLogsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowDownloadExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowDownloadExecutionLogsQueryOptions(workspace,id,params,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 
