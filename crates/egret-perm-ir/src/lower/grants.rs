@@ -461,15 +461,30 @@ pub fn lower_grants(ep: &EpInput, grants: &[Grant], dir: &Directory) -> LowerRes
     Ok(out)
 }
 
+/// A grant statement whose every privilege is `browse` (direct or implied).
+/// Neither current target enforces browse, so each drops these: rendering one
+/// would be an access-less Ranger policy, and in the OPA evaluator a
+/// `Level::Unnamed` browse allow would count as reaching every sibling object.
+pub fn is_browse_only(s: &Statement) -> bool {
+    matches!(s.source, Source::Grant { .. })
+        && match &s.effect {
+            Effect::Allow { privileges } | Effect::Deny { privileges } => {
+                !privileges.is_empty() && privileges.iter().all(|p| *p == Privilege::Browse)
+            }
+            _ => false,
+        }
+}
+
 /// BROWSE implication (concepts spec D4): an ALLOW of `read`, `write`,
 /// `create` or `manage` also lets the audience see what it can use, so each
 /// such statement implies an allow of `browse` on its object and on every
 /// ancestor (catalog, schema, table; the object itself last). One statement
 /// per level, all carrying the grant's source and audience, in
 /// catalog-to-object order. A deny implies nothing: denying `read` does not
-/// hide the object, and a deny of `browse` is its own statement. A target
-/// that cannot express `browse` lowers these statements away
-/// (`egret-perm-compile`'s Ranger `emit`).
+/// hide the object, and a deny of `browse` is its own statement. No SP5a
+/// target enforces `browse`: both current targets (Ranger `emit`, the OPA
+/// snapshot build) drop browse-only statements via [`is_browse_only`], and the
+/// IR keeps them for targets that will.
 ///
 /// The new actions need no inheritance code of their own: a statement on a
 /// path covers everything beneath it for every privilege, as `read`/`write`

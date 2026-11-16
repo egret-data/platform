@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use egret_perm::CompileError;
-use egret_perm_ir::statement::{Lowered, Lowering, Source, Statement};
+use egret_perm_ir::statement::{Lowered, Lowering, Source};
 use egret_policy::admin::access_to_ranger_json;
 use serde_json::Value;
 use uuid::Uuid;
@@ -64,20 +64,6 @@ pub(crate) fn skipped(l: &Lowering) -> SkippedItem {
     }
 }
 
-/// A grant statement whose every privilege is `browse` (direct or implied by
-/// `egret_perm_ir::lower::grants::implied_browse`): Ranger has nothing to emit
-/// for it, so it is lowered away instead of rendered as an access-less policy.
-fn is_browse_only(s: &Statement) -> bool {
-    use egret_perm_ir::statement::{Effect, Privilege};
-    matches!(s.source, Source::Grant { .. })
-        && match &s.effect {
-            Effect::Allow { privileges } | Effect::Deny { privileges } => {
-                !privileges.is_empty() && privileges.iter().all(|p| *p == Privilege::Browse)
-            }
-            _ => false,
-        }
-}
-
 /// Render one family's lowering for the profile `l` loaded: each statement
 /// into the desired set, under the service its body names (one the profile may
 /// write into, `l.writable`), and each lowering into `skips`, in order. An
@@ -92,8 +78,8 @@ pub(crate) fn emit(
     let engine = l.ep.kind.engine;
     let profile = l.profile_name.as_str();
     for s in &lowered.statements {
-        if is_browse_only(s) {
-            continue; // lowered: no Ranger access type to emit
+        if egret_perm_ir::lower::grants::is_browse_only(s) {
+            continue; // lowered: no Ranger access type to emit (a direct browse DENY is dropped too: nothing enforces browse yet)
         }
         let (key, policy) = match &s.source {
             Source::Grant { .. } => {
@@ -229,13 +215,22 @@ mod browse_lowering_tests {
             &Directory::default(),
         )
         .unwrap();
-        assert!(lowered.statements.len() > 1, "browse was implied");
+        assert_eq!(
+            lowered.statements.len(),
+            4,
+            "the Read plus browse on catalog, schema and table"
+        );
         let kept: Vec<_> = lowered
             .statements
             .iter()
-            .filter(|s| !is_browse_only(s))
+            .filter(|s| !egret_perm_ir::lower::grants::is_browse_only(s))
             .collect();
         assert_eq!(kept.len(), 1, "every implied browse is lowered away");
+        assert!(matches!(
+            &kept[0].effect,
+            egret_perm_ir::statement::Effect::Allow { privileges }
+                if privileges == &[egret_perm_ir::statement::Privilege::Read]
+        ));
         let body = grants::render(kept[0], "trino-1", EngineType::Trino).unwrap();
         let direct =
             crate::ranger::grants::compile_grant(&g, "sales", "trino-1", EngineType::Trino)
@@ -243,7 +238,7 @@ mod browse_lowering_tests {
         assert_eq!(body.name, direct.name);
         // Every statement, implied browse included, renders without error or is skipped.
         for s in &lowered.statements {
-            if !is_browse_only(s) {
+            if !egret_perm_ir::lower::grants::is_browse_only(s) {
                 grants::render(s, "trino-1", EngineType::Trino).unwrap();
             }
         }

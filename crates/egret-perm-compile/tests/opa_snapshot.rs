@@ -518,3 +518,75 @@ async fn the_snapshot_names_the_lineage_principal() {
     assert!(is_explicit_deny(&d), "{d:?}");
     tx.rollback().await.expect("rollback");
 }
+
+#[tokio::test]
+async fn a_read_grant_on_one_table_does_not_reach_its_siblings_through_an_implied_browse() {
+    // Arrange: ann holds Read on `s.t` only. The lowering also implies browse
+    // on the catalog, `s` and `s.t`; none of that may reach `s.other` or
+    // another schema, which the `_any` check behind SHOW / filtering asks.
+    let db = db().await;
+    let mut names = Names::default();
+    let mut tx = db.pool.begin().await.expect("tx");
+    let (profile, _tags, _) = fixtures::profile(&db, "opa_br", "trino", true, &mut names).await;
+    let wh = warehouse(&mut tx, "opa_br", &mut names).await;
+    let engine = engine_bound_spec(
+        &mut tx,
+        "opa_br.engine",
+        profile,
+        "trino",
+        json!({"trinoConfig": {"delegationMode": "open"}}),
+        &mut names,
+    )
+    .await;
+    let cat = catalog(&mut tx, "opa_br.lake", wh, &[engine], &mut names).await;
+    let lake = catalog_name(&mut tx, cat).await;
+    let ann = "opa_br_ann".to_string();
+    user(&mut tx, "opa_br.ann", Some(&ann), &mut names).await;
+    grant(
+        &mut tx,
+        "opa_br.read",
+        Effect::Allow,
+        &[Action::Read],
+        scope(cat, Some("s"), Some("t"), None),
+        set(&[user_ref(&ann)], &[]),
+        &mut names,
+    )
+    .await;
+
+    // Act
+    let snap = build(&mut tx, profile).await;
+
+    // Assert: the grantee still reaches the table and its ancestors ...
+    let tbl = |t: &str| Resource::Table {
+        catalog: lake.clone(),
+        schema: "s".into(),
+        table: t.into(),
+        columns: vec![],
+    };
+    let schema = |s: &str| Resource::Schema {
+        catalog: lake.clone(),
+        schema: s.into(),
+    };
+    for (what, r) in [
+        ("the granted table", tbl("t")),
+        ("its schema", schema("s")),
+        ("its catalog", Resource::Catalog(lake.clone())),
+    ] {
+        let op = match &r {
+            Resource::Table { .. } => "FilterTables",
+            Resource::Schema { .. } => "FilterSchemas",
+            _ => "FilterCatalogs",
+        };
+        let d = snap.decide(&ann, op, &r);
+        assert!(is_allow(&d), "{what} is reachable: {d:?}");
+    }
+    // ... and nothing beside it.
+    for (what, op, r) in [
+        ("a sibling table", "FilterTables", tbl("other")),
+        ("a sibling schema", "FilterSchemas", schema("other_s")),
+    ] {
+        let d = snap.decide(&ann, op, &r);
+        assert!(!is_allow(&d), "{what} must stay unreachable: {d:?}");
+    }
+    tx.rollback().await.expect("rollback");
+}

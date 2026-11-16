@@ -129,6 +129,10 @@ pub async fn snapshot_parts_via(
         .families
         .into_iter()
         .flat_map(|f| f.statements)
+        // No SP5a target enforces browse. An implied browse allow on a
+        // catalog/schema (levels `Unnamed`) would count as reaching every
+        // sibling object in the evaluator, so it never enters the snapshot.
+        .filter(|s| !egret_perm_ir::lower::grants::is_browse_only(s))
         .collect();
     let Some(infra) = lower_infra_via(conn, service_id, missing).await? else {
         return Ok(None);
