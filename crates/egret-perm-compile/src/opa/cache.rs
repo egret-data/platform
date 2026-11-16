@@ -645,6 +645,7 @@ pub(crate) fn compile_error_class(e: &CompileError) -> &'static str {
         CompileError::InvalidEngineGrant { .. } => "InvalidEngineGrant",
         CompileError::ProfileSetChanged { .. } => "ProfileSetChanged",
         CompileError::HolderGroupNameCollision { .. } => "HolderGroupNameCollision",
+        CompileError::Refused(_) => "Refused",
     }
 }
 
