@@ -575,6 +575,11 @@ pub enum CompileError {
     /// the parse error itself.
     #[error("database error: {0}")]
     Db(String),
+    /// A write refused by an invariant of the request itself (SA4: a service
+    /// account can never hold `platform_admin`). The caller's 400: editing the
+    /// request is the fix, and nothing was written.
+    #[error("{0}")]
+    Refused(String),
     /// A database error whose SQLSTATE is 55P03 (`lock_not_available`): a
     /// lock wait ran past the transaction's `lock_timeout`. Callers answer it
     /// as "busy, retry", not as a refusal of the write. Built only by

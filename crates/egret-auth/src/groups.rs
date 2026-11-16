@@ -1194,6 +1194,45 @@ impl GroupRepo {
                 _ => break name,
             }
         };
+        // SA4: a service account can never hold `platform_admin`, and joining a
+        // group that holds it would hand it over through membership. ADD only —
+        // a remove stays permissive.
+        if add {
+            let is_service: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND provider = 'service')",
+            )
+            .bind(user_id.0)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?;
+            if is_service {
+                // Cross-chokepoint TOCTOU: the role chokepoint
+                // (`with_recompile_in_tx`) reads this group's members while this
+                // reads its platform_admin grant; without a shared lock both can
+                // pass and commit. Both take the group's row lock before their
+                // check, so a concurrent grant to this group blocks here.
+                sqlx::query("SELECT 1 FROM groups WHERE id = $1 FOR UPDATE")
+                    .bind(group_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+                let holds_admin: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM access_grants ag JOIN roles r ON r.id = ag.role_id \
+                     WHERE ag.principal_type = 'group' AND ag.principal_id = $1 \
+                     AND ag.scope_type = 'platform' AND r.name = 'platform_admin')",
+                )
+                .bind(group_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db_err)?;
+                if holds_admin {
+                    return Err(egret_core::Error::Conflict(
+                        "this group holds platform_admin; a service account cannot join it"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         // KI-284: a REMOVE can take the last active platform admin's
         // `platform_admin` away when they hold it through this group. The
         // guard's lock sits after the user and group locks and before the

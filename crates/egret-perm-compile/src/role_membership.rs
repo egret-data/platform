@@ -216,6 +216,9 @@ async fn with_recompile_in_tx(
     // taken before it too; a role that does not exist skips both, because the
     // write itself already answers that case (the INSERT's FK refuses it, the
     // DELETE is a no-op) and a full compile for a nameless role changes nothing.
+    if matches!(op, Op::Assign) && name.as_deref() == Some("platform_admin") {
+        refuse_service_account_admin(tx, ptype, pid).await?;
+    }
     if let Some(name) = name.as_deref() {
         let services = affected_services_for_role_membership(tx, name).await?;
         lock_services_in_tx(tx, &services).await?;
@@ -242,6 +245,48 @@ async fn with_recompile_in_tx(
         }
     } else {
         apply(tx, op, ptype, pid, role_id).await?;
+    }
+    Ok(())
+}
+
+/// SA4: a service account can never hold `platform_admin`, directly or through
+/// a group. Checked on the grant only — a revoke must stay permissive so a
+/// mistaken grant can always be removed.
+async fn refuse_service_account_admin(
+    conn: &mut sqlx::PgConnection,
+    ptype: &str,
+    pid: Uuid,
+) -> Result<(), CompileError> {
+    if ptype == "group" {
+        // Cross-chokepoint TOCTOU: `GroupRepo::change_member` (add) reads this
+        // group's platform_admin grant while this path reads its service
+        // members; without a shared lock both can pass and commit. Both take
+        // the group's row lock before their check, so they serialise on it.
+        sqlx::query("SELECT 1 FROM groups WHERE id = $1 FOR UPDATE")
+            .bind(pid)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(CompileError::from_db)?;
+    }
+    let (sql, msg) = match ptype {
+        "user" => (
+            "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND provider = 'service')",
+            "a service account cannot hold platform_admin",
+        ),
+        "group" => (
+            "SELECT EXISTS (SELECT 1 FROM user_groups ug JOIN users u ON u.id = ug.user_id \
+             WHERE ug.group_id = $1 AND u.provider = 'service')",
+            "this group has a service account as a member; it cannot be granted platform_admin",
+        ),
+        _ => return Ok(()),
+    };
+    let refused: bool = sqlx::query_scalar(sql)
+        .bind(pid)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(CompileError::from_db)?;
+    if refused {
+        return Err(CompileError::Refused(msg.to_string()));
     }
     Ok(())
 }

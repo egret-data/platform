@@ -83,6 +83,10 @@ impl From<CatalogError> for CpError {
 /// the request (it would grow a profile past its ceiling), so it is a coded 409.
 impl From<egret_perm::CompileError> for CpError {
     fn from(e: egret_perm::CompileError) -> Self {
+        // SA4: an invariant refusal (a service account and `platform_admin`).
+        if let egret_perm::CompileError::Refused(msg) = &e {
+            return CpError::BadRequest(msg.clone());
+        }
         // A ceiling refuses the write itself (D2, U3): the caller's 409.
         if let Some(body) = e.expansion_ceiling_body() {
             return CpError::Coded(StatusCode::CONFLICT, body);
