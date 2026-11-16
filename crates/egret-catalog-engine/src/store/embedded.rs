@@ -597,24 +597,28 @@ impl CatalogStore {
             String,
             Option<DateTime<Utc>>,
             Option<DateTime<Utc>>,
+            String,
         );
         let row: Option<Raw> = sqlx::query_as(
             "SELECT c.id, c.client_secret_hash, w.name, r.name, \
-                    u.status, c.revoked_at, c.expires_at \
+                    u.status, c.revoked_at, c.expires_at, ws.status \
              FROM catalog.catalog_clients c \
              JOIN catalog.warehouses w ON w.id = c.warehouse_id \
              JOIN catalog.catalog_roles r ON r.id = c.catalog_role_id \
              JOIN service_accounts sa ON sa.user_id = c.service_account_id \
              JOIN users u ON u.id = sa.user_id \
+             JOIN workspaces ws ON ws.id = c.workspace_id \
              WHERE c.client_id = $1",
         )
         .bind(client_id)
         .fetch_optional(self.pool())
         .await?;
-        let Some((id, hash, warehouse, role, status, revoked_at, expires_at)) = row else {
+        let Some((id, hash, warehouse, role, status, revoked_at, expires_at, ws_status)) = row
+        else {
             return Ok(None);
         };
         if status != "active"
+            || ws_status != "active"
             || revoked_at.is_some()
             || expires_at.is_some_and(|exp| exp <= Utc::now())
         {

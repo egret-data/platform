@@ -89,12 +89,32 @@ fn init_tracing(config: &Config) {
     }
 }
 
+/// Give every catalog client without an owning service account one, so none is
+/// dark after a migrate. Idempotent (scans only `service_account_id IS NULL`) and
+/// NON-FATAL: a failure is logged and retried next boot, never taking the
+/// platform down.
+async fn backfill_catalog_sa_nonfatal(db: &Db) {
+    match egret_bin::backfill_catalog_sa::backfill_catalog_client_sa(&db.pool).await {
+        Ok(r) if r.created > 0 => {
+            tracing::info!(
+                created = r.created,
+                "catalog clients backfilled with service accounts"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "catalog client service-account backfill failed; will retry next boot");
+        }
+    }
+}
+
 async fn migrate(config: Config) -> anyhow::Result<()> {
     let db = Db::connect(&config.database.url, config.database.max_connections)
         .await
         .context("connecting to database")?;
     db.migrate().await.context("running migrations")?;
     tracing::info!("migrations applied");
+    backfill_catalog_sa_nonfatal(&db).await;
     Ok(())
 }
 
@@ -1726,6 +1746,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .await
         .context("connecting to database")?;
     db.migrate().await.context("running migrations on boot")?;
+    backfill_catalog_sa_nonfatal(&db).await;
 
     // Warn (do not fail) if any stored PLATFORM-scope role permission is unknown to the
     // catalog — catches drift between the DB and egret_core::rbac. In debug builds, fail

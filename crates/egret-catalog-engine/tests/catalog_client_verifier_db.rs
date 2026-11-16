@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 struct Seeded {
     store: CatalogStore,
+    ws: Uuid,
     sa: Uuid,
     client_id: String,
     secret: String,
@@ -48,6 +49,7 @@ async fn seed() -> Option<Seeded> {
         .unwrap();
     Some(Seeded {
         store,
+        ws,
         sa,
         client_id: created.client_id,
         secret: created.client_secret,
@@ -140,4 +142,15 @@ async fn unowned_client_is_refused_fail_closed() {
     )
     .await;
     assert_refused(&s, "no owning service account").await;
+}
+
+#[tokio::test]
+async fn client_in_an_archived_workspace_is_refused() {
+    let s = seeded!();
+    sqlx::query("UPDATE workspaces SET status = 'archived' WHERE id = $1")
+        .bind(s.ws)
+        .execute(s.store.pool())
+        .await
+        .unwrap();
+    assert_refused(&s, "workspace archived").await;
 }
