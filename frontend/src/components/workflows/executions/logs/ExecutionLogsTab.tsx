@@ -1,8 +1,13 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
+import { MoreHorizontal, Trash2 } from "lucide-react";
 import type { ExecutionDto, LogLevel } from "@/api/generated/model";
 import { LogLevel as LOG_LEVELS } from "@/api/generated/model";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
+import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DeleteLogsDialog } from "@/components/workflows/executions/logs/DeleteLogsDialog";
 import { LogView } from "@/components/workflows/executions/logs/LogView";
 import { logEndedAt } from "@/components/workflows/executions/logs/useLogFollow";
 import type { LogFilters } from "@/components/workflows/executions/logs/useLogFollow";
@@ -17,6 +22,10 @@ import type { LogFilters } from "@/components/workflows/executions/logs/useLogFo
  * A value the execution does not have (a task or run from another execution's
  * link) is ignored rather than sent, and the run filter is then said to be
  * unknown.
+ *
+ * A user who manages the execution can delete the lines the filters select (package 7d D8),
+ * from the toolbar's More menu. The view then reads again from the start: it is keyed by a
+ * generation the delete bumps.
  */
 const LEVEL_OPTIONS = (Object.values(LOG_LEVELS) as LogLevel[]).map((l) => ({
   value: l,
@@ -47,6 +56,10 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
     [level, task, run?.id],
   );
   const active = Boolean(level || task || run);
+  const [deleting, setDeleting] = useState(false);
+  const [generation, setGeneration] = useState(0);
+  // What the delete takes, in words: the execution's lines, narrowed by each active filter.
+  const scope = `every log line of this execution${level ? ` at ${level} and above` : ""}${task ? ` of task ${task}` : ""}${run ? ` of run #${run.run_ix}` : ""}`;
 
   const set = (key: "level" | "task" | "run", value: string | undefined) =>
     setParams((prev) => {
@@ -104,6 +117,7 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
         </p>
       ) : null}
       <LogView
+        key={generation}
         ws={ws}
         executionId={execution.id}
         filters={filters}
@@ -116,7 +130,38 @@ export default function ExecutionLogsTab({ ws, execution }: { ws: string; execut
         fill
         heightClass="min-h-60"
         label="Execution logs"
+        toolbar={
+          execution.can_manage ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button type="button" variant="ghost" size="sm" aria-label="More log actions">
+                  <MoreHorizontal aria-hidden />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => setDeleting(true)}>
+                  <Trash2 aria-hidden className="mr-2 size-4" />
+                  Delete logs…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : undefined
+        }
       />
+      {execution.can_manage ? (
+        <DeleteLogsDialog
+          ws={ws}
+          executionId={execution.id}
+          filters={filters}
+          scope={scope}
+          open={deleting}
+          onOpenChange={setDeleting}
+          onDeleted={() => {
+            toast.success("Deleted the logs");
+            setGeneration((g) => g + 1);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
