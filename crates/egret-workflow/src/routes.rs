@@ -1596,7 +1596,9 @@ pub struct ExecutionListItemDto {
     /// the labels beyond the flow's own `labels:` (a backfill's, a replay's
     /// copy); once a `Labels` task has run it holds the full merged list, the
     /// flow's labels included. The detail's `effective_labels` is the list to
-    /// display.
+    /// display. Once a person replaced the labels (`POST …/labels`, package
+    /// 7d), it holds the whole visible list, the flow's labels included or
+    /// removed.
     pub labels: Option<Vec<LabelDto>>,
     /// The backfill that fired this execution (W7f), `null` otherwise.
     pub backfill_id: Option<Uuid>,
@@ -1824,7 +1826,9 @@ pub struct ExecutionDto {
     // while the execution is still readable.
     pub can_manage: bool,
     /// What the run sees as `labels`: the flow's, then `labels`, the later key
-    /// winning. Empty when the frozen source does not parse.
+    /// winning; or, once a person replaced them (`POST …/labels`), exactly
+    /// `labels`. Empty when the frozen source does not parse and nothing was
+    /// replaced.
     pub effective_labels: Vec<LabelDto>,
     /// Whether this deployment runs the workflow worker
     /// (`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by
@@ -1851,10 +1855,11 @@ impl ExecutionDto {
             .ok()
             .map(|f| f.labels)
             .unwrap_or_default();
-        let effective_labels = crate::labels::execution_labels(&flow_labels, &own)
-            .into_iter()
-            .map(LabelDto::from)
-            .collect();
+        let effective_labels =
+            crate::labels::visible_labels(&flow_labels, &own, d.execution.labels_replaced)
+                .into_iter()
+                .map(LabelDto::from)
+                .collect();
         Self {
             effective_labels,
             execution: ExecutionListItemDto::from(d.execution),

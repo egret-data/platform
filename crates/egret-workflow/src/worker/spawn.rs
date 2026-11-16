@@ -417,12 +417,13 @@ async fn insert_iteration(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
                 parent_execution_id, parent_run_ix, loop_index, loop_value, inputs, \
-                execution_depth, labels, variables, secret_inputs, ",
+                execution_depth, labels, labels_replaced, variables, secret_inputs, ",
         super::stamps::stamp_columns!(),
         ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9, \
                  COALESCE((SELECT inputs FROM workflow.executions WHERE id = $6), '{}'::jsonb), \
                  (SELECT execution_depth FROM workflow.executions WHERE id = $6), \
                  (SELECT labels FROM workflow.executions WHERE id = $6), \
+                 (SELECT labels_replaced FROM workflow.executions WHERE id = $6), \
                  (SELECT variables FROM workflow.executions WHERE id = $6), \
                  (SELECT secret_inputs FROM workflow.executions WHERE id = $6), ",
         super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),

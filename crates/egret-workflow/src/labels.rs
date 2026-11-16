@@ -96,7 +96,6 @@ static LABEL_KEY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|
 /// the execution's own ([`execution_labels`]). Replaced (a person set the
 /// whole list): the execution's own only, deduplicated the same way, so a
 /// flow label that was removed stays removed.
-#[allow(dead_code)] // read by package 7d T2 (readers) and T5 (set-labels)
 pub(crate) fn visible_labels(flow: &[Label], own: &[Label], replaced: bool) -> Vec<Label> {
     if replaced {
         execution_labels(&[], own)
