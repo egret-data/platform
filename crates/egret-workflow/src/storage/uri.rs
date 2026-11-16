@@ -421,6 +421,41 @@ pub fn task_prefix(
 
 const PROBE_FILE: &str = "file";
 
+/// A FILE `onResume` input's URI (package 7c S2): under the `Pause` run's
+/// own task prefix, `tasks/{task-slug}/{task_run}/resume/{request}/{input}/{file}`,
+/// so it parses as [`Tail::Task`], is indexed under that run, and can never
+/// overwrite a start input (`inputs/{input}/{file}`). `{request}` is fresh per
+/// resume request, so a refused resume deletes only its own files. `Err` as
+/// [`task_prefix`]'s.
+#[allow(clippy::too_many_arguments)]
+pub fn resume_input_uri(
+    namespace: &str,
+    flow_id: &str,
+    execution: Uuid,
+    task_id: &str,
+    task_run: Uuid,
+    request: Uuid,
+    input: &str,
+    file: &str,
+) -> Result<String, String> {
+    let prefix = task_prefix(namespace, flow_id, execution, task_id, task_run)?;
+    let tail = format!("resume/{}/{input}/{file}", request.hyphenated());
+    let uri = format!("{prefix}{tail}");
+    checked(
+        &uri,
+        execution,
+        &Tail::Task {
+            task_slug: slugify_str(task_id),
+            task_run: task_run.hyphenated().to_string(),
+            file: tail,
+        },
+        &format!(
+            "namespace {namespace:?}, flow {flow_id:?}, task {task_id:?}, input {input:?} and file {file:?}"
+        ),
+    )?;
+    Ok(uri)
+}
+
 /// `kestra:///{ns}/{flow-slug}/executions/{exec}/inputs/{input}/{file}`
 /// (`StorageContext.Input`: the input's name and the file's are NOT slugified).
 /// `Err` as [`task_prefix`]'s.
@@ -885,6 +920,44 @@ mod tests {
             fs.execution_prefix(caller, "a.b", "My_Flow", e),
             format!("s3://bkt/workflow/{caller}/a/b/my-flow/executions/{e}/")
         );
+    }
+
+    /// Package 7c S2: a FILE `onResume` value lives under the `Pause` run's
+    /// task prefix, parses as that run's `Tail::Task`, and its object sits
+    /// under the request's `resume_prefix`, inside the run's `resume_root`.
+    #[test]
+    fn a_resume_input_uri_is_a_task_file_of_the_pause_run_under_its_request() {
+        let (ws, e, run, request) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let uri =
+            resume_input_uri("a.b", "My_Flow", e, "Ask_Me", run, request, "doc", "a.txt").unwrap();
+        assert_eq!(
+            uri,
+            format!(
+                "kestra:///a/b/my-flow/executions/{e}/tasks/ask-me/{run}/resume/{request}/doc/a.txt"
+            )
+        );
+        assert_eq!(
+            parse(&uri).unwrap().tail,
+            Tail::Task {
+                task_slug: "ask-me".into(),
+                task_run: run.to_string(),
+                file: format!("resume/{request}/doc/a.txt"),
+            }
+        );
+        let fs = store();
+        let object = fs.object_uri(ws, &uri).unwrap();
+        let prefix = fs.resume_prefix(ws, "a.b", "My_Flow", e, "Ask_Me", run, request);
+        assert!(object.starts_with(&prefix), "{object} under {prefix}");
+        assert!(prefix.starts_with(&fs.resume_root(ws, "a.b", "My_Flow", e, "Ask_Me", run)));
+        assert!(prefix.starts_with(&fs.execution_prefix(ws, "a.b", "My_Flow", e)));
+        // A file name no URI can read back is the author's error, naming it.
+        let err = resume_input_uri("a.b", "f", e, "p", run, request, "doc", "..").unwrap_err();
+        assert!(err.contains("\"..\""), "{err}");
     }
 
     // -- W9b Task 2: namespace file URIs.

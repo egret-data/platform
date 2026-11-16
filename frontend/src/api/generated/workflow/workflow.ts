@@ -1359,7 +1359,128 @@ export function useWorkflowGetExecutionLogs<TData = Awaited<ReturnType<typeof wo
 
 
 
-export type workflowReplayExecutionResponse201 = {
+export type workflowPauseExecutionResponse200 = {
+  data: ExecutionDto
+  status: 200
+}
+
+export type workflowPauseExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowPauseExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowPauseExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowPauseExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowPauseExecutionResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowPauseExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowPauseExecutionResponseSuccess = (workflowPauseExecutionResponse200) & {
+  headers: Headers;
+};
+export type workflowPauseExecutionResponseError = (workflowPauseExecutionResponse400 | workflowPauseExecutionResponse401 | workflowPauseExecutionResponse403 | workflowPauseExecutionResponse404 | workflowPauseExecutionResponse409 | workflowPauseExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowPauseExecutionResponse = (workflowPauseExecutionResponseSuccess | workflowPauseExecutionResponseError)
+
+export const getWorkflowPauseExecutionUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/pause`
+}
+
+/**
+ * One `SetExecutionState { PAUSED }` under the execution's lock
+ * ([`worker::pause_by_hand`](crate::worker::pause_by_hand)), which re-checks
+ * the state and the runs there. A disabled flow does not block it (D9).
+ * @summary Pause a running execution by hand (package 7c D3; Kestra
+`ExecutionService.pause`, `ES:907-916`).
+ */
+export const workflowPauseExecution = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowPauseExecutionResponse> => {
+
+  return customInstance<workflowPauseExecutionResponse>(getWorkflowPauseExecutionUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowPauseExecutionMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecution>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['workflowPauseExecution'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowPauseExecution>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  workflowPauseExecution(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowPauseExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowPauseExecution>>>
+
+    export type WorkflowPauseExecutionMutationError = ErrorBody
+
+    /**
+ * @summary Pause a running execution by hand (package 7c D3; Kestra
+`ExecutionService.pause`, `ES:907-916`).
+ */
+export const useWorkflowPauseExecution = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowPauseExecution>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowPauseExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowReplayExecutionResponse201 = {
   data: ExecutionDto
   status: 201
 }
@@ -1693,6 +1814,11 @@ export const useWorkflowRestartExecution = <TError = ErrorBody,
   status: 200
 }
 
+export type workflowResumeExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type workflowResumeExecutionResponse401 = {
   data: ErrorBody
   status: 401
@@ -1713,15 +1839,30 @@ export type workflowResumeExecutionResponse409 = {
   status: 409
 }
 
+export type workflowResumeExecutionResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowResumeExecutionResponse415 = {
+  data: ErrorBody
+  status: 415
+}
+
 export type workflowResumeExecutionResponse500 = {
   data: ErrorBody
   status: 500
 }
 
+export type workflowResumeExecutionResponse503 = {
+  data: ErrorBody
+  status: 503
+}
+
 export type workflowResumeExecutionResponseSuccess = (workflowResumeExecutionResponse200) & {
   headers: Headers;
 };
-export type workflowResumeExecutionResponseError = (workflowResumeExecutionResponse401 | workflowResumeExecutionResponse403 | workflowResumeExecutionResponse404 | workflowResumeExecutionResponse409 | workflowResumeExecutionResponse500) & {
+export type workflowResumeExecutionResponseError = (workflowResumeExecutionResponse400 | workflowResumeExecutionResponse401 | workflowResumeExecutionResponse403 | workflowResumeExecutionResponse404 | workflowResumeExecutionResponse409 | workflowResumeExecutionResponse413 | workflowResumeExecutionResponse415 | workflowResumeExecutionResponse500 | workflowResumeExecutionResponse503) & {
   headers: Headers;
 };
 
@@ -1737,29 +1878,27 @@ export const getWorkflowResumeExecutionUrl = (workspace: string,
 }
 
 /**
- * W7b Task 3 fix round 1, the user's ruling of 2026-10-11, after review
- * found the old route released nothing a human needs: it only re-settled,
- * which ends a pause whose deadline had passed -- what the waker does anyway.
- * It now calls [`worker::resume_by_hand`](crate::worker::resume_by_hand),
- * Kestra's `ExecutionService.resume`: every paused `Pause` run ends `SUCCESS`
- * now, through the natural end's own path, and the execution settles on.
- *
- * The `PAUSED` check is made twice: here off the scoped read (so a foreign id
- * never reaches the unscoped worker, and the common refusal is cheap), and
- * again by the worker under the execution's lock, which decides the race with
- * the waker. A pause the waker ended first is a 409, like any execution that
- * is not paused.
- * @summary Resume a `PAUSED` execution by hand.
+ * The `PAUSED` check is made twice: here off the scoped read (so a foreign
+ * id never reaches the unscoped worker, and the common refusal is cheap),
+ * and again by [`worker::resume_with`](crate::worker::resume_with) under the
+ * execution's lock, which decides the race with the waker and with another
+ * resume. The `egret.sql` gate (D7) and the trash gate (D9) come before the
+ * body is read, so a refused resume stores nothing; once files are stored
+ * under the `Pause` run (S2), every answer but a success deletes them.
+ * @summary Resume a `PAUSED` execution by hand, with `onResume` inputs when the
+waiting `Pause` declares them (package 7c D5-D7, D9; Kestra
+`ExecutionService.resume`, `ES:880-897`).
  */
 export const workflowResumeExecution = async (workspace: string,
-    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowResumeExecutionResponse> => {
+    id: string,
+    workflowResumeExecutionBody: StartExecutionRequest | StartExecutionMultipart, options?: Parameters<typeof customInstance>[1]): Promise<workflowResumeExecutionResponse> => {
 
   return customInstance<workflowResumeExecutionResponse>(getWorkflowResumeExecutionUrl(workspace,id),
   {
     ...options,
     method: 'POST'
-
-
+    ,
+    body: JSON.stringify(workflowResumeExecutionBody)
   }
 );}
 
@@ -1768,8 +1907,8 @@ export const workflowResumeExecution = async (workspace: string,
 
 
 export const getWorkflowResumeExecutionMutationOptions = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext> => {
 
 const mutationKey = ['workflowResumeExecution'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -1781,10 +1920,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowResumeExecution>>, {workspace: string;id: string}> = (props) => {
-          const {workspace,id} = props ?? {};
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowResumeExecution>>, {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}> = (props) => {
+          const {workspace,id,data} = props ?? {};
 
-          return  workflowResumeExecution(workspace,id,requestOptions)
+          return  workflowResumeExecution(workspace,id,data,requestOptions)
         }
 
 
@@ -1795,21 +1934,154 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type WorkflowResumeExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowResumeExecution>>>
-
+    export type WorkflowResumeExecutionMutationBody = StartExecutionRequest | StartExecutionMultipart
     export type WorkflowResumeExecutionMutationError = ErrorBody
 
     /**
- * @summary Resume a `PAUSED` execution by hand.
+ * @summary Resume a `PAUSED` execution by hand, with `onResume` inputs when the
+waiting `Pause` declares them (package 7c D5-D7, D9; Kestra
+`ExecutionService.resume`, `ES:880-897`).
  */
 export const useWorkflowResumeExecution = <TError = ErrorBody,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof workflowResumeExecution>>,
         TError,
-        {workspace: string;id: string},
+        {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart},
         TContext
       > => {
       return useMutation(getWorkflowResumeExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowValidateResumeInputsResponse200 = {
+  data: ValidateInputsDto
+  status: 200
+}
+
+export type workflowValidateResumeInputsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowValidateResumeInputsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowValidateResumeInputsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowValidateResumeInputsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowValidateResumeInputsResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowValidateResumeInputsResponse413 = {
+  data: ErrorBody
+  status: 413
+}
+
+export type workflowValidateResumeInputsResponse415 = {
+  data: ErrorBody
+  status: 415
+}
+
+export type workflowValidateResumeInputsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowValidateResumeInputsResponseSuccess = (workflowValidateResumeInputsResponse200) & {
+  headers: Headers;
+};
+export type workflowValidateResumeInputsResponseError = (workflowValidateResumeInputsResponse400 | workflowValidateResumeInputsResponse401 | workflowValidateResumeInputsResponse403 | workflowValidateResumeInputsResponse404 | workflowValidateResumeInputsResponse409 | workflowValidateResumeInputsResponse413 | workflowValidateResumeInputsResponse415 | workflowValidateResumeInputsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowValidateResumeInputsResponse = (workflowValidateResumeInputsResponseSuccess | workflowValidateResumeInputsResponseError)
+
+export const getWorkflowValidateResumeInputsUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/resume/validate`
+}
+
+/**
+ * @summary Check the inputs a resume would be given, without resuming (package 7c
+D8; Kestra's `validateResume` with `uploadFiles=false`): the start's
+validate answer for the first waiting `Pause`'s `onResume`.
+ */
+export const workflowValidateResumeInputs = async (workspace: string,
+    id: string,
+    workflowValidateResumeInputsBody: StartExecutionRequest | StartExecutionMultipart, options?: Parameters<typeof customInstance>[1]): Promise<workflowValidateResumeInputsResponse> => {
+
+  return customInstance<workflowValidateResumeInputsResponse>(getWorkflowValidateResumeInputsUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+    ,
+    body: JSON.stringify(workflowValidateResumeInputsBody)
+  }
+);}
+
+
+
+
+
+export const getWorkflowValidateResumeInputsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowValidateResumeInputs>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowValidateResumeInputs>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext> => {
+
+const mutationKey = ['workflowValidateResumeInputs'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowValidateResumeInputs>>, {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  workflowValidateResumeInputs(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowValidateResumeInputsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowValidateResumeInputs>>>
+    export type WorkflowValidateResumeInputsMutationBody = StartExecutionRequest | StartExecutionMultipart
+    export type WorkflowValidateResumeInputsMutationError = ErrorBody
+
+    /**
+ * @summary Check the inputs a resume would be given, without resuming (package 7c
+D8; Kestra's `validateResume` with `uploadFiles=false`): the start's
+validate answer for the first waiting `Pause`'s `onResume`.
+ */
+export const useWorkflowValidateResumeInputs = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowValidateResumeInputs>>, TError,{workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowValidateResumeInputs>>,
+        TError,
+        {workspace: string;id: string;data: StartExecutionRequest | StartExecutionMultipart},
+        TContext
+      > => {
+      return useMutation(getWorkflowValidateResumeInputsMutationOptions(options), queryClient);
     }
     export type workflowSetExecutionStatusResponse200 = {
   data: ExecutionDto

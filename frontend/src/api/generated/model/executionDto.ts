@@ -55,4 +55,11 @@ export type ExecutionDto = ExecutionListItemDto & {
      * The same flag the trigger routes echo ([`TriggerFlags`]).
      */
   worker_enabled: boolean;
+  /**
+     * `true` when the execution is `PAUSED` and no task run waits: it was
+     * paused by hand (`POST …/pause`). A resume sends it on; it takes no
+     * inputs. `false` for a `Pause` task or a `LoopUntil` waiting, and for
+     * every other state.
+     */
+  paused_by_hand: boolean;
 };

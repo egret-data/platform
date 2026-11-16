@@ -47,6 +47,7 @@ mod command;
 pub mod exit;
 mod flowable;
 pub(crate) mod kill;
+pub mod manual_pause;
 mod plan;
 pub mod replay;
 pub mod restart;
@@ -60,6 +61,10 @@ pub use after_execution::{
     after_execution_live, drives_after, phase_killed, refusal_of, terminated,
 };
 pub use command::Command;
+pub use manual_pause::{
+    first_waiting_pause, pause_by_hand_commands, paused_by_hand, paused_by_hand_of,
+    resume_by_hand_commands, resumed_outputs, PauseRefusal,
+};
 pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
     RetryBehavior, RetryDelay, RetryPolicy, TaskIx, TaskKind,
@@ -190,6 +195,8 @@ use flowable::{sequential, Step};
 /// once and caches is answering only for attempt 1. See `apply`'s rule 2.
 pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     if !drives_forward(state) {
+        // A manual pause (package 7c) returns `Vec::new()` here, and `kill` and 7a's restart still reach it.
+        //
         // A kill in progress (spec §5): nothing is created, started, retried
         // or resumed, and nothing below -- `reopen_due`, the walk,
         // `retry::scan`, `pause_mark` -- sees this state. See [`kill`]. In
@@ -357,17 +364,21 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
 }
 
 /// **Whether [`advance`] still drives this execution's runs forward**: it
-/// is neither terminal nor `KILLING`. Every other state -- `RUNNING`,
-/// `PAUSED`, `RETRYING`, `CREATED`, `RESTARTED` -- reaches the walk, which
-/// creates, starts and completes runs. `advance` branches on exactly this,
-/// and the worker's update pass (`worker::render::render_updates`, group C2
-/// ruling D9) gates on it, so the two cannot disagree about when a sibling
-/// may still move.
+/// is neither terminal nor `KILLING`, nor paused by hand (package 7c D2,
+/// [`paused_by_hand`]). Every other state -- `RUNNING`, a `PAUSED` that a
+/// `Pause` or a waiting `LoopUntil` holds, `RETRYING`, `CREATED`,
+/// `RESTARTED` -- reaches the walk, which creates, starts and completes
+/// runs. `advance` branches on exactly this, and the worker's update pass
+/// (`worker::render::render_updates`, group C2 ruling D9) gates on it, so
+/// the two cannot disagree about when a sibling may still move. A manual
+/// pause reaches `advance`'s `_ => Vec::new()` arm: Kestra's
+/// `ExecutorContext.canBeProcessed()` is false for `PAUSED`.
 pub fn drives_forward(state: &ExecutionState) -> bool {
     !state
         .history
         .last()
         .is_some_and(|s| s.is_terminal() || *s == RunState::Killing)
+        && !paused_by_hand(state)
 }
 
 /// Which execution state, if any, this batch of commands owes — W8 Task 3.

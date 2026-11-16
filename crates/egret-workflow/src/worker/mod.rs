@@ -86,6 +86,7 @@ mod force_close;
 pub mod handlers;
 pub mod k8s;
 mod kill;
+mod pause;
 mod reaper;
 mod registry;
 mod render;
@@ -115,7 +116,7 @@ pub use claim::ERROR_LOGS_WAIT;
 /// read. Production goes through `worker::txn`.
 #[cfg(any(test, feature = "test-util"))]
 pub use claim::{apply_outcome, start_execution_in};
-pub(crate) use claim::{checked_inputs, input_outcomes, start_execution_in_with};
+pub(crate) use claim::{checked_inputs, input_outcomes_for, start_execution_in_with};
 pub use claim::{
     claim, commit_outcome, due_retries, resume, resume_by_hand, start_claimed, start_execution,
     start_execution_by, start_execution_with_trigger, tick, tick_with, wake, Claimed, NewExecution,
@@ -150,6 +151,7 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
 }
 pub use copy::{replay_execution, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest};
 pub use kill::{kill_execution, kill_execution_reporting, KillOutcome};
+pub use pause::{pause_by_hand, resume_with, Paused, ResumeRefused, ResumeRequest};
 pub use reaper::reap;
 pub use registry::Handlers;
 pub use render::execution_render_context;

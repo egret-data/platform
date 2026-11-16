@@ -1832,10 +1832,20 @@ pub struct ExecutionDto {
     /// nothing runs it until an administrator turns the worker on** (KI-013).
     /// The same flag the trigger routes echo ([`TriggerFlags`]).
     pub worker_enabled: bool,
+    /// `true` when the execution is `PAUSED` and no task run waits: it was
+    /// paused by hand (`POST …/pause`). A resume sends it on; it takes no
+    /// inputs. `false` for a `Pause` task or a `LoopUntil` waiting, and for
+    /// every other state.
+    // Package 7c D1/D11: the rule is `executor::paused_by_hand_of`'s.
+    pub paused_by_hand: bool,
 }
 
 impl ExecutionDto {
     fn new(d: ExecutionDetail, can_manage: bool, worker_enabled: bool) -> Self {
+        let paused_by_hand = crate::executor::paused_by_hand_of(
+            crate::worker::from_wire(&d.execution.state),
+            d.runs.iter().map(|r| crate::worker::from_wire(&r.state)),
+        );
         let own = crate::labels::own_labels(d.execution.labels.as_ref());
         let flow_labels = crate::spec::parse(&d.source)
             .ok()
@@ -1853,6 +1863,7 @@ impl ExecutionDto {
             outputs: d.outputs,
             can_manage,
             worker_enabled,
+            paused_by_hand,
         }
     }
 }
@@ -2433,16 +2444,7 @@ async fn startable_flow(
     ws: Uuid,
     flow_id: Uuid,
 ) -> EgretResult<crate::repo::FlowRow> {
-    // `FlowRepo::get` carries the workspace predicate, so a foreign id is a
-    // `NotFound` here and never a 403 -- the `chart_id` class this package
-    // keeps guarding against.
-    let flow = st.repo.get(ws, flow_id).await?;
-    // **`FlowRepo::get` does NOT filter `deleted_at`** -- its own doc says so,
-    // and `get_flow` deliberately still serves a trashed draft so the UI can
-    // show what is in the trash. Running one is different.
-    if flow.deleted_at.is_some() {
-        return Err(Error::NotFound("flow".into()));
-    }
+    let flow = live_flow(st, ws, flow_id).await?;
     // **Both doors a flow can be switched off by.** The `state` column is
     // honoured here, though nothing writes it yet; `disabled: true` is the
     // YAML's. The runtime switch is per trigger, not per flow
@@ -2455,6 +2457,42 @@ async fn startable_flow(
         ));
     }
     Ok(flow)
+}
+
+/// [`startable_flow`]'s first half: the flow in this workspace and not in the
+/// trash, or 404. A disabled flow passes.
+async fn live_flow(
+    st: &WorkflowState,
+    ws: Uuid,
+    flow_id: Uuid,
+) -> EgretResult<crate::repo::FlowRow> {
+    // `FlowRepo::get` carries the workspace predicate, so a foreign id is a
+    // `NotFound` here and never a 403 -- the `chart_id` class this package
+    // keeps guarding against.
+    let flow = st.repo.get(ws, flow_id).await?;
+    // **`FlowRepo::get` does NOT filter `deleted_at`** -- its own doc says so,
+    // and `get_flow` deliberately still serves a trashed draft so the UI can
+    // show what is in the trash. Running one is different.
+    if flow.deleted_at.is_some() {
+        return Err(Error::NotFound("flow".into()));
+    }
+    Ok(flow)
+}
+
+/// Package 7c D9: pause, resume and validate-resume refuse an execution whose
+/// flow is in the trash or deleted for good (or that names no flow) with 404,
+/// as 7a does. A disabled flow does not matter: stopping or finishing a run of
+/// one is safe, and Kestra checks neither (§5 divergence 3).
+async fn live_flow_of(
+    st: &WorkflowState,
+    ws: Uuid,
+    detail: &crate::repo::ExecutionDetail,
+) -> EgretResult<()> {
+    let flow_id = detail
+        .execution
+        .flow_id
+        .ok_or_else(|| Error::NotFound("flow".into()))?;
+    live_flow(st, ws, flow_id).await.map(|_| ())
 }
 
 /// **The doors a run of the flow passes, for an operation that runs tasks
@@ -2822,22 +2860,57 @@ fn declared_inputs(source: &str) -> std::collections::HashMap<String, serde_json
     out
 }
 
-/// The validate answer for `posted` against `flow`'s draft: the start check
-/// ([`crate::worker::input_outcomes`]), every input listed, SECRET values
-/// masked (review M6).
-fn validate_inputs_answer(
-    row: &crate::repo::FlowRow,
+/// Package 7c D8: the `onResume` entries of the task `task_id` as the YAML
+/// spells them, by id (the first of a repeated id) -- [`declared_inputs`] for
+/// a `Pause`. The first object at any depth whose `id` is `task_id` and that
+/// holds an `onResume` array is the one; `None` or no match is empty.
+fn declared_resume_inputs(
+    source: &str,
+    task_id: Option<&str>,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    fn find<'a>(v: &'a serde_json::Value, id: &str) -> Option<&'a Vec<serde_json::Value>> {
+        match v {
+            serde_json::Value::Object(m) => {
+                if m.get("id").and_then(serde_json::Value::as_str) == Some(id) {
+                    if let Some(list) = m.get("onResume").and_then(serde_json::Value::as_array) {
+                        return Some(list);
+                    }
+                }
+                m.values().find_map(|c| find(c, id))
+            }
+            serde_json::Value::Array(items) => items.iter().find_map(|c| find(c, id)),
+            _ => None,
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    let Some(task_id) = task_id else {
+        return out;
+    };
+    let Ok(doc) = serde_norway::from_str::<serde_json::Value>(source) else {
+        return out;
+    };
+    for input in find(&doc, task_id).into_iter().flatten() {
+        if let Some(id) = input.get("id").and_then(serde_json::Value::as_str) {
+            out.entry(id.to_string()).or_insert_with(|| input.clone());
+        }
+    }
+    out
+}
+
+/// The validate answer for `posted` against `inputs` (a flow's `inputs:` or
+/// a `Pause`'s `onResume`), rendered against `flow`: the start check
+/// ([`crate::worker::input_outcomes_for`]), every input listed, SECRET
+/// values masked (review M6). `declared` is each input as the YAML spells
+/// it, by id.
+fn inputs_answer(
+    mut declared: std::collections::HashMap<String, serde_json::Value>,
     flow: &crate::models::Flow,
+    inputs: &[crate::models::Input],
     posted: &serde_json::Value,
 ) -> ValidateInputsDto {
-    let mut declared = declared_inputs(&row.source);
-    let types: std::collections::HashMap<&str, &crate::models::Input> = flow
-        .inputs
-        .iter()
-        .rev()
-        .map(|i| (i.id.as_str(), i))
-        .collect();
-    let inputs = crate::worker::input_outcomes(flow, posted)
+    let types: std::collections::HashMap<&str, &crate::models::Input> =
+        inputs.iter().rev().map(|i| (i.id.as_str(), i)).collect();
+    let inputs = crate::worker::input_outcomes_for(flow, inputs, posted)
         .into_iter()
         .map(|o| {
             let model = types.get(o.id.as_str()).copied();
@@ -2926,7 +2999,12 @@ async fn validate_execution_inputs(
     let posted = start_inputs(Some(Json(request)))?;
     let flow = parse(&row.source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
-    Ok(Json(validate_inputs_answer(&row, &flow, &posted)))
+    Ok(Json(inputs_answer(
+        declared_inputs(&row.source),
+        &flow,
+        &flow.inputs,
+        &posted,
+    )))
 }
 
 /// The multipart start (W9a spec §7.1), in its order: the execution id is
@@ -2953,7 +3031,9 @@ async fn start_multipart(
         )))
     })?;
     let execution = Uuid::new_v4();
-    let Uploaded { inputs, files } = receive_parts(workspace, &parsed, execution, req).await?;
+    let sink = PartSink::Start { execution };
+    let Uploaded { inputs, files } =
+        receive_parts(workspace, &parsed, &parsed.inputs, "the flow", &sink, req).await?;
     // W9c Task 9: in `worker::txn::transaction!`, so a first settle that
     // needs a read is rolled back, the read fetched, and the start run again
     // -- with the same id and the same uploads: they happened above, before
@@ -2985,7 +3065,7 @@ async fn start_multipart(
     })
     .map_err(core_refusal);
     if started.is_err() && !files.is_empty() {
-        discard_uploads(workspace, &parsed, execution).await;
+        discard_sink(workspace, &parsed, &sink).await;
     }
     started
 }
@@ -2997,27 +3077,61 @@ struct Uploaded {
     files: Vec<crate::storage::StoredFile>,
 }
 
-/// Read a multipart body against `parsed`'s declared inputs, storing each
-/// file part under `execution` (W9a spec §7.1; shared by the start and the
-/// replay, package 7b). On its own failure it deletes what it stored; once
-/// it has answered, the caller deletes them ([`discard_uploads`]) if the
-/// execution is not created.
-#[allow(clippy::result_large_err)]
-async fn receive_parts(
+/// Where a multipart part's file goes (package 7c generalised W9a's start).
+enum PartSink<'a> {
+    /// A start or a replay: `inputs/{input}/{file}` of the new `execution`.
+    Start { execution: Uuid },
+    /// A resume (D6, S2): under the waiting `Pause` run's own task prefix,
+    /// in a folder of this `request`'s, so a refused resume deletes only its
+    /// own files and never the execution's.
+    Resume {
+        execution: Uuid,
+        task_id: &'a str,
+        task_run: Uuid,
+        request: Uuid,
+    },
+    /// A validate (D8): the file is read and dropped; its value is its name.
+    Discard,
+}
+
+/// The prefix everything `sink` stores lies under; `None` for
+/// [`PartSink::Discard`], which stores nothing.
+fn sink_prefix(
+    fs: &crate::storage::FileStore,
     workspace: Uuid,
     parsed: &crate::models::Flow,
-    execution: Uuid,
+    sink: &PartSink<'_>,
+) -> Option<String> {
+    match sink {
+        PartSink::Start { execution } => {
+            Some(fs.execution_prefix(workspace, &parsed.namespace, &parsed.id, *execution))
+        }
+        PartSink::Resume {
+            execution,
+            task_id,
+            task_run,
+            request,
+        } => Some(fs.resume_prefix(
+            workspace,
+            &parsed.namespace,
+            &parsed.id,
+            *execution,
+            task_id,
+            *task_run,
+            *request,
+        )),
+        PartSink::Discard => None,
+    }
+}
+
+/// A multipart body, its size capped at `limit` and its part headers at
+/// [`MAX_MULTIPART_HEADER_BYTES`] (W9a fix round 1, I1).
+#[allow(clippy::result_large_err)]
+async fn open_multipart(
     req: axum::extract::Request,
-) -> std::result::Result<Uploaded, axum::response::Response> {
+    limit: usize,
+) -> std::result::Result<(axum::extract::Multipart, Arc<MultipartGate>), axum::response::Response> {
     use axum::extract::FromRequest as _;
-    let Some(fs) = crate::storage::current() else {
-        return Err(core_refusal(Error::InvalidInput(
-            "an uploaded FILE input needs internal storage, and egret has none configured \
-             (the `[storage]` section of its configuration)"
-                .into(),
-        )));
-    };
-    let limit = multipart_body_limit(fs.caps);
     let gate = Arc::new(MultipartGate::default());
     let req = req.map(|b| {
         let limited = axum::body::Body::new(http_body_util::Limited::new(b, limit));
@@ -3028,15 +3142,53 @@ async fn receive_parts(
             yielded: false,
         })
     });
-    let mut multipart = axum::extract::Multipart::from_request(req, &())
+    let multipart = axum::extract::Multipart::from_request(req, &())
         .await
         .map_err(axum::response::IntoResponse::into_response)?;
+    Ok((multipart, gate))
+}
+
+/// Read a multipart body against `declared` (each part named by one of its
+/// ids; `owner` names who declares them in the refusal of any other part),
+/// storing each file part where `sink` says (W9a spec §7.1; shared by the
+/// start, the replay, package 7b, and the resume and its validate, package
+/// 7c). `parsed` gives the namespace and the flow id of the storage paths.
+/// On its own failure it deletes what it stored; once it has answered, the
+/// caller deletes them ([`discard_sink`]) if what they were for did not
+/// happen.
+#[allow(clippy::result_large_err)]
+async fn receive_parts(
+    workspace: Uuid,
+    parsed: &crate::models::Flow,
+    declared: &[crate::models::Input],
+    owner: &str,
+    sink: &PartSink<'_>,
+    req: axum::extract::Request,
+) -> std::result::Result<Uploaded, axum::response::Response> {
+    let fs = match (crate::storage::current(), sink) {
+        (Some(fs), _) => Some(fs),
+        // A validate stores nothing, so it needs no storage.
+        (None, PartSink::Discard) => None,
+        (None, _) => {
+            return Err(core_refusal(Error::InvalidInput(
+                "an uploaded FILE input needs internal storage, and egret has none configured \
+                 (the `[storage]` section of its configuration)"
+                    .into(),
+            )))
+        }
+    };
+    let limit = multipart_body_limit(fs.as_ref().map(|f| f.caps).unwrap_or_default());
+    let (mut multipart, gate) = open_multipart(req, limit).await?;
     let mut uploading = false;
     let read = read_parts(
-        &fs,
+        fs.as_deref(),
         workspace,
         parsed,
-        execution,
+        PartsOf {
+            declared,
+            owner,
+            sink,
+        },
         &mut multipart,
         &gate,
         limit,
@@ -3044,33 +3196,65 @@ async fn receive_parts(
     )
     .await;
     if read.is_err() && uploading {
-        discard_uploads(workspace, parsed, execution).await;
+        discard_sink(workspace, parsed, sink).await;
     }
     read
 }
 
-/// Delete what [`receive_parts`] stored for `execution`, best effort: an
-/// execution that was never created has no row for the pruner to find.
-async fn discard_uploads(workspace: Uuid, parsed: &crate::models::Flow, execution: Uuid) {
+/// The name of a multipart body's first part, or `None` for a body with no
+/// part. Package 7c D5: a resume that takes no inputs refuses any part
+/// before anything is stored.
+#[allow(clippy::result_large_err)]
+async fn multipart_first_part(
+    req: axum::extract::Request,
+) -> std::result::Result<Option<String>, axum::response::Response> {
+    let limit = MAX_JSON_START_BODY_BYTES;
+    let (mut multipart, gate) = open_multipart(req, limit).await?;
+    gate.start_headers();
+    let next = multipart.next_field().await;
+    gate.end_headers();
+    let field = next.map_err(|e| multipart_refusal(&gate, limit, e.status(), e.body_text()))?;
+    Ok(field.map(|f| f.name().unwrap_or_default().to_string()))
+}
+
+/// Delete what [`receive_parts`] stored for `sink`, best effort: what it was
+/// stored for never happened, so no row points at it.
+async fn discard_sink(workspace: Uuid, parsed: &crate::models::Flow, sink: &PartSink<'_>) {
     let Some(fs) = crate::storage::current() else {
         return;
     };
-    let prefix = fs.execution_prefix(workspace, &parsed.namespace, &parsed.id, execution);
+    if let Some(prefix) = sink_prefix(&fs, workspace, parsed, sink) {
+        discard_prefix(prefix).await;
+    }
+}
+
+/// Delete everything under `prefix`, best effort, with a warning on failure.
+async fn discard_prefix(prefix: String) {
+    let Some(fs) = crate::storage::current() else {
+        return;
+    };
     if let Err(e) = fs.store.delete_prefix(&prefix).await {
         tracing::warn!(
             prefix = %prefix,
             error = %e,
-            "a refused start's uploaded files could not be deleted; the orphan sweep will"
+            "a refused request's uploaded files could not be deleted; the orphan sweep will"
         );
     }
 }
 
+/// What [`read_parts`] reads a body against.
+struct PartsOf<'a> {
+    declared: &'a [crate::models::Input],
+    owner: &'a str,
+    sink: &'a PartSink<'a>,
+}
+
 #[allow(clippy::too_many_arguments, clippy::result_large_err)]
 async fn read_parts(
-    fs: &crate::storage::FileStore,
+    fs: Option<&crate::storage::FileStore>,
     workspace: Uuid,
     parsed: &crate::models::Flow,
-    execution: Uuid,
+    of: PartsOf<'_>,
     multipart: &mut axum::extract::Multipart,
     gate: &MultipartGate,
     limit: usize,
@@ -3096,9 +3280,10 @@ async fn read_parts(
                 "a multipart part has no name: each part is named by the input it is for".into(),
             ));
         };
-        let Some(input) = parsed.inputs.iter().find(|i| i.id == name) else {
+        let Some(input) = of.declared.iter().find(|i| i.id == name) else {
             return Err(bad(format!(
-                "the flow declares no input `{name}`: each multipart part is named by an input id"
+                "{} declares no input `{name}`: each multipart part is named by an input id",
+                of.owner
             )));
         };
         if inputs.contains_key(&name) {
@@ -3107,22 +3292,69 @@ async fn read_parts(
             )));
         }
         let value = match field.file_name().map(str::to_string) {
+            // D8: a validate reads the file and drops it; the would-be value
+            // is its name, not a URI.
+            Some(file_name) if matches!(of.sink, PartSink::Discard) => {
+                // The upload's own checks (a FILE input, a name, an allowed
+                // extension), so a validate refuses what a resume would.
+                crate::storage::inputs::admit(input, &file_name)
+                    .map_err(|e| upload_refusal(e, gate, limit))?;
+                let mut field = field;
+                while field
+                    .chunk()
+                    .await
+                    .map_err(|e| multipart_refusal(gate, limit, e.status(), e.body_text()))?
+                    .is_some()
+                {}
+                file_name
+            }
             Some(file_name) => {
+                let Some(fs) = fs else {
+                    return Err(core_refusal(Error::Internal(anyhow::anyhow!(
+                        "a multipart sink that stores files, without internal storage"
+                    ))));
+                };
                 *uploading = true;
                 let mut body = tokio_util::io::StreamReader::new(
                     field.map(|chunk| chunk.map_err(std::io::Error::other)),
                 );
-                let stored = crate::storage::inputs::upload_input(
-                    fs,
-                    workspace,
-                    &parsed.namespace,
-                    &parsed.id,
-                    execution,
-                    input,
-                    &file_name,
-                    &mut body,
-                )
-                .await
+                let stored = match of.sink {
+                    PartSink::Start { execution } => {
+                        crate::storage::inputs::upload_input(
+                            fs,
+                            workspace,
+                            &parsed.namespace,
+                            &parsed.id,
+                            *execution,
+                            input,
+                            &file_name,
+                            &mut body,
+                        )
+                        .await
+                    }
+                    PartSink::Resume {
+                        execution,
+                        task_id,
+                        task_run,
+                        request,
+                    } => {
+                        crate::storage::inputs::upload_resume_input(
+                            fs,
+                            workspace,
+                            &parsed.namespace,
+                            &parsed.id,
+                            *execution,
+                            task_id,
+                            *task_run,
+                            *request,
+                            input,
+                            &file_name,
+                            &mut body,
+                        )
+                        .await
+                    }
+                    PartSink::Discard => unreachable!("a Discard part is drained above"),
+                }
                 .map_err(|e| upload_refusal(e, gate, limit))?;
                 let uri = stored.uri.clone();
                 files.push(stored);
@@ -3197,80 +3429,467 @@ fn upload_refusal(
 
 #[utoipa::path(
     post,
-    path = "/api/ws/{workspace}/workflows/executions/{id}/resume",
+    path = "/api/ws/{workspace}/workflows/executions/{id}/pause",
     tag = "workflow",
     params(
         WorkspacePath,
         ("id" = Uuid, Path, description = "Execution id"),
     ),
     responses(
-        (status = 200, description = "Every paused `Pause` run was released at once and ends `SUCCESS`, whatever its `pauseDuration:` or `timeout:` (Kestra: a pause resumed by hand always succeeds); the execution then runs on. The body is its detail afterwards.", body = ExecutionDto),
+        (status = 200, description = "The execution is `PAUSED`. Runs already running finish and record their results; no run is created or started until it is resumed. The body is its detail afterwards, with `paused_by_hand: true`.", body = ExecutionDto),
+        (status = 400, description = "The execution is a loop iteration: pause its loop root instead (the message names it). Nothing is written.", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
-        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution is not PAUSED (or its pause ended before the resume took the execution's lock), or it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting. A resume that changes nothing must not answer 200.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash, or no longer exists at all.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_running`: the execution is not `RUNNING` or `RESTARTED` (`KILLING`, `PAUSED` and every terminal state included; the message names the state), or a `Pause` or `LoopUntil` task is already waiting (resume that task instead). Nothing is written.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
-/// Resume a `PAUSED` execution by hand.
+/// Pause a running execution by hand (package 7c D3; Kestra
+/// `ExecutionService.pause`, `ES:907-916`).
 ///
-/// W7b Task 3 fix round 1, the user's ruling of 2026-10-11, after review
-/// found the old route released nothing a human needs: it only re-settled,
-/// which ends a pause whose deadline had passed -- what the waker does anyway.
-/// It now calls [`worker::resume_by_hand`](crate::worker::resume_by_hand),
-/// Kestra's `ExecutionService.resume`: every paused `Pause` run ends `SUCCESS`
-/// now, through the natural end's own path, and the execution settles on.
-///
-/// The `PAUSED` check is made twice: here off the scoped read (so a foreign id
-/// never reaches the unscoped worker, and the common refusal is cheap), and
-/// again by the worker under the execution's lock, which decides the race with
-/// the waker. A pause the waker ended first is a 409, like any execution that
-/// is not paused.
-async fn resume_execution(
+/// One `SetExecutionState { PAUSED }` under the execution's lock
+/// ([`worker::pause_by_hand`](crate::worker::pause_by_hand)), which re-checks
+/// the state and the runs there. A disabled flow does not block it (D9).
+async fn pause_execution(
     State(st): State<WorkflowState>,
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
-) -> EgretResult<Json<ExecutionDto>> {
+) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
-    // The containment check AND the state check off one scoped read, so a
-    // foreign id never reaches `worker::resume_by_hand` -- which is unscoped by
-    // workspace, as every `worker::` entry point is.
-    let before = st.executions.get(ctx.workspace_id.0, id).await?;
-    if crate::worker::from_wire(&before.execution.state) != Some(RunState::Paused) {
-        return Err(Error::Conflict(format!(
-            "execution {id} is {}, not PAUSED; only a paused execution can be resumed",
-            before.execution.state
-        )));
+    let ws = ctx.workspace_id.0;
+    // The scoped read first: a foreign id is a 404 here and never reaches
+    // the worker.
+    let before = st.executions.get(ws, id).await?;
+    if let (Some(root), Some(_)) = (
+        before.execution.parent_execution_id,
+        before.execution.loop_index,
+    ) {
+        return Err(ExecOpError::loop_iteration(id, root, "cannot be paused"));
     }
-    match crate::worker::resume_by_hand(&st.db.pool, id).await? {
-        crate::worker::Resumed::Released(_) => {}
-        crate::worker::Resumed::NotPaused => {
-            return Err(Error::Conflict(format!(
-                "execution {id} is no longer PAUSED; its pause ended before the resume reached it"
-            )));
+    live_flow_of(&st, ws, &before).await?;
+    match crate::worker::pause_by_hand(&st.db.pool, ws, id).await? {
+        crate::worker::Paused::Done => {}
+        crate::worker::Paused::NotRunning(state) => {
+            return Err(ExecOpError::conflict(
+                NOT_RUNNING_CODE,
+                format!(
+                    "execution {id} is {state}; only a RUNNING or RESTARTED execution can be \
+                     paused"
+                ),
+            ));
         }
-        // An execution paused only by a waiting `LoopUntil` (W7b Task 3 fix
-        // round 2): a 409, never a 200 that changed nothing.
-        crate::worker::Resumed::NoPauseWaiting => {
-            return Err(Error::Conflict(
-                "Nothing to resume: no Pause task is waiting. The execution is waiting on a loop condition, which ends on its own schedule."
-                    .to_string(),
+        // Spec Q5: a waiting task would make this pause not "by hand" (D1).
+        crate::worker::Paused::TaskWaiting => {
+            return Err(ExecOpError::conflict(
+                NOT_RUNNING_CODE,
+                format!(
+                    "execution {id} has a Pause or LoopUntil task already waiting, so it cannot \
+                     be paused by hand; resume that task instead"
+                ),
             ));
         }
     }
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
-        Some(ctx.workspace_id.0),
-        "workflow_execution:resume",
+        Some(ws),
+        "workflow_execution:pause",
         "workflow_execution",
         Some(id.to_string()),
         serde_json::json!({ "from_state": before.execution.state }),
     ));
-    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    let detail = st.executions.get(ws, id).await?;
     Ok(Json(ExecutionDto::new(
         detail,
         true,
         st.trigger_flags.worker_enabled,
+    )))
+}
+
+/// What a resume finds waiting, read from the scoped detail before any body
+/// is read (package 7c D5). The worker decides again under the lock and
+/// answers `Moved` when the `Pause` run is no longer the one read here.
+enum Waiting {
+    /// `PAUSED` and no run waits (D1).
+    ByHand,
+    /// The first waiting `Pause` run in run order, and its `onResume`
+    /// (empty when it declares none).
+    Pause {
+        run: Uuid,
+        task_id: String,
+        on_resume: Vec<crate::models::Input>,
+    },
+    /// Only a `LoopUntil` waits, which a resume does not end.
+    LoopOnly,
+}
+
+fn waiting_of(detail: &crate::repo::ExecutionDetail) -> EgretResult<Waiting> {
+    let by_hand = crate::executor::paused_by_hand_of(
+        crate::worker::from_wire(&detail.execution.state),
+        detail
+            .runs
+            .iter()
+            .map(|r| crate::worker::from_wire(&r.state)),
+    );
+    if by_hand {
+        return Ok(Waiting::ByHand);
+    }
+    // The engine's own spelling (`executor::Resume::wire`): a `Pause` waits
+    // with `NEVER` or `TERMINAL:*`; a `LoopUntil` with `ITERATE`. `runs` is
+    // in `run_ix` order, as `executor::first_waiting_pause` reads it.
+    let Some(run) = detail.runs.iter().find(|r| {
+        r.state == "PAUSED"
+            && r.resume_with
+                .as_deref()
+                .is_some_and(|w| w == "NEVER" || w.starts_with("TERMINAL:"))
+    }) else {
+        return Ok(Waiting::LoopOnly);
+    };
+    let flow = parse(&detail.source).map_err(|e| {
+        Error::Internal(anyhow::anyhow!(
+            "execution {}: its frozen source does not parse: {}",
+            detail.execution.id,
+            e.message
+        ))
+    })?;
+    let on_resume = crate::spec::path::find_task(&flow, &run.task_id)
+        .and_then(|t| match &t.kind {
+            crate::models::TaskKind::Pause(p) => p.on_resume.clone(),
+            _ => None,
+        })
+        .unwrap_or_default();
+    Ok(Waiting::Pause {
+        run: run.id,
+        task_id: run.task_id.clone(),
+        on_resume,
+    })
+}
+
+/// 400 `resume_inputs_unexpected` (D5).
+fn resume_inputs_unexpected(id: Uuid) -> ExecOpError {
+    ExecOpError::Coded(
+        StatusCode::BAD_REQUEST,
+        RESUME_INPUTS_UNEXPECTED_CODE,
+        format!(
+            "execution {id} takes no inputs to resume: it is paused by hand, the waiting Pause \
+             declares no onResume, or no Pause waits"
+        ),
+    )
+}
+
+/// The worker's answer to a resume, as the response (D5). `no_body_for` is
+/// the waiting `Pause`'s task id when the request carried no inputs at all,
+/// so a refusal of a required `onResume` input says the body was missing.
+#[allow(clippy::result_large_err)]
+fn resume_answer(
+    id: Uuid,
+    outcome: EgretResult<crate::worker::Resumed>,
+    no_body_for: Option<&str>,
+) -> std::result::Result<crate::worker::Resumed, axum::response::Response> {
+    use crate::worker::{ResumeRefused, Resumed};
+    use axum::response::IntoResponse as _;
+    let refused = match outcome.map_err(core_refusal)? {
+        r @ (Resumed::Released(_) | Resumed::ByHand) => return Ok(r),
+        Resumed::NotPaused => ExecOpError::conflict(
+            NOT_PAUSED_CODE,
+            format!(
+                "execution {id} is no longer PAUSED; its pause ended before the resume reached it"
+            ),
+        ),
+        // An execution paused only by a waiting `LoopUntil` (W7b Task 3 fix
+        // round 2): a 409, never a 200 that changed nothing.
+        Resumed::NoPauseWaiting => ExecOpError::Core(Error::Conflict(
+            "Nothing to resume: no Pause task is waiting. The execution is waiting on a loop \
+             condition, which ends on its own schedule."
+                .to_string(),
+        )),
+        Resumed::Refused(ResumeRefused::InputsUnexpected) => resume_inputs_unexpected(id),
+        Resumed::Refused(ResumeRefused::Invalid(m)) => {
+            ExecOpError::Core(Error::InvalidInput(match no_body_for {
+                Some(task) => format!(
+                    "{m}: the Pause `{task}` waits for onResume inputs, and the resume sent none; \
+                     send them in its body"
+                ),
+                None => m,
+            }))
+        }
+        Resumed::Refused(ResumeRefused::Moved) => ExecOpError::Core(Error::Conflict(format!(
+            "what execution {id} waits on changed between this request's read and its lock \
+             (another resume, a pause by hand, or a Pause that started waiting); reload it and \
+             resume again"
+        ))),
+    };
+    Err(refused.into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/resume",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    request_body(
+        description = "Optional. No body, `{}`, or `\"inputs\": null` resumes with no inputs. With `inputs` (JSON, `StartExecutionRequest`, at most 2 MiB; no `Content-Type` is read as JSON) or `multipart/form-data` (`StartExecutionMultipart`; one part per input id, a file part stored under the Pause run, at most `workflow.storage.max_file_bytes` + 1 MiB), the values are checked against the first waiting Pause's `onResume` as a start checks the flow's `inputs:`, and written to its outputs as `onResume`. **A Pause whose `onResume` has a required input with no default needs a body**: without one the resume is refused (400) naming that input.",
+        content(
+            (StartExecutionRequest = "application/json"),
+            (StartExecutionMultipart = "multipart/form-data"),
+        ),
+    ),
+    responses(
+        (status = 200, description = "Paused by hand: the execution is `RUNNING` again and runs on. A `Pause` waiting: the first one in run order ends `SUCCESS` with `outputs.onResume` (the checked values; a SECRET value is `******`, a FILE value the URI of the file stored under the Pause run) and `outputs.resumed` (`by`, `on`, `to`), whatever its `pauseDuration:` or `timeout:`; every other waiting `Pause` ends `SUCCESS` with `onResume: {}`; the execution then runs on. The body is its detail afterwards.", body = ExecutionDto),
+        (status = 400, description = "`resume_inputs_unexpected`: inputs (or any multipart part) were sent, and the execution is paused by hand, the waiting Pause declares no `onResume`, or no Pause waits (only a `LoopUntil`). No code: `inputs` is not a JSON object; an input is refused by the start check, or names no `onResume` input of the Pause (the message names it) -- including a required input with no default when no body was sent; the flow runs `egret.sql`, the waiting Pause declares `onResume`, and the caller is not the flow's creator; a SECRET input was given and this deployment has no `secrets.master_key`; or a multipart part is refused (it names no `onResume` input, names one twice, carries a file for a non-`FILE` input, or a file whose extension is not allowed). Nothing is written, and a file the request uploaded is deleted.", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed; or its flow is in the trash, or no longer exists at all. A disabled flow is not refused.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_paused`: the execution is not PAUSED, or its pause ended before the resume took the execution's lock. No code: it is PAUSED only because a `LoopUntil` waits for its next iteration and no `Pause` task is waiting; or what waits changed between the request's read and the execution's lock (another request resumed the Pause first, the execution was paused by hand since, or a Pause started waiting that declares `onResume` or while inputs were sent to an execution read as having none): reload it and resume again. A resume that changes nothing must not answer 200.", body = egret_core::http::ErrorBody),
+        (status = 413, description = "An uploaded file is over `workflow.storage.max_file_bytes`, a text part is over 1 MiB, or the JSON body is over 2 MiB. Nothing is written.", body = egret_core::http::ErrorBody),
+        (status = 415, description = "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+        (status = 503, description = "Internal storage failed while an uploaded file was being stored. Nothing is written; the request can be retried.", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Resume a `PAUSED` execution by hand, with `onResume` inputs when the
+/// waiting `Pause` declares them (package 7c D5-D7, D9; Kestra
+/// `ExecutionService.resume`, `ES:880-897`).
+///
+/// The `PAUSED` check is made twice: here off the scoped read (so a foreign
+/// id never reaches the unscoped worker, and the common refusal is cheap),
+/// and again by [`worker::resume_with`](crate::worker::resume_with) under the
+/// execution's lock, which decides the race with the waker and with another
+/// resume. The `egret.sql` gate (D7) and the trash gate (D9) come before the
+/// body is read, so a refused resume stores nothing; once files are stored
+/// under the `Pause` run (S2), every answer but a success deletes them.
+#[allow(clippy::result_large_err)]
+async fn resume_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    req: axum::extract::Request,
+) -> std::result::Result<Json<ExecutionDto>, axum::response::Response> {
+    use axum::response::IntoResponse as _;
+    let op = |e: ExecOpError| e.into_response();
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+        .await
+        .map_err(core_refusal)?;
+    let ws = ctx.workspace_id.0;
+    let before = st.executions.get(ws, id).await.map_err(core_refusal)?;
+    live_flow_of(&st, ws, &before).await.map_err(core_refusal)?;
+    if crate::worker::from_wire(&before.execution.state) != Some(RunState::Paused) {
+        return Err(op(ExecOpError::not_paused(id, &before.execution.state)));
+    }
+    let waiting = waiting_of(&before).map_err(core_refusal)?;
+    let (expected, task_id, on_resume) = match &waiting {
+        Waiting::Pause {
+            run,
+            task_id,
+            on_resume,
+        } => (Some(*run), Some(task_id.as_str()), on_resume.as_slice()),
+        Waiting::ByHand | Waiting::LoopOnly => (None, None, &[][..]),
+    };
+    // D7, before any body is read: inputs a creator's SQL can read are the
+    // creator's to give. Judged on the frozen source, which is what runs.
+    let parsed = if on_resume.is_empty() {
+        None
+    } else {
+        let flow = parse(&before.source).map_err(|e| {
+            core_refusal(Error::Internal(anyhow::anyhow!(
+                "execution {id}: its frozen source does not parse: {}",
+                e.message
+            )))
+        })?;
+        let mut conn = st
+            .db
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| core_refusal(Error::Internal(anyhow::Error::new(e))))?;
+        crate::worker::sql_principal::check_resume_inputs(
+            &mut conn,
+            &flow,
+            before.execution.flow_id,
+            ctx.principal.user_id.0,
+        )
+        .await
+        .map_err(core_refusal)?;
+        Some(flow)
+    };
+
+    // The body (D5, D6).
+    let request = Uuid::new_v4();
+    let (inputs, files, uploaded) = if is_multipart(req.headers()) {
+        match (&parsed, expected, task_id) {
+            (Some(flow), Some(run), Some(task_id)) => {
+                let sink = PartSink::Resume {
+                    execution: id,
+                    task_id,
+                    task_run: run,
+                    request,
+                };
+                let Uploaded { inputs, files } = receive_parts(
+                    ws,
+                    flow,
+                    on_resume,
+                    &format!("the Pause `{task_id}`"),
+                    &sink,
+                    req,
+                )
+                .await?;
+                let uploaded = if files.is_empty() {
+                    None
+                } else {
+                    crate::storage::current().and_then(|fs| sink_prefix(&fs, ws, flow, &sink))
+                };
+                (Some(inputs), files, uploaded)
+            }
+            // No `onResume` applies: any part is refused before anything is
+            // stored (T4 review, item 2).
+            _ => match multipart_first_part(req).await? {
+                Some(_) => return Err(op(resume_inputs_unexpected(id))),
+                None => (None, Vec::new(), None),
+            },
+        }
+    } else {
+        let inputs = match read_json_body(&st, req).await?.and_then(|b| b.inputs) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => match start_inputs(Some(Json(StartExecutionRequest { inputs: Some(v) })))
+                .map_err(core_refusal)?
+            {
+                serde_json::Value::Object(m) => Some(m),
+                // `start_inputs` answers an object or refuses.
+                _ => None,
+            },
+        };
+        // No `onResume` applies (paused by hand, a `Pause` without one, or
+        // only a `LoopUntil`): inputs are refused here, before the worker,
+        // as a multipart part is (T5 review C1). The worker refuses them
+        // again under the lock.
+        if on_resume.is_empty() && inputs.as_ref().is_some_and(|m| !m.is_empty()) {
+            return Err(op(resume_inputs_unexpected(id)));
+        }
+        (inputs, Vec::new(), None)
+    };
+
+    let outcome = crate::worker::resume_with(
+        &st.db.pool,
+        &crate::worker::ResumeRequest {
+            id,
+            inputs: inputs.as_ref(),
+            files: &files,
+            expected,
+        },
+    )
+    .await;
+    let answered = resume_answer(id, outcome, task_id.filter(|_| inputs.is_none()));
+    // Nothing was resumed: what this request stored goes too (T4 review,
+    // item 1) -- its own prefix only, never the execution's.
+    if answered.is_err() {
+        if let Some(prefix) = uploaded {
+            discard_prefix(prefix).await;
+        }
+    }
+    let resumed = answered?;
+    let by_hand = matches!(resumed, crate::worker::Resumed::ByHand);
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ws),
+        "workflow_execution:resume",
+        "workflow_execution",
+        Some(id.to_string()),
+        // Whether inputs were given, never their values (a SECRET among them).
+        serde_json::json!({
+            "from_state": before.execution.state,
+            "by_hand": by_hand,
+            "task_run_id": if by_hand { None } else { expected },
+            "inputs_given": inputs.as_ref().is_some_and(|m| !m.is_empty()),
+        }),
+    ));
+    let detail = st.executions.get(ws, id).await.map_err(core_refusal)?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/resume/validate",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    request_body(
+        description = "The inputs a resume would be given, as the resume's body: none, JSON (`StartExecutionRequest`, at most 2 MiB; no `Content-Type` is read as JSON) or `multipart/form-data` (`StartExecutionMultipart`). A file part is read and dropped: nothing is stored.",
+        content(
+            (StartExecutionRequest = "application/json"),
+            (StartExecutionMultipart = "multipart/form-data"),
+        ),
+    ),
+    responses(
+        (status = 200, description = "Every `onResume` input of the first waiting Pause, with the start check's errors; an empty body answers each with its default; an empty list when the execution is paused by hand or the Pause has no `onResume`. Nothing is stored: a file part is read and dropped, and its value is its file name. No audit. A SECRET input's `value` is `******`. `id` and `namespace` are the flow's.", body = ValidateInputsDto),
+        (status = 400, description = "`inputs` is not a JSON object, or a multipart part names no `onResume` input of the waiting Pause, names one twice, carries a file for a non-`FILE` input or with an extension that input does not allow, or is not readable.", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission (the resume's), or the workflows module is disabled for this workspace.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace; or its flow is in the trash, or no longer exists at all, as the resume answers.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_paused`: the execution is not PAUSED.", body = egret_core::http::ErrorBody),
+        (status = 413, description = "A part or the body is over its cap, as the resume's.", body = egret_core::http::ErrorBody),
+        (status = 415, description = "A `Content-Type` that is neither `application/json` nor `multipart/form-data`.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Check the inputs a resume would be given, without resuming (package 7c
+/// D8; Kestra's `validateResume` with `uploadFiles=false`): the start's
+/// validate answer for the first waiting `Pause`'s `onResume`.
+#[allow(clippy::result_large_err)]
+async fn validate_resume_inputs(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    req: axum::extract::Request,
+) -> std::result::Result<Json<ValidateInputsDto>, axum::response::Response> {
+    use axum::response::IntoResponse as _;
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+        .await
+        .map_err(core_refusal)?;
+    let ws = ctx.workspace_id.0;
+    let before = st.executions.get(ws, id).await.map_err(core_refusal)?;
+    live_flow_of(&st, ws, &before).await.map_err(core_refusal)?;
+    if crate::worker::from_wire(&before.execution.state) != Some(RunState::Paused) {
+        return Err(ExecOpError::not_paused(id, &before.execution.state).into_response());
+    }
+    let waiting = waiting_of(&before).map_err(core_refusal)?;
+    let (task_id, declared) = match &waiting {
+        Waiting::Pause {
+            task_id, on_resume, ..
+        } => (Some(task_id.as_str()), on_resume.as_slice()),
+        Waiting::ByHand | Waiting::LoopOnly => (None, &[][..]),
+    };
+    let flow = parse(&before.source).map_err(|e| {
+        core_refusal(Error::Internal(anyhow::anyhow!(
+            "execution {id}: its frozen source does not parse: {}",
+            e.message
+        )))
+    })?;
+    let posted = if is_multipart(req.headers()) {
+        let owner = match task_id {
+            Some(t) => format!("the Pause `{t}`"),
+            None => format!("execution {id}, which waits on no Pause task,"),
+        };
+        let Uploaded { inputs, .. } =
+            receive_parts(ws, &flow, declared, &owner, &PartSink::Discard, req).await?;
+        serde_json::Value::Object(inputs)
+    } else {
+        let body = read_json_body(&st, req).await?;
+        start_inputs(body.map(Json)).map_err(core_refusal)?
+    };
+    Ok(Json(inputs_answer(
+        declared_resume_inputs(&before.source, task_id),
+        &flow,
+        declared,
+        &posted,
     )))
 }
 
@@ -3458,7 +4077,15 @@ async fn replay_execution(
                 e.message
             )))
         })?;
-        let Uploaded { inputs, files } = receive_parts(ws, &parsed, new_id, req).await?;
+        let Uploaded { inputs, files } = receive_parts(
+            ws,
+            &parsed,
+            &parsed.inputs,
+            "the flow",
+            &PartSink::Start { execution: new_id },
+            req,
+        )
+        .await?;
         let uploaded_for = (!files.is_empty()).then_some(parsed);
         (
             crate::worker::ReplayInputs::Replace(serde_json::Value::Object(inputs)),
@@ -3505,7 +4132,7 @@ async fn replay_execution(
     };
     // Nothing was created: what the body stored goes too.
     if let (Err(_), Some(parsed)) = (&replacement, &uploaded_for) {
-        discard_uploads(ws, parsed, new_id).await;
+        discard_sink(ws, parsed, &PartSink::Start { execution: new_id }).await;
     }
     let replacement = replacement?;
     st.audit.emit(egret_audit::mutation_for(
@@ -3724,6 +4351,15 @@ pub const REPLAY_BREAKPOINTS_UNSUPPORTED_CODE: &str = "replay_breakpoints_unsupp
 pub const REPLAY_TASK_NOT_IN_SOURCE_CODE: &str = "replay_task_not_in_source";
 pub const FLOW_VERSION_NOT_FOUND_CODE: &str = "flow_version_not_found";
 pub const TASK_RUN_NOT_FOUND_CODE: &str = "task_run_not_found";
+/// Package 7c D3: a pause of an execution that is not `RUNNING` or
+/// `RESTARTED`, or that has a `Pause` or `LoopUntil` already waiting (Q5).
+pub const NOT_RUNNING_CODE: &str = "not_running";
+/// Package 7c D5, D8: a resume or a validate of an execution that is not
+/// `PAUSED`.
+pub const NOT_PAUSED_CODE: &str = "not_paused";
+/// Package 7c D5: inputs sent to a resume that takes none (paused by hand,
+/// or a waiting `Pause` without `onResume`).
+pub const RESUME_INPUTS_UNEXPECTED_CODE: &str = "resume_inputs_unexpected";
 
 /// Which source a replay or a restart into a new execution runs (spec D6,
 /// D11): the replayed execution's frozen source, the flow's current draft,
@@ -3866,6 +4502,17 @@ impl From<Error> for ExecOpError {
 impl ExecOpError {
     fn conflict(code: &'static str, message: String) -> Self {
         ExecOpError::Coded(StatusCode::CONFLICT, code, message)
+    }
+
+    /// Package 7c D5, D8: a resume or a validate of an execution that is not
+    /// `PAUSED`.
+    fn not_paused(id: Uuid, state: &str) -> Self {
+        Self::conflict(
+            NOT_PAUSED_CODE,
+            format!(
+                "execution {id} is {state}, not PAUSED; only a paused execution can be resumed"
+            ),
+        )
     }
 
     /// A loop iteration is a part of its root's run: 400, naming the root, as
@@ -4885,8 +5532,17 @@ pub fn management_router() -> Router<WorkflowState> {
             get(crate::storage::kv::routes::kv_revisions),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/{id}/pause",
+            post(pause_execution),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/resume",
-            post(resume_execution),
+            // As the start route: the handler limits each content type itself.
+            post(resume_execution).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/resume/validate",
+            post(validate_resume_inputs).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/replay",
@@ -4940,7 +5596,9 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::storage::routes::preview_execution_file,
         start_flow_execution,
         validate_execution_inputs,
+        pause_execution,
         resume_execution,
+        validate_resume_inputs,
         replay_execution,
         kill_execution,
         restart_execution,

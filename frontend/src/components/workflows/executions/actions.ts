@@ -37,9 +37,56 @@ function aPauseIsWaiting(execution: Pick<ExecutionDto, "runs">): boolean {
   );
 }
 
-/** Resume, for an execution that `showsResume`: enabled when a `Pause` task waits (spec §5.2). */
-export function canResume(execution: Pick<ExecutionDto, "runs">): Enablement {
-  return aPauseIsWaiting(execution) ? { ok: true } : { ok: false, reason: LOOP_WAIT_REASON };
+/** Resume, for an execution that `showsResume`: enabled when it was paused by hand or a `Pause` task waits (spec §5.2; 7c D1). */
+export function canResume(execution: Pick<ExecutionDto, "runs" | "paused_by_hand">): Enablement {
+  return execution.paused_by_hand || aPauseIsWaiting(execution) ? { ok: true } : { ok: false, reason: LOOP_WAIT_REASON };
+}
+
+type LoopFields = Pick<ExecutionListItemDto, "parent_execution_id" | "loop_index">;
+
+/** A loop iteration: a child with a `loop_index`. A subflow child has a parent but no index. */
+export function isLoopIteration(execution: LoopFields): boolean {
+  return execution.parent_execution_id != null && execution.loop_index != null;
+}
+
+const iterationReason = (execution: LoopFields, action: string) =>
+  `This is an iteration of a loop. ${action} the loop's execution ${execution.parent_execution_id} instead`;
+
+/**
+ * Pause by hand (package 7c, D3, D11): shown while the execution runs, and while it is being
+ * killed, where it is disabled with the reason (the server refuses `KILLING`).
+ */
+export function showsPause(execution: Pick<ExecutionDto, "state">): boolean {
+  return execution.state === "RUNNING" || execution.state === "RESTARTED" || execution.state === "KILLING";
+}
+
+export const PAUSE_KILLING_REASON = "The execution is being killed, so it cannot be paused";
+
+/** Spec Q5: the server refuses a manual pause while a run waits. */
+export const PAUSE_TASK_WAITING_REASON = "A Pause or LoopUntil task is already waiting, so the execution cannot be paused by hand";
+
+/** Pause, for an execution that `showsPause`: not while it is killed, not while a task waits, and not a loop iteration. */
+export function canPause(execution: Pick<ExecutionDto, "state" | "runs"> & LoopFields): Enablement {
+  if (execution.state === "KILLING") return { ok: false, reason: PAUSE_KILLING_REASON };
+  if (execution.runs.some((r) => r.state === "PAUSED")) return { ok: false, reason: PAUSE_TASK_WAITING_REASON };
+  return isLoopIteration(execution) ? { ok: false, reason: iterationReason(execution, "Pause") } : { ok: true };
+}
+
+/** One sentence for the pause route's coded refusal; `null` otherwise. */
+export function pauseRefusal(code: string | undefined): string | null {
+  return code === "not_running" ? "The execution is no longer running, so it cannot be paused. Refresh to see its latest state." : null;
+}
+
+/** One sentence for each coded refusal of the resume and resume-validate routes; `null` otherwise. */
+export function resumeRefusal(code: string | undefined): string | null {
+  switch (code) {
+    case "not_paused":
+      return "The execution is no longer paused. Refresh to see its latest state.";
+    case "resume_inputs_unexpected":
+      return "This execution takes no inputs to resume. Resume it without inputs.";
+    default:
+      return null;
+  }
 }
 
 /**
@@ -153,16 +200,6 @@ export type ChangeTarget = (typeof CHANGE_TARGETS)[number];
 export function changeTargets(current: string): ChangeTarget[] {
   return CHANGE_TARGETS.filter((s) => s !== current);
 }
-
-type LoopFields = Pick<ExecutionListItemDto, "parent_execution_id" | "loop_index">;
-
-/** A loop iteration: a child with a `loop_index`. A subflow child has a parent but no index. */
-export function isLoopIteration(execution: LoopFields): boolean {
-  return execution.parent_execution_id != null && execution.loop_index != null;
-}
-
-const iterationReason = (execution: LoopFields, action: string) =>
-  `This is an iteration of a loop. ${action} the loop's execution ${execution.parent_execution_id} instead`;
 
 /** Restart is shown for an execution that failed or waits (D10); a running or finished-well one has nothing to restart. */
 export function showsRestart(execution: Pick<ExecutionDto, "state">): boolean {

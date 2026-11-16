@@ -1,12 +1,12 @@
 import { lazy, useId, useMemo, useState, type ReactNode } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { CircleStop, History, Loader2, Pencil, Play, RotateCcw, RotateCw } from "lucide-react";
+import { CircleStop, History, Loader2, Pause as PauseIcon, Pencil, Play, RotateCcw, RotateCw } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
   useWorkflowGetExecution,
   useWorkflowKillExecution,
-  useWorkflowResumeExecution,
+  useWorkflowPauseExecution,
   useWorkflowSetExecutionStatus,
 } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
@@ -42,20 +42,23 @@ import { OutputsTree } from "@/components/workflows/executions/outputs/OutputsTr
 import {
   canChangeStatus,
   canKill,
+  canPause,
   canReplay,
   canRestart,
   canResume,
   type ChangeTarget,
   killFeedback,
-  resumeFeedback,
+  pauseRefusal,
   showsChangeStatus,
   showsKill,
+  showsPause,
   showsReplay,
   showsRestart,
   showsResume,
   stateChangeRefusal,
 } from "@/components/workflows/executions/actions";
 import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
+import { ResumeDialog } from "@/components/workflows/executions/ResumeDialog";
 import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
 import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
@@ -281,7 +284,12 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
       back={{ to: `${base}/executions`, label: "Executions" }}
       title={execution.id}
       titleClassName="min-w-0 truncate font-mono"
-      status={<StateChip state={execution.state} kind="execution" />}
+      status={
+        <span className="flex items-center gap-2">
+          <StateChip state={execution.state} kind="execution" />
+          {execution.paused_by_hand ? <span className="text-sm text-muted-foreground">Paused by hand</span> : null}
+        </span>
+      }
       meta={
         <dl data-testid="execution-summary" className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
           <Fact term="Flow">
@@ -352,7 +360,7 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
   );
 }
 
-type Pending = "resume" | "replay" | "kill" | "restart" | "status" | null;
+type Pending = "resume" | "pause" | "replay" | "kill" | "restart" | "status" | null;
 
 /** The kill route's 409 code: the execution ended before the kill reached it (workflow kill spec D3). */
 const EXECUTION_TERMINATED = "execution_terminated";
@@ -365,7 +373,7 @@ const KILL_NOT_APPLIED = "kill_not_applied";
  */
 function ExecutionActions({ ws, execution, now }: { ws: string; execution: ExecutionDto; now: number }) {
   const refresh = useRefreshExecution(ws, execution.id);
-  const resume = useWorkflowResumeExecution();
+  const pause = useWorkflowPauseExecution();
   const kill = useWorkflowKillExecution();
   const setStatus = useWorkflowSetExecutionStatus();
   const [open, setOpen] = useState<Pending>(null);
@@ -375,6 +383,8 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   const [killEnded, setKillEnded] = useState(false);
   const reasonsId = useId();
 
+  const pauseShown = showsPause(execution);
+  const pauseState = canPause(execution);
   const resumeShown = showsResume(execution);
   const resumeState = canResume(execution);
   const replayShown = showsReplay(execution);
@@ -388,16 +398,15 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   const statusShown = showsChangeStatus(execution);
   const statusState = canChangeStatus(execution);
 
-  const runResume = async () => {
-    const res = await resume.mutateAsync({ workspace: ws, id: execution.id });
-    if (res.status !== 200) throw new Error("The execution could not be resumed. Try again.");
-    refresh();
-    // The page stays, so a toast confirms it (FE-ACTION-2), in terms of the
-    // state the route answered, not of what was asked.
-    const feedback = resumeFeedback(res.data.state);
-    if (feedback.tone === "success") toast.success(feedback.message);
-    else toast.warning(feedback.message);
-  };
+  const runPause = () =>
+    runExecutionAction({
+      call: () => pause.mutateAsync({ workspace: ws, id: execution.id }),
+      expected: 200,
+      failure: "The execution could not be paused. Try again.",
+      refresh,
+      refusal: pauseRefusal,
+      onSuccess: () => toast.success("Paused the execution"),
+    });
 
   const runSetStatus = (state: ChangeTarget) =>
     runExecutionAction({
@@ -461,6 +470,12 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
             Replay
           </ReasonButton>
         ) : null}
+        {pauseShown ? (
+          <ReasonButton enablement={pauseState} reasonId={`${reasonsId}-pause`} variant="outline" onClick={() => setOpen("pause")}>
+            <PauseIcon aria-hidden />
+            Pause
+          </ReasonButton>
+        ) : null}
         {killShown ? (
           <ReasonButton
             enablement={killState}
@@ -483,17 +498,19 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
           ...(restartShown ? [{ id: `${reasonsId}-restart`, label: "Restart", enablement: restartState }] : []),
           ...(statusShown ? [{ id: `${reasonsId}-status`, label: "Change status", enablement: statusState }] : []),
           ...(replayShown ? [{ id: `${reasonsId}-replay`, label: "Replay", enablement: replayState }] : []),
+          ...(pauseShown ? [{ id: `${reasonsId}-pause`, label: "Pause", enablement: pauseState }] : []),
           ...(killShown ? [{ id: `${reasonsId}-kill`, label: "Kill", enablement: killState }] : []),
         ]}
       />
+      <ResumeDialog ws={ws} execution={execution} open={open === "resume"} onOpenChange={(o) => setOpen(o ? "resume" : null)} />
       <ConfirmAction
-        open={open === "resume"}
-        onOpenChange={(o) => setOpen(o ? "resume" : null)}
-        title="Resume this execution?"
-        description="Every paused task ends now as a success, whatever its duration or timeout, and the execution continues with the tasks after it."
-        confirmLabel="Resume"
-        onConfirm={runResume}
-        fallbackError="The execution could not be resumed. Try again."
+        open={open === "pause"}
+        onOpenChange={(o) => setOpen(o ? "pause" : null)}
+        title="Pause this execution?"
+        description="Runs that are already running finish; nothing new starts until you resume."
+        confirmLabel="Pause"
+        onConfirm={runPause}
+        fallbackError="The execution could not be paused. Try again."
       />
       <ReplayDialog ws={ws} execution={execution} mode="restart" open={open === "restart"} onOpenChange={(o) => setOpen(o ? "restart" : null)} />
       <ChangeStateDialog

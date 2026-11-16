@@ -104,6 +104,41 @@ pub async fn upload_input(
     file_name: &str,
     body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
 ) -> std::result::Result<StoredFile, UploadError> {
+    admit(input, file_name)?;
+    let uri = uri::input_uri(namespace, flow_id, execution, &input.id, file_name)
+        .map_err(|e| UploadError::Author(format!("Invalid value for input `{}`: {e}", input.id)))?;
+    store(fs, workspace, uri, input, file_name, body).await
+}
+
+/// Stream one uploaded part for a FILE `onResume` input of the `Pause` run
+/// `task_run` (package 7c S2) to
+/// `tasks/{task-slug}/{task_run}/resume/{request}/{input}/{file}`
+/// ([`uri::resume_input_uri`]), with [`upload_input`]'s checks and cap.
+#[allow(clippy::too_many_arguments)]
+pub async fn upload_resume_input(
+    fs: &FileStore,
+    workspace: Uuid,
+    namespace: &str,
+    flow_id: &str,
+    execution: Uuid,
+    task_id: &str,
+    task_run: Uuid,
+    request: Uuid,
+    input: &Input,
+    file_name: &str,
+    body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+) -> std::result::Result<StoredFile, UploadError> {
+    admit(input, file_name)?;
+    let uri = uri::resume_input_uri(
+        namespace, flow_id, execution, task_id, task_run, request, &input.id, file_name,
+    )
+    .map_err(|e| UploadError::Author(format!("Invalid value for input `{}`: {e}", input.id)))?;
+    store(fs, workspace, uri, input, file_name, body).await
+}
+
+/// The checks before a byte is stored: a FILE input, a file name, an
+/// extension `allowedFileExtensions` accepts.
+pub(crate) fn admit(input: &Input, file_name: &str) -> std::result::Result<(), UploadError> {
     if input.r#type != InputType::File {
         return Err(UploadError::Author(format!(
             "Invalid value for input `{}`: a file was uploaded for it, and it is not a FILE input",
@@ -116,9 +151,18 @@ pub async fn upload_input(
             input.id
         )));
     }
-    extension_allowed(input, file_name).map_err(UploadError::Author)?;
-    let uri = uri::input_uri(namespace, flow_id, execution, &input.id, file_name)
-        .map_err(|e| UploadError::Author(format!("Invalid value for input `{}`: {e}", input.id)))?;
+    extension_allowed(input, file_name).map_err(UploadError::Author)
+}
+
+/// Stream `body` to `uri`'s object under the cap, then head it.
+async fn store(
+    fs: &FileStore,
+    workspace: Uuid,
+    uri: String,
+    input: &Input,
+    file_name: &str,
+    body: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+) -> std::result::Result<StoredFile, UploadError> {
     let object = fs
         .object_uri(workspace, &uri)
         .map_err(|e| UploadError::Author(format!("Invalid value for input `{}`: {e}", input.id)))?;
@@ -245,10 +289,25 @@ pub async fn check_file_inputs(
     inputs: &serde_json::Value,
     uploaded: &[StoredFile],
 ) -> Result<std::result::Result<(), String>> {
+    check_file_values(conn, workspace, execution, &flow.inputs, inputs, uploaded).await
+}
+
+/// [`check_file_inputs`] against any declared list -- a `Pause`'s
+/// `onResume` (package 7c D6) as well as a flow's `inputs:`. `uploaded` are
+/// the files stored for this request, indexed after the check in the same
+/// transaction.
+pub async fn check_file_values(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    execution: Uuid,
+    declared: &[Input],
+    values: &serde_json::Value,
+    uploaded: &[StoredFile],
+) -> Result<std::result::Result<(), String>> {
     let uploaded: BTreeSet<&str> = uploaded.iter().map(|f| f.uri.as_str()).collect();
     let mut given: Vec<(&Input, String)> = Vec::new();
-    for input in flow.inputs.iter().filter(|i| i.r#type == InputType::File) {
-        match inputs.get(&input.id) {
+    for input in declared.iter().filter(|i| i.r#type == InputType::File) {
+        match values.get(&input.id) {
             None | Some(serde_json::Value::Null) => {}
             Some(serde_json::Value::String(s)) => given.push((input, s.clone())),
             Some(other) => {

@@ -168,7 +168,6 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
                     "io.kestra.plugin.core.flow.Subflow",
                     "revision" | "labels" | "inheritLabels" | "scheduleDate" | "restartBehavior",
                 ) => Some(Package(12)),
-                ("io.kestra.plugin.core.flow.Pause", "onResume") => Some(Package(9)),
                 _ => None,
             }
         }
@@ -694,7 +693,7 @@ impl Walk<'_> {
                     match kind {
                         Kind::Input => {
                             self.seen.inputs += 1;
-                            self.input(id, o);
+                            self.input("inputs", id, o);
                         }
                         Kind::Output => {
                             self.seen.outputs += 1;
@@ -894,7 +893,7 @@ impl Walk<'_> {
     /// An input's keys (spec 3.5): [`input_keys`] for its type are read; a key
     /// Kestra has on that type and egret drops warns with its package; any
     /// other, including a key of another input subtype, is `unknown_property`.
-    fn input(&mut self, id: &str, input: &serde_json::Map<String, Value>) {
+    fn input(&mut self, list: &str, id: &str, input: &serde_json::Map<String, Value>) {
         let Some(ty) = input
             .get("type")
             .and_then(Value::as_str)
@@ -905,7 +904,7 @@ impl Walk<'_> {
         // `dependsOn` is `DependsOn(inputs, condition)` (`k/core/models/flows/DependsOn.java:15-17`).
         if let Some(Value::Object(dep)) = input.get("dependsOn") {
             let read = wire_fields_of::<models::DependsOn>();
-            let at = format!("inputs.{id}.dependsOn");
+            let at = format!("{list}.{id}.dependsOn");
             self.bean(&format!("input '{id}': dependsOn"), &at, dep, &read, None);
         }
         let read = input_keys(ty);
@@ -913,7 +912,7 @@ impl Walk<'_> {
             if read.contains(&key) {
                 continue;
             }
-            let at = format!("inputs.{id}.{key}");
+            let at = format!("{list}.{id}.{key}");
             if let Some(lift) = lift_of(Site::Input(ty), key) {
                 self.report.warnings.push(Finding {
                     code: "not_honoured",
@@ -993,6 +992,21 @@ impl Walk<'_> {
                     };
                     self.seen.outputs += 1;
                     self.output(oid, o, &list);
+                }
+            }
+        }
+        // Package 7c D4: `Pause.onResume` is a list of the flow's `Input` bean,
+        // checked key by key as `inputs:` is.
+        if row == "io.kestra.plugin.core.flow.Pause" {
+            if let Some(Value::Array(items)) = t.get("onResume") {
+                let list = format!("{path}.onResume");
+                for item in items {
+                    let Some(o) = item.as_object() else { continue };
+                    let Some(iid) = o.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    self.seen.inputs += 1;
+                    self.input(&list, iid, o);
                 }
             }
         }
@@ -1342,7 +1356,7 @@ mod tests {
         );
         assert_eq!(
             lift_of(Site::Task("io.kestra.plugin.core.flow.Pause"), "onResume"),
-            Some(Package(9))
+            None
         );
         assert_eq!(
             lift_of(
@@ -1532,11 +1546,12 @@ mod tests {
     }
 
     /// A key Kestra accepts and egret ignores is a warning that names who
-    /// lifts it (D2, D12): `onResume` is #9's, `logLevel` #13's.
+    /// lifts it (D2, D12): `logLevel` is #13's (`onResume` is honoured
+    /// since package 7c).
     /// `warningOnRetry` is #13's too (Task 3).
     #[test]
     fn a_key_kestra_accepts_and_egret_ignores_is_not_honoured_and_names_its_package() {
-        let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    logLevel: INFO\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 2\n      warningOnRetry: true\n  - id: gate\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    onResume:\n      - id: ok\n        type: BOOLEAN\n";
+        let source = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n    message: hi\n    logLevel: INFO\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 2\n      warningOnRetry: true\n  - id: gate\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
         let flow = crate::spec::parse(source).unwrap();
         let report = crate::spec::validate_source(source, &flow);
         let got: Vec<_> = report
@@ -1552,9 +1567,8 @@ mod tests {
                 .1
         };
         assert!(at("tasks.t.logLevel").contains("roadmap package #13 lifts it"));
-        assert!(at("tasks.gate.onResume").contains("roadmap package #9 lifts it"));
         assert!(at("tasks.t.retry.warningOnRetry").contains("roadmap package #13 lifts it"));
-        assert_eq!(got.len(), 3, "{got:#?}");
+        assert_eq!(got.len(), 2, "{got:#?}");
         assert!(report.warnings.iter().all(|w| w.code != "ignored_property"));
     }
 
@@ -1892,12 +1906,13 @@ mod tests {
     }
 
     #[test]
-    fn pause_on_resume_warns_and_pause_tasks_is_refused_once() {
+    fn pause_on_resume_is_honoured_and_pause_tasks_is_refused_once() {
         let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n");
         assert!(r.errors.is_empty(), "{r:?}");
         assert!(
-            r.warnings.iter().any(|w| w.path == "tasks.p.onResume"
-                && w.message.ends_with("roadmap package #9 lifts it")),
+            r.warnings
+                .iter()
+                .all(|w| !w.path.starts_with("tasks.p.onResume")),
             "{r:?}"
         );
         let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n");
@@ -1907,6 +1922,17 @@ mod tests {
                 .filter(|e| e.path == "tasks.p.tasks")
                 .count(),
             1,
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_in_an_on_resume_input_is_refused_at_its_path() {
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n        colour: red\n");
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.code == "unknown_property" && e.path == "tasks.p.onResume.ok.colour"),
             "{r:?}"
         );
     }

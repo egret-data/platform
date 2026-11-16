@@ -116,6 +116,38 @@ const optString = (v: unknown) => (typeof v === "string" && v !== "" ? v : undef
 const optBound = (v: unknown) =>
   typeof v === "number" ? String(v) : v instanceof Date ? v.toISOString() : optString(v);
 
+/** One `inputs:` (or `onResume:`) entry of a flow's YAML as the form's model; `null` for one with no string `id` or `type`. */
+export function runInputFrom(item: unknown): RunInput | null {
+  if (!isRecord(item) || typeof item.id !== "string" || typeof item.type !== "string") return null;
+  const type = item.type;
+  const listed = item.values ?? (type === "MULTISELECT" ? item.options : undefined);
+  const defaults = item.defaults;
+  const initial = item.prefill ?? defaults;
+  return {
+    id: item.id,
+    type,
+    displayName: optString(item.displayName),
+    description: optString(item.description),
+    required: item.required !== false,
+    initial: isExpression(initial) ? undefined : initial,
+    hasDefault: defaults != null,
+    expressionDefault: isExpression(defaults) ? defaults : undefined,
+    values: Array.isArray(listed) ? listed.map(String) : [],
+    valuesExpression: typeof listed === "string" ? listed : undefined,
+    itemType: optString(item.itemType),
+    dependsOn: item.dependsOn != null,
+    allowedFileExtensions: Array.isArray(item.allowedFileExtensions)
+      ? item.allowedFileExtensions.map(String)
+      : undefined,
+    min: optBound(item.min),
+    max: optBound(item.max),
+    after: optBound(item.after),
+    before: optBound(item.before),
+    validator: optString(item.validator),
+    allowCustomValue: item.allowCustomValue === true,
+  };
+}
+
 /** The `inputs:` of a flow's YAML. A source that does not parse is an error, never "no inputs". */
 export function inputsFromSource(source: string): { inputs: RunInput[] } | { error: string } {
   let doc: unknown;
@@ -128,37 +160,7 @@ export function inputsFromSource(source: string): { inputs: RunInput[] } | { err
   const raw = doc.inputs;
   if (raw == null) return { inputs: [] };
   if (!Array.isArray(raw)) return { error: "The flow's `inputs` is not a list." };
-  const inputs: RunInput[] = [];
-  for (const item of raw) {
-    if (!isRecord(item) || typeof item.id !== "string" || typeof item.type !== "string") continue;
-    const type = item.type;
-    const listed = item.values ?? (type === "MULTISELECT" ? item.options : undefined);
-    const defaults = item.defaults;
-    const initial = item.prefill ?? defaults;
-    inputs.push({
-      id: item.id,
-      type,
-      displayName: optString(item.displayName),
-      description: optString(item.description),
-      required: item.required !== false,
-      initial: isExpression(initial) ? undefined : initial,
-      hasDefault: defaults != null,
-      expressionDefault: isExpression(defaults) ? defaults : undefined,
-      values: Array.isArray(listed) ? listed.map(String) : [],
-      valuesExpression: typeof listed === "string" ? listed : undefined,
-      itemType: optString(item.itemType),
-      dependsOn: item.dependsOn != null,
-      allowedFileExtensions: Array.isArray(item.allowedFileExtensions)
-        ? item.allowedFileExtensions.map(String)
-        : undefined,
-      min: optBound(item.min),
-      max: optBound(item.max),
-      after: optBound(item.after),
-      before: optBound(item.before),
-      validator: optString(item.validator),
-      allowCustomValue: item.allowCustomValue === true,
-    });
-  }
+  const inputs = raw.map(runInputFrom).filter((i): i is RunInput => i !== null);
   return { inputs };
 }
 

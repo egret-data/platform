@@ -42,6 +42,7 @@ function execution(extra: Partial<ExecutionDto> = {}): ExecutionDto {
     runs: [],
     can_manage: true,
     worker_enabled: true,
+    paused_by_hand: false,
     ...extra,
   } as ExecutionDto;
 }

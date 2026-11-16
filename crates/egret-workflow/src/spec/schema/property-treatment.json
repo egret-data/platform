@@ -645,7 +645,7 @@
       "logLevel": "ignored",
       "logToFile": "ignored",
       "onPause": "refused",
-      "onResume": "ignored",
+      "onResume": "honoured",
       "pauseDuration": "honoured",
       "policyRefs": "ignored",
       "retry": "honoured",
