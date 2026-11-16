@@ -21,6 +21,7 @@ pub mod engine_images;
 pub mod error;
 pub mod eval;
 pub mod model;
+pub mod owners;
 pub mod plugin_report;
 pub mod store;
 
@@ -43,6 +44,9 @@ pub use engine_images::{
     MIN_SUPPORTED_RANGER_PLUGIN,
 };
 pub use error::PermError;
+pub use owners::{
+    get_owner_via, list_owners_for_catalogs_via, owner_grant, set_owner_via, Owner, OWNER_ACTIONS,
+};
 pub use plugin_report::{ranger_plugin_report, PluginReport};
 // **`evaluate` is deliberately NOT re-exported here (SP4d-2a Task 5).** It was
 // the function `/perm/explain` answered with, and `explain` now evaluates the
