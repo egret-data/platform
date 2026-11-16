@@ -1,7 +1,7 @@
 import { useId, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
-import { ChevronDown, ChevronRight, GitFork, History, ListTree, MoreHorizontal, Pencil, RotateCw, TextCursorInput } from "lucide-react";
+import { ChevronDown, ChevronRight, GitFork, History, ListTree, MoreHorizontal, Pencil, RotateCw, TextCursorInput, Trash2 } from "lucide-react";
 import { useWorkflowListExecutions, useWorkflowSetTaskRunState } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, ExecutionListItemDto, TaskRunDto } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -25,6 +25,7 @@ import {
 } from "@/components/workflows/executions/actions";
 import { ChangeStateDialog } from "@/components/workflows/executions/ChangeStateDialog";
 import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
+import { DeleteLogsDialog } from "@/components/workflows/executions/logs/DeleteLogsDialog";
 import {
   INSIDE_WORKING_DIRECTORY_REASON,
   insideWorkingDirectory,
@@ -373,11 +374,16 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
   const setState = useWorkflowSetTaskRunState();
   const [changing, setChanging] = useState<TaskRunDto | null>(null);
   const [replaying, setReplaying] = useState<TaskRunDto | null>(null);
+  // The run stays set while the dialog closes, so its words do not change as it fades.
+  const [deletingLogs, setDeletingLogs] = useState<TaskRunDto | null>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
   // The route refuses each of these too; the page offers the action only where it can work (D11).
   const changeable = canManage && showsChangeTaskRunState(execution) && canChangeTaskRunState(execution).ok;
   // Replay from a task is offered where the whole replay is, and not on a loop iteration (its loop's execution replays).
   const replayable = canManage && showsReplayFromTask(execution) && canReplay(execution).ok && !isLoopIteration(execution);
-  const hasActions = changeable || replayable;
+  // A run's logs can be deleted whatever the execution's state (package 7d D8): lines written later stay.
+  const logsDeletable = canManage;
+  const hasActions = changeable || replayable || logsDeletable;
   // The server refuses a replay from a run beneath a WorkingDirectory (`inside_working_directory`),
   // judged on the frozen source: the item says so instead of offering a call that cannot work.
   const workingDirectories = useMemo(() => (replayable ? workingDirectoryTaskIds(execution.source) : new Set<string>()), [replayable, execution.source]);
@@ -460,6 +466,17 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
                         </DropdownMenuItem>
                       )
                     ) : null}
+                    {logsDeletable ? (
+                      <DropdownMenuItem
+                        onSelect={() => {
+                          setDeletingLogs(run);
+                          setLogsOpen(true);
+                        }}
+                      >
+                        <Trash2 aria-hidden className="mr-2 size-4" />
+                        Delete logs
+                      </DropdownMenuItem>
+                    ) : null}
                   </DropdownMenuContent>
                 </DropdownMenu>
               </TableCell>
@@ -489,6 +506,19 @@ function TaskRuns({ ws, execution, now, canManage }: { ws: string; execution: Ex
         if (!o) setReplaying(null);
       }}
     />
+    {logsDeletable ? (
+      <DeleteLogsDialog
+        ws={ws}
+        executionId={execution.id}
+        filters={{ taskRunId: deletingLogs?.id }}
+        scope={deletingLogs ? `the logs of ${deletingLogs.task_id} #${deletingLogs.run_ix}` : "the logs of this task run"}
+        open={logsOpen}
+        onOpenChange={setLogsOpen}
+        onDeleted={() => {
+          if (deletingLogs) toast.success(`Deleted the logs of ${deletingLogs.task_id} #${deletingLogs.run_ix}`);
+        }}
+      />
+    ) : null}
     </>
   );
 }

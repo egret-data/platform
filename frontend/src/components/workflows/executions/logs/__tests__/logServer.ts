@@ -58,6 +58,8 @@ export class LogServer {
   failures = 0;
   /** Other routes, `GET` by path (the execution page's own read). */
   others = new Map<string, Reply>();
+  /** The query of each `DELETE …/logs` (package 7d D8), answered 204. */
+  deletes: URLSearchParams[] = [];
   private served = 0;
 
   install(): this {
@@ -67,6 +69,10 @@ export class LogServer {
         // As a real fetch does: an aborted request rejects.
         init?.signal?.throwIfAborted();
         const [path, qs] = String(input).split("?");
+        if ((init?.method ?? "GET").toUpperCase() === "DELETE" && path === LOGS_PATH) {
+          this.deletes.push(new URLSearchParams(qs ?? ""));
+          return new Response(null, { status: 204 });
+        }
         if (path !== LOGS_PATH) {
           const other = this.others.get(path) ?? { status: 404, body: { error: `no route ${path}` } };
           return new Response(JSON.stringify(other.body), { status: other.status, headers: { "content-type": "application/json" } });

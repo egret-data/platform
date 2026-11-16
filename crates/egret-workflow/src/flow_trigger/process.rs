@@ -190,6 +190,8 @@ struct SourceRow {
     loop_index: Option<i32>,
     /// The execution's own labels (migration 0192), beyond its flow's.
     labels: Option<serde_json::Value>,
+    /// Package 7d D6: `labels` is the whole visible list.
+    labels_replaced: bool,
     /// The execution's flow outputs (migration 0214, package #6), SECRET
     /// values masked; `NULL` when none were evaluated.
     outputs: Option<serde_json::Value>,
@@ -791,7 +793,7 @@ async fn load_source(
 ) -> Result<(Source, RenderContext)> {
     let row: SourceRow = sqlx::query_as(
         "SELECT e.workspace_id, e.namespace, e.flow_key, e.execution_depth, e.created_at, e.updated_at, \
-                e.source, e.loop_index, e.labels, e.outputs, \
+                e.source, e.loop_index, e.labels, e.labels_replaced, e.outputs, \
                 (SELECT r.task_id FROM workflow.task_runs r \
                   WHERE r.execution_id = e.id ORDER BY r.run_ix DESC LIMIT 1) AS last_task_id \
            FROM workflow.executions e WHERE e.id = $1",
@@ -805,9 +807,10 @@ async fn load_source(
     let flow_labels = crate::spec::parse(&row.source)
         .map(|f| f.labels)
         .unwrap_or_default();
-    let labels = crate::labels::execution_labels(
+    let labels = crate::labels::visible_labels(
         &flow_labels,
         &crate::labels::own_labels(row.labels.as_ref()),
+        row.labels_replaced,
     );
     let execution = SourceExecution {
         id: ev.source_execution_id,

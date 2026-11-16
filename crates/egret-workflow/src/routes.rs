@@ -28,7 +28,10 @@
 //! POST   /api/ws/{workspace}/workflows/flows/{id}/executions/validate
 //! GET    /api/ws/{workspace}/workflows/executions
 //! GET    /api/ws/{workspace}/workflows/executions/{id}
+//! DELETE /api/ws/{workspace}/workflows/executions/{id}
 //! GET    /api/ws/{workspace}/workflows/executions/{id}/logs
+//! DELETE /api/ws/{workspace}/workflows/executions/{id}/logs
+//! GET    /api/ws/{workspace}/workflows/executions/{id}/logs/download
 //! GET    /api/ws/{workspace}/workflows/executions/{id}/file          (storage::routes)
 //! GET    /api/ws/{workspace}/workflows/executions/{id}/file/metas
 //! GET    /api/ws/{workspace}/workflows/executions/{id}/file/preview
@@ -38,6 +41,7 @@
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/restart
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/state
 //! POST   /api/ws/{workspace}/workflows/executions/{id}/status
+//! POST   /api/ws/{workspace}/workflows/executions/{id}/labels
 //! ```
 //!
 //! Mounted under `/ws/{workspace}/workflows/...` here, **not**
@@ -83,7 +87,7 @@
 use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -1596,7 +1600,9 @@ pub struct ExecutionListItemDto {
     /// the labels beyond the flow's own `labels:` (a backfill's, a replay's
     /// copy); once a `Labels` task has run it holds the full merged list, the
     /// flow's labels included. The detail's `effective_labels` is the list to
-    /// display.
+    /// display. Once a person replaced the labels (`POST …/labels`, package
+    /// 7d), it holds the whole visible list, the flow's labels included or
+    /// removed.
     pub labels: Option<Vec<LabelDto>>,
     /// The backfill that fired this execution (W7f), `null` otherwise.
     pub backfill_id: Option<Uuid>,
@@ -1824,7 +1830,9 @@ pub struct ExecutionDto {
     // while the execution is still readable.
     pub can_manage: bool,
     /// What the run sees as `labels`: the flow's, then `labels`, the later key
-    /// winning. Empty when the frozen source does not parse.
+    /// winning; or, once a person replaced them (`POST …/labels`), exactly
+    /// `labels`. Empty when the frozen source does not parse and nothing was
+    /// replaced.
     pub effective_labels: Vec<LabelDto>,
     /// Whether this deployment runs the workflow worker
     /// (`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by
@@ -1838,6 +1846,11 @@ pub struct ExecutionDto {
     /// every other state.
     // Package 7c D1/D11: the rule is `executor::paused_by_hand_of`'s.
     pub paused_by_hand: bool,
+    /// `true` when the execution has ended and no task run of it is still
+    /// running, `afterExecution:` runs included (`workflow.execution_is_idle`).
+    /// Delete and Edit labels need it; the routes check again.
+    // Package 7d D10 (plan S7).
+    pub idle: bool,
 }
 
 impl ExecutionDto {
@@ -1851,10 +1864,15 @@ impl ExecutionDto {
             .ok()
             .map(|f| f.labels)
             .unwrap_or_default();
-        let effective_labels = crate::labels::execution_labels(&flow_labels, &own)
-            .into_iter()
-            .map(LabelDto::from)
-            .collect();
+        let effective_labels =
+            crate::labels::visible_labels(&flow_labels, &own, d.execution.labels_replaced)
+                .into_iter()
+                .map(LabelDto::from)
+                .collect();
+        let terminal = |s: &str| crate::worker::from_wire(s).is_some_and(RunState::is_terminal);
+        // `d.runs` already leaves out the rows a restart emptied (`ExecutionRepo::task_runs`),
+        // which is what `workflow.execution_is_idle` ignores (migration 0225).
+        let idle = terminal(&d.execution.state) && d.runs.iter().all(|r| terminal(&r.state));
         Self {
             effective_labels,
             execution: ExecutionListItemDto::from(d.execution),
@@ -1864,6 +1882,7 @@ impl ExecutionDto {
             can_manage,
             worker_enabled,
             paused_by_hand,
+            idle,
         }
     }
 }
@@ -2289,6 +2308,421 @@ async fn get_execution_logs(
         execution_state: status.state,
         complete: status.complete,
     }))
+}
+
+// ---------- Delete, labels, log download, log delete (package 7d) ----------
+//
+// DELETE /api/ws/{workspace}/workflows/executions/{id}
+// POST   /api/ws/{workspace}/workflows/executions/{id}/labels
+// GET    /api/ws/{workspace}/workflows/executions/{id}/logs/download
+// DELETE /api/ws/{workspace}/workflows/executions/{id}/logs
+//
+// None of the four looks at the flow (plan S13): a trashed or purged flow
+// blocks nothing, as `GET …/logs` does not look at it either.
+
+/// `DELETE …/executions/{id}`'s query (package 7d D1, Q5; Kestra's
+/// `deleteLogs`, `deleteMetrics`, `deleteStorage`).
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[serde(rename_all = "camelCase")]
+// The handler takes `Result<Query<…>, _>`, which utoipa cannot read the
+// parameter location from.
+#[into_params(parameter_in = Query, rename_all = "camelCase")]
+pub struct DeleteExecutionQuery {
+    /// Default true: also delete the stored files of the execution, its loop
+    /// iterations and its retries.
+    pub delete_storage: Option<bool>,
+    /// Default true. `false` is refused (400 `delete_logs_required`): an
+    /// execution's logs always go with it.
+    pub delete_logs: Option<bool>,
+    /// Accepted for Kestra compatibility; egret keeps no metrics.
+    pub delete_metrics: Option<bool>,
+}
+
+/// `GET …/executions/{id}/logs/download`'s query (package 7d D7): the
+/// filters of `GET …/logs`, without its cursor and limit.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct LogDownloadQuery {
+    /// Only lines of this task (the YAML's task `id`).
+    pub task_id: Option<String>,
+    /// Only lines of this task run.
+    pub task_run_id: Option<Uuid>,
+    /// Only lines at this level or above. The five names, upper case, compared
+    /// case-sensitively; anything else is a 400.
+    pub min_level: Option<LogLevel>,
+}
+
+/// `DELETE …/executions/{id}/logs`' query (package 7d D8): every given
+/// filter must match (they are ANDed); none given deletes every line.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct DeleteLogsQuery {
+    /// Only lines of this task (the YAML's task `id`).
+    pub task_id: Option<String>,
+    /// Only lines of this task run.
+    pub task_run_id: Option<Uuid>,
+    /// Only lines of this attempt, 0-based as `LogLineDto.attempt`.
+    pub attempt: Option<i32>,
+    /// Only lines at this level or above. The five names, upper case, compared
+    /// case-sensitively; anything else is a 400.
+    pub min_level: Option<LogLevel>,
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/workflows/executions/{id}",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        DeleteExecutionQuery,
+    ),
+    responses(
+        (status = 204, description = "Deleted, with its loop iterations and retries, their task runs, logs and file index; with `deleteStorage` (the default) their stored files too. Executions its Flow triggers fired are kept, their link to it cleared. Nothing is killed: only an ended execution can be deleted."),
+        (status = 400, description = "`delete_logs_required`: `deleteLogs=false` (an execution's logs always go with it); or a flag that is not `true`/`false`, or a malformed `{id}` (no code)", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed. A flow in the trash or deleted does not matter.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_terminated`: the execution, or a loop iteration or retry of it, has not ended or still runs `afterExecution:` tasks; or its Flow triggers have not all heard it ended (try again in a minute). `has_dependents`: subflow children, replays or restarts into a new execution point at it; `details.executions` names up to 20, `details.total` counts them; delete them first. An execution a Flow trigger fired from it does not block: it is kept and its link to this execution is cleared. `not_a_root`: a loop iteration or retry; `details.root` is the execution to delete. Nothing is deleted.", body = DetailedErrorBody),
+        (status = 500, description = "Internal error, including the file store failing: nothing was deleted, and the call can be repeated", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Delete an ended execution and its family (package 7d D1-D4, D9; Kestra
+/// `ExecutionController.delete`).
+///
+/// Every check is the worker's, under the execution's lock
+/// ([`worker::delete_execution`](crate::worker::delete_execution), plan S5):
+/// the route reads nothing but the permission and the query.
+async fn delete_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    query: std::result::Result<
+        Query<DeleteExecutionQuery>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> std::result::Result<StatusCode, ExecOpError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let Query(q) = query.map_err(|r| {
+        ExecOpError::Core(Error::InvalidInput(format!(
+            "deleteStorage, deleteLogs and deleteMetrics are true or false: {}",
+            r.body_text()
+        )))
+    })?;
+    // Q5: logs cascade with the row; keeping them is not possible.
+    if q.delete_logs == Some(false) {
+        return Err(ExecOpError::Coded(
+            StatusCode::BAD_REQUEST,
+            DELETE_LOGS_REQUIRED_CODE,
+            "an execution's logs are always deleted with it in egret; omit deleteLogs or pass true"
+                .to_string(),
+        ));
+    }
+    let ws = ctx.workspace_id.0;
+    let delete_storage = q.delete_storage.unwrap_or(true);
+    let fs = crate::storage::current();
+    let req = crate::worker::DeleteRequest {
+        workspace: ws,
+        id,
+        delete_storage,
+    };
+    // Every check is the worker's, under the lock (plan S5); a foreign or
+    // missing id is its `NotFound`, a 404.
+    let done = match crate::worker::delete_execution(&st.db.pool, fs.as_deref(), req).await? {
+        Ok(done) => done,
+        Err(refused) => return Err(ExecOpError::from_delete_refusal(id, refused)),
+    };
+    // The names go in the detail: the row is gone, and the trail is the
+    // only record left of what this id was (as `purge_flow`). No value.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ws),
+        "workflow_execution:delete",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({
+            "namespace": done.namespace,
+            "flow_key": done.flow_key,
+            "state": done.state,
+            "delete_storage": delete_storage,
+            "executions": done.executions,
+            "files": done.files,
+            "detached": done.detached,
+        }),
+    ));
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/labels",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    request_body(
+        content = Vec<LabelDto>,
+        description = "The whole list the execution shows afterwards: it replaces the visible labels, the flow's included. Each key is a lower-case letter then letters, digits, `.`, `_`, `-` (a key the execution already shows may be sent back as it is); values are non-empty; at most 50 labels, keys of 128 and values of 1024 characters. `system.*` labels the execution has are kept whether sent or not; one sent must be unchanged."
+    ),
+    responses(
+        (status = 200, description = "Its detail afterwards; `effective_labels` is the new list.", body = ExecutionDto),
+        (status = 400, description = "`invalid_labels`, naming the label; or a body that is not a list of `{key, value}` (no code)", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed. A flow in the trash or deleted does not matter.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_terminated`: it has not ended, or still runs `afterExecution:` tasks. Nothing is written.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Replace an ended execution's labels (package 7d D5; Kestra
+/// `ExecutionController.setLabelsOnTerminatedExecution`).
+async fn set_execution_labels(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    body: std::result::Result<Json<Vec<LabelDto>>, axum::extract::rejection::JsonRejection>,
+) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let Json(body) = body.map_err(|r| {
+        ExecOpError::Core(Error::InvalidInput(format!(
+            "the body is not a JSON list of `{{\"key\": …, \"value\": …}}`: {}",
+            r.body_text()
+        )))
+    })?;
+    let ws = ctx.workspace_id.0;
+    let labels: Vec<crate::models::Label> = body
+        .into_iter()
+        .map(|l| crate::models::Label {
+            key: l.key,
+            value: l.value,
+        })
+        .collect();
+    let set = match crate::worker::set_execution_labels(&st.db.pool, ws, id, &labels).await? {
+        Ok(set) => set,
+        Err(crate::worker::LabelsRefused::NotIdle(state)) => {
+            return Err(ExecOpError::conflict(
+                NOT_TERMINATED_CODE,
+                format!(
+                    "execution {id} is {state} or still has running tasks (afterExecution \
+                     included); its labels can be edited once it has ended"
+                ),
+            ))
+        }
+        Err(crate::worker::LabelsRefused::Invalid(why)) => {
+            return Err(ExecOpError::Coded(
+                StatusCode::BAD_REQUEST,
+                INVALID_LABELS_CODE,
+                why,
+            ))
+        }
+    };
+    // Keys only: a label value can carry anything a person typed. The audit
+    // precedes the read-back, so a delete in between gives a 404 after an
+    // audited (committed) write.
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ws),
+        "workflow_execution:labels",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({ "keys_before": set.keys_before, "keys_after": set.keys_after }),
+    ));
+    let detail = st.executions.get(ws, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/logs/download",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        LogDownloadQuery,
+    ),
+    responses(
+        (status = 200, description = "One line per log line in id order, `<instant RFC 3339 UTC, ms> <LEVEL> <message>`, joined with `\\n`, as `<id>.log`. At most 100 000 lines; then the last line is `… truncated at 100000 lines`. `Cache-Control: no-cache` while the execution has not ended. While the execution runs, lines younger than the 2 s settle lag are left out (as in the paged log API); once it has ended, every committed line is served.", content_type = "text/plain", body = String),
+        (status = 400, description = "A `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`task_run_id`", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// An execution's log as one text file (package 7d D7; Kestra
+/// `LogController.download`). Authorisation is exactly `GET …/logs`'.
+async fn download_execution_logs(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Query(q): Query<LogDownloadQuery>,
+) -> EgretResult<axum::response::Response> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    let ws = ctx.workspace_id.0;
+    // Existence and ownership: a foreign id is a 404 before any line is read.
+    let status = st.executions.log_status(ws, id).await?;
+    let filter = crate::logs::LogFilter {
+        task_id: q.task_id,
+        task_run_id: q.task_run_id,
+        attempt: None,
+        min_level: q.min_level,
+    };
+    let body =
+        axum::body::Body::from_stream(log_download(st.logs.clone(), ws, id, filter, !status.idle));
+    let mut res = axum::response::Response::new(body);
+    let h = res.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    h.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{id}.log\""))
+            .expect("a uuid is a valid header value"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    // D7: an execution still writing lines must not be served from a cache.
+    if !status.idle {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    Ok(res)
+}
+
+/// The download's body (plan S11): batches of `LOG_DOWNLOAD_BATCH` lines in
+/// id order, joined with `\n`, no trailing newline; at most
+/// `LOG_DOWNLOAD_MAX_LINES` lines, counted across batches, then
+/// `truncated_line()` only when there were more. While `running`, the read stops
+/// at the settle watermark (`LogRepo::download_batch`). A database error ends the
+/// stream with an error, so the client's download fails rather than ending
+/// short.
+fn log_download(
+    repo: LogRepo,
+    ws: Uuid,
+    id: Uuid,
+    filter: crate::logs::LogFilter,
+    running: bool,
+) -> impl futures_util::Stream<Item = std::io::Result<bytes::Bytes>> + Send + 'static {
+    use crate::logs::{download_line, truncated_line, LOG_DOWNLOAD_BATCH, LOG_DOWNLOAD_MAX_LINES};
+    struct Cursor {
+        repo: LogRepo,
+        ws: Uuid,
+        id: Uuid,
+        filter: crate::logs::LogFilter,
+        running: bool,
+        after: Option<i64>,
+        served: i64,
+        done: bool,
+    }
+    let start = Cursor {
+        repo,
+        ws,
+        id,
+        filter,
+        running,
+        after: None,
+        served: 0,
+        done: false,
+    };
+    futures_util::stream::unfold(start, |mut c| async move {
+        if c.done {
+            return None;
+        }
+        // One more than the cap is read, to know whether to say "truncated".
+        let want = (LOG_DOWNLOAD_MAX_LINES + 1 - c.served).min(LOG_DOWNLOAD_BATCH);
+        let batch = match c
+            .repo
+            .download_batch(c.ws, c.id, &c.filter, c.after, want, c.running)
+            .await
+        {
+            Ok(batch) => batch,
+            Err(e) => {
+                // hyper drops the connection and logs at most at debug: say
+                // it here, as a file download's `NamedErrors` does.
+                tracing::error!(execution = %c.id, error = %e, "a log download failed mid-body");
+                c.done = true;
+                return Some((Err(std::io::Error::other(e.to_string())), c));
+            }
+        };
+        let mut chunk = String::new();
+        for line in &batch {
+            if c.served == LOG_DOWNLOAD_MAX_LINES {
+                chunk.push('\n');
+                chunk.push_str(&truncated_line());
+                c.done = true;
+                break;
+            }
+            if c.served > 0 {
+                chunk.push('\n');
+            }
+            chunk.push_str(&download_line(line));
+            c.served += 1;
+            c.after = Some(line.id);
+        }
+        if (batch.len() as i64) < want {
+            c.done = true;
+        }
+        (!chunk.is_empty()).then(|| (Ok(bytes::Bytes::from(chunk)), c))
+    })
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/logs",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        DeleteLogsQuery,
+    ),
+    responses(
+        (status = 204, description = "The matching lines are deleted; a line written after this call stays. Allowed while the execution runs."),
+        (status = 400, description = "A `min_level` that is not one of TRACE/DEBUG/INFO/WARN/ERROR, or a malformed `{id}`/`task_run_id`/`attempt`", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Delete an execution's log lines by filter (package 7d D8, Q6; Kestra
+/// `LogController.deleteFromExecution`).
+async fn delete_execution_logs(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Query(q): Query<DeleteLogsQuery>,
+) -> EgretResult<StatusCode> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let ws = ctx.workspace_id.0;
+    // Existence and ownership, as the read: a foreign id is a 404 (S13: the flow is not looked at).
+    st.executions.log_status(ws, id).await?;
+    let filter = crate::logs::LogFilter {
+        task_id: q.task_id.clone(),
+        task_run_id: q.task_run_id,
+        attempt: q.attempt,
+        min_level: q.min_level,
+    };
+    let deleted = st.logs.delete_for_execution(ws, id, &filter).await?;
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ws),
+        "workflow_execution:logs_delete",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({
+            "task_id": q.task_id,
+            "task_run_id": q.task_run_id,
+            "attempt": q.attempt,
+            "min_level": q.min_level.map(LogLevel::as_str),
+            "deleted": deleted,
+        }),
+    ));
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------- Executions: the WRITE surface (W10 Task 5) ----------
@@ -4360,6 +4794,29 @@ pub const NOT_PAUSED_CODE: &str = "not_paused";
 /// Package 7c D5: inputs sent to a resume that takes none (paused by hand,
 /// or a waiting `Pause` without `onResume`).
 pub const RESUME_INPUTS_UNEXPECTED_CODE: &str = "resume_inputs_unexpected";
+/// Package 7d D9: a delete or a labels edit of an execution that is not idle.
+pub const NOT_TERMINATED_CODE: &str = "not_terminated";
+/// Package 7d D9: a delete of an execution others point at; `details.executions`.
+pub const HAS_DEPENDENTS_CODE: &str = "has_dependents";
+/// Package 7d D9: a delete of a loop iteration or retry replacement; `details.root`.
+pub const NOT_A_ROOT_CODE: &str = "not_a_root";
+/// Package 7d D9: a labels edit that breaks D5's rules.
+pub const INVALID_LABELS_CODE: &str = "invalid_labels";
+/// Package 7d D9, Q5: `deleteLogs=false`.
+pub const DELETE_LOGS_REQUIRED_CODE: &str = "delete_logs_required";
+
+/// An `ErrorBody` that also carries `details` (package 7d D9, plan S3).
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DetailedErrorBody {
+    pub error: String,
+    pub code: String,
+    /// `has_dependents`: `{"executions": [uuid, …], "total": n}` (at most 20
+    /// named, oldest first); `not_a_root`: `{"root": uuid}`. Absent for a
+    /// refusal that carries none (`not_terminated`, `delete_logs_required`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object, required = false)]
+    pub details: Option<serde_json::Value>,
+}
 
 /// Which source a replay or a restart into a new execution runs (spec D6,
 /// D11): the replayed execution's frozen source, the flow's current draft,
@@ -4485,12 +4942,15 @@ fn refuse_disabled_source(choice: SourceChoice, source: &str) -> EgretResult<()>
 
 /// The restart, task-run-state, status and replay routes' error: every
 /// [`egret_core::Error`] (404, and the uncoded 400 of a loop iteration), plus
-/// the coded 409s, 404s and 400s.
+/// the coded 409s, 404s and 400s, and the coded refusals that carry
+/// `details` (package 7d).
 #[derive(Debug)]
 pub enum ExecOpError {
     Core(Error),
     /// A refusal a client can branch on: its status, `ErrorBody.code` and message.
     Coded(StatusCode, &'static str, String),
+    /// A coded refusal with `details` (plan S3).
+    Detailed(StatusCode, &'static str, String, serde_json::Value),
 }
 
 impl From<Error> for ExecOpError {
@@ -4502,6 +4962,58 @@ impl From<Error> for ExecOpError {
 impl ExecOpError {
     fn conflict(code: &'static str, message: String) -> Self {
         ExecOpError::Coded(StatusCode::CONFLICT, code, message)
+    }
+
+    /// Package 7d D9: the worker's refusal of a delete, as its coded 409.
+    fn from_delete_refusal(id: Uuid, r: crate::worker::DeleteRefused) -> Self {
+        use crate::worker::DeleteRefused as R;
+        match r {
+            R::NotARoot { root } => Self::Detailed(
+                StatusCode::CONFLICT,
+                NOT_A_ROOT_CODE,
+                format!(
+                    "execution {id} is part of the run of execution {root} (a loop iteration or a \
+                     retry) and is deleted with it; delete execution {root} instead"
+                ),
+                serde_json::json!({ "root": root }),
+            ),
+            R::NotIdle { execution, state } if execution == id => Self::conflict(
+                NOT_TERMINATED_CODE,
+                format!(
+                    "execution {id} is {state} or still has running tasks (afterExecution \
+                     included); kill it first, then delete it"
+                ),
+            ),
+            R::NotIdle { execution, .. } => Self::conflict(
+                NOT_TERMINATED_CODE,
+                format!(
+                    "execution {execution}, part of the run of execution {id}, is still running; \
+                     kill execution {id} first, then delete it"
+                ),
+            ),
+            // Plan S9 (a): the outbox row would cascade away unheard.
+            R::ListenersPending => Self::conflict(
+                NOT_TERMINATED_CODE,
+                format!(
+                    "execution {id} has just ended and its Flow triggers have not all heard it \
+                     yet; try again in a minute"
+                ),
+            ),
+            R::HasDependents { executions, total } => Self::Detailed(
+                StatusCode::CONFLICT,
+                HAS_DEPENDENTS_CODE,
+                format!(
+                    "{total} other execution(s) point at execution {id} (subflow children, \
+                     replays or restarts into a new execution), among them {}; delete those first",
+                    executions
+                        .iter()
+                        .map(Uuid::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                serde_json::json!({ "executions": executions, "total": total }),
+            ),
+        }
     }
 
     /// Package 7c D5, D8: a resume or a validate of an execution that is not
@@ -4671,6 +5183,21 @@ impl axum::response::IntoResponse for ExecOpError {
                     Json(egret_core::http::ErrorBody {
                         error,
                         code: Some(code.to_string()),
+                    }),
+                )
+                    .into_response()
+            }
+            ExecOpError::Detailed(status, code, message, details) => {
+                let error = match status {
+                    StatusCode::CONFLICT => Error::Conflict(message).to_string(),
+                    _ => Error::InvalidInput(message).to_string(),
+                };
+                (
+                    status,
+                    Json(DetailedErrorBody {
+                        error,
+                        code: code.to_string(),
+                        details: Some(details),
                     }),
                 )
                     .into_response()
@@ -5433,7 +5960,7 @@ pub fn management_router() -> Router<WorkflowState> {
         .route("/ws/{workspace}/workflows/executions", get(list_executions))
         .route(
             "/ws/{workspace}/workflows/executions/{id}",
-            get(get_execution),
+            get(get_execution).delete(delete_execution),
         )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/graph",
@@ -5441,7 +5968,11 @@ pub fn management_router() -> Router<WorkflowState> {
         )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/logs",
-            get(get_execution_logs),
+            get(get_execution_logs).delete(delete_execution_logs),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/logs/download",
+            get(download_execution_logs),
         )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/file",
@@ -5567,6 +6098,10 @@ pub fn management_router() -> Router<WorkflowState> {
             "/ws/{workspace}/workflows/executions/{id}/status",
             post(set_execution_status),
         )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/labels",
+            post(set_execution_labels),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -5591,6 +6126,10 @@ pub fn management_router() -> Router<WorkflowState> {
         list_executions,
         get_execution,
         get_execution_logs,
+        delete_execution,
+        set_execution_labels,
+        download_execution_logs,
+        delete_execution_logs,
         crate::storage::routes::download_execution_file,
         crate::storage::routes::execution_file_metas,
         crate::storage::routes::preview_execution_file,
@@ -5660,6 +6199,7 @@ pub fn management_router() -> Router<WorkflowState> {
         LogLevel,
         LogLineDto,
         LogPageDto,
+        DetailedErrorBody,
         WorkflowNamespaceDto,
         WorkflowNamespaceDetailDto,
         NamespaceDependenciesDto,
@@ -5711,4 +6251,38 @@ struct WorkflowApi;
 pub fn openapi() -> utoipa::openapi::OpenApi {
     use utoipa::OpenApi as _;
     WorkflowApi::openapi()
+}
+
+#[cfg(test)]
+mod log_download_tests {
+    use futures_util::StreamExt;
+
+    /// A database error ends the download with an error item, then nothing:
+    /// no truncation line, no further batch (plan S11). The pool is closed,
+    /// so the first batch fails without a server.
+    #[tokio::test]
+    async fn a_database_error_ends_the_stream_with_an_error() {
+        // Arrange
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://nobody@127.0.0.1:1/none")
+            .expect("a lazy pool");
+        pool.close().await;
+        let repo = super::LogRepo::new(pool);
+        let filter = crate::logs::LogFilter {
+            task_id: None,
+            task_run_id: None,
+            attempt: None,
+            min_level: None,
+        };
+
+        // Act
+        let items: Vec<_> =
+            super::log_download(repo, uuid::Uuid::nil(), uuid::Uuid::nil(), filter, false)
+                .collect()
+                .await;
+
+        // Assert
+        assert_eq!(items.len(), 1, "one error item, then the end");
+        assert!(items[0].is_err());
+    }
 }

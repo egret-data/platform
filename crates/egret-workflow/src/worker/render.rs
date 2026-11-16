@@ -216,7 +216,7 @@ impl Surface {
         let reveal = mode == SecretOutputs::Reveal;
         let row = sqlx::query(
             "SELECT inputs, state, created_at, loop_index, loop_value, \
-                    parent_execution_id, parent_run_ix, trigger_execution_id, labels, variables, \
+                    parent_execution_id, parent_run_ix, trigger_execution_id, labels, labels_replaced, variables, \
                     secret_inputs, outputs, secret_outputs \
                FROM workflow.executions WHERE id = $1",
         )
@@ -303,10 +303,12 @@ impl Surface {
         // one still fails.
         //
         // The flow's labels first, then the execution's own (a backfill's, a
-        // replay's copy), the later value winning (W7f spec §3.3).
+        // replay's copy), the later value winning (W7f spec §3.3); or, once
+        // replaced, the execution's own only (package 7d D6).
         let own = crate::labels::own_labels(row.get::<Option<Value>, _>("labels").as_ref());
         let flow_labels = flow.as_ref().map(|f| f.labels.as_slice()).unwrap_or(&[]);
-        let labels_list = crate::labels::execution_labels(flow_labels, &own);
+        let replaced: bool = row.get("labels_replaced");
+        let labels_list = crate::labels::visible_labels(flow_labels, &own, replaced);
         let started_at: chrono::DateTime<chrono::Utc> = row.get("created_at");
         // **`execution.outputs` (package #6 Task B2, spec D6, D9).** The
         // flow-level `outputs:` the execution's terminal stored (Task B1,
@@ -730,8 +732,9 @@ impl Surface {
         self.files = Some(files);
     }
 
-    /// The current merged labels, flow then own (`labels::execution_labels`),
-    /// as a `Labels` task merges into them.
+    /// The labels the execution shows, from `labels::visible_labels` (the flow's
+    /// then its own; its own only once replaced), as a `Labels` task merges
+    /// into them.
     pub(super) fn current_labels(&self) -> &[crate::models::Label] {
         &self.labels_list
     }

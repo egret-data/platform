@@ -3,6 +3,10 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn() }));
+vi.mock("sonner", () => ({ toast }));
+
 import ExecutionDetail from "@/routes/workflows/ExecutionDetail";
 import { EXEC, line, LogServer, WS } from "./logServer";
 
@@ -54,6 +58,7 @@ const execution = {
   source: "id: hello\n",
   // Listed out of order: the pickers and groups order by `run_ix`.
   runs: [run("r-2", 2, "load"), run("r-0", 0, "extract"), run("r-1", 1, "extract")],
+  idle: true,
   can_manage: false,
 };
 
@@ -170,6 +175,47 @@ describe("ExecutionLogsTab", () => {
     await userEvent.click(screen.getByRole("button", { name: "Clear filters" }));
     expect(where()).toBe(`/explore/${WS}/workflows/executions/${EXEC}/logs`);
     expect(await screen.findByText("only info")).toBeInTheDocument();
+  });
+});
+
+describe("ExecutionLogsTab: download and delete (package 7d D7, D8)", () => {
+  it("links Download to the server's file with the URL's filters", async () => {
+    renderAt("logs?level=WARN&task=extract");
+    await screen.findByText("extract #1 fails");
+    const href = new URL(screen.getByRole("link", { name: "Download" }).getAttribute("href")!, "http://x");
+    expect(href.pathname).toBe(`${EXEC_PATH}/logs/download`);
+    expect(href.searchParams.get("min_level")).toBe("WARN");
+    expect(href.searchParams.get("task_id")).toBe("extract");
+    expect(href.searchParams.has("task_run_id")).toBe(false);
+  });
+
+  it("offers Delete logs to a manager, naming the filters, then deletes them and reads the view again", async () => {
+    toast.success.mockReset();
+    server.others.set(EXEC_PATH, { status: 200, body: { ...execution, can_manage: true } });
+    renderAt("logs?level=WARN&task=extract");
+    await screen.findByText("extract #1 fails");
+    await userEvent.click(screen.getByRole("button", { name: "More log actions" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete logs" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Delete these logs?" });
+    expect(dialog).toHaveTextContent("every log line of this execution");
+    expect(dialog).toHaveTextContent("at WARN and above");
+    expect(dialog).toHaveTextContent("of task extract");
+    const readsBefore = server.queries.length;
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete logs" }));
+    await waitFor(() => expect(server.deletes).toHaveLength(1));
+    expect(server.deletes[0].get("min_level")).toBe("WARN");
+    expect(server.deletes[0].get("task_id")).toBe("extract");
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Deleted the logs"));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    // The view starts again from the beginning: a read with no cursor.
+    await waitFor(() => expect(server.queries.slice(readsBefore).some((q) => !q.has("after"))).toBe(true));
+  });
+
+  it("offers no Delete logs without can_manage", async () => {
+    renderAt("logs");
+    await screen.findByText("load warns");
+    expect(screen.queryByRole("button", { name: "More log actions" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Download" })).toBeInTheDocument();
   });
 });
 

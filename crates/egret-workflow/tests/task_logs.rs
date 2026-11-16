@@ -23,8 +23,8 @@ use std::time::Duration;
 use chrono::{DateTime, Duration as ChronoDuration, SubsecRound, Utc};
 use egret_metastore::Db;
 use egret_workflow::logs::{
-    spawn_pruner, spawn_writer, Barrier, InsertError, Inserter, LogLevel, LogLimits, LogLine,
-    LogQuery, LogRepo, PruneConfig, RunIdentity, RunLog, StoredLine, WriterConfig,
+    spawn_pruner, spawn_writer, Barrier, InsertError, Inserter, LogFilter, LogLevel, LogLimits,
+    LogLine, LogQuery, LogRepo, PruneConfig, RunIdentity, RunLog, StoredLine, WriterConfig,
 };
 use egret_workflow::runtime::{spawn_with_logs, RuntimeConfig};
 use egret_workflow::worker::handlers::LogSink;
@@ -2260,4 +2260,268 @@ async fn a_barrier_queued_at_shutdown_is_acknowledged_by_the_drain() {
         "the line before the barrier was stored before the acknowledgement"
     );
     handle.await.unwrap();
+}
+
+/// Package 7d D8: the filters AND together; `min_level` is that level and above.
+#[tokio::test]
+async fn delete_for_execution_ands_its_filters() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let other = fx.execution().await;
+    let (r1, r2) = (Uuid::new_v4(), Uuid::new_v4());
+    let mk =
+        |task: Option<&str>, run: Option<Uuid>, attempt: Option<i32>, level: LogLevel, m: &str| {
+            let mut l = fx.line(exec, level, m);
+            l.task_id = task.map(str::to_string);
+            l.task_run_id = run;
+            l.attempt = attempt;
+            l
+        };
+    fx.repo
+        .insert_batch(&[
+            mk(None, None, None, LogLevel::Error, "exec-error"),
+            mk(Some("a"), Some(r1), Some(0), LogLevel::Warn, "a0-warn"),
+            mk(Some("a"), Some(r1), Some(1), LogLevel::Warn, "a1-warn"),
+            mk(Some("a"), Some(r1), Some(1), LogLevel::Info, "a1-info"),
+            mk(Some("a"), Some(r2), Some(0), LogLevel::Error, "a2-error"),
+            mk(Some("b"), Some(r1), Some(1), LogLevel::Warn, "b1-warn"),
+            mk(Some("a"), Some(r2), Some(1), LogLevel::Warn, "a2-1-warn"),
+            fx.line(other, LogLevel::Error, "other"),
+        ])
+        .await
+        .unwrap();
+    fx.settle(exec).await;
+    let f = LogFilter {
+        task_id: Some("a".into()),
+        task_run_id: Some(r1),
+        attempt: Some(1),
+        min_level: Some(LogLevel::Warn),
+    };
+    assert_eq!(
+        fx.repo.delete_for_execution(fx.ws, exec, &f).await.unwrap(),
+        1
+    );
+    let left = fx.page(exec, &q(None, 100)).await;
+    assert_eq!(
+        messages(&left),
+        vec![
+            "exec-error",
+            "a0-warn",
+            "a1-info",
+            "a2-error",
+            "b1-warn",
+            "a2-1-warn"
+        ]
+    );
+    // min_level alone: WARN and ERROR go.
+    let f = LogFilter {
+        min_level: Some(LogLevel::Warn),
+        ..LogFilter::default()
+    };
+    assert_eq!(
+        fx.repo.delete_for_execution(fx.ws, exec, &f).await.unwrap(),
+        5
+    );
+    assert_eq!(
+        messages(&fx.page(exec, &q(None, 100)).await),
+        vec!["a1-info"]
+    );
+    // No filter: the rest; another execution's line stays.
+    assert_eq!(
+        fx.repo
+            .delete_for_execution(fx.ws, exec, &LogFilter::default())
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(fx.count(other).await, 1);
+}
+
+/// Both ids are in the predicate: another workspace's id deletes nothing.
+#[tokio::test]
+async fn delete_for_execution_never_reaches_another_workspace() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    fx.repo
+        .insert_batch(&[fx.line(exec, LogLevel::Info, "kept")])
+        .await
+        .unwrap();
+    let (other_ws, _) = common::seed_workspace(&fx.db).await;
+    assert_eq!(
+        fx.repo
+            .delete_for_execution(other_ws, exec, &LogFilter::default())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fx.count(exec).await, 1);
+}
+
+/// M3: a running execution's download stops at the settle watermark, like
+/// `page`; an idle one's does not.
+#[tokio::test]
+async fn download_batch_applies_the_settle_watermark_only_while_running() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    fx.repo
+        .insert_batch(&[
+            fx.line(exec, LogLevel::Info, "S"),
+            fx.line(exec, LogLevel::Info, "A"),
+            fx.line(exec, LogLevel::Info, "B"),
+        ])
+        .await
+        .unwrap();
+    let ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id")
+            .bind(exec)
+            .fetch_all(&fx.db.pool)
+            .await
+            .unwrap();
+    // S and B settled, A (between them) still inside the lag.
+    sqlx::query(
+        "UPDATE workflow.task_logs SET inserted_at = inserted_at - interval '3 seconds' \
+          WHERE id = ANY($1)",
+    )
+    .bind(vec![ids[0], ids[2]])
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    let all = LogFilter::default();
+    let running = fx
+        .repo
+        .download_batch(fx.ws, exec, &all, None, 10, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        messages(&running),
+        vec!["S"],
+        "running: B sits above the unsettled A and is held back"
+    );
+    let idle = fx
+        .repo
+        .download_batch(fx.ws, exec, &all, None, 10, false)
+        .await
+        .unwrap();
+    assert_eq!(messages(&idle), vec!["S", "A", "B"], "idle: no lag");
+}
+
+/// D7, S11: id order, the cursor, the limit and the filters; no settle lag.
+#[tokio::test]
+async fn download_batch_reads_what_is_committed_in_id_order() {
+    let Some(fx) = fx().await else { return };
+    let exec = fx.execution().await;
+    let mut lines = Vec::new();
+    for i in 0..5 {
+        let mut l = fx.line(
+            exec,
+            if i % 2 == 0 {
+                LogLevel::Info
+            } else {
+                LogLevel::Error
+            },
+            &format!("m{i}"),
+        );
+        l.task_id = Some("t".into());
+        lines.push(l);
+    }
+    fx.repo.insert_batch(&lines).await.unwrap();
+    // Not settled: `page` would hold these back for 2 s; the download does not.
+    let first = fx
+        .repo
+        .download_batch(fx.ws, exec, &LogFilter::default(), None, 2, false)
+        .await
+        .unwrap();
+    assert_eq!(messages(&first), vec!["m0", "m1"]);
+    let rest = fx
+        .repo
+        .download_batch(
+            fx.ws,
+            exec,
+            &LogFilter::default(),
+            Some(first[1].id),
+            10,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(messages(&rest), vec!["m2", "m3", "m4"]);
+    // Another execution's line, another workspace's call.
+    let other = fx.execution().await;
+    fx.repo
+        .insert_batch(&[fx.line(other, LogLevel::Info, "other")])
+        .await
+        .unwrap();
+    assert_eq!(
+        messages(
+            &fx.repo
+                .download_batch(fx.ws, exec, &LogFilter::default(), None, 10, false)
+                .await
+                .unwrap()
+        ),
+        vec!["m0", "m1", "m2", "m3", "m4"]
+    );
+    let (foreign_ws, _) = common::seed_workspace(&fx.db).await;
+    assert!(fx
+        .repo
+        .download_batch(foreign_ws, exec, &LogFilter::default(), None, 10, false)
+        .await
+        .unwrap()
+        .is_empty());
+    // task_id, task_run_id and attempt each narrow it.
+    let exec2 = fx.execution().await;
+    let (r1, r2) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut ls = Vec::new();
+    for (m, task, run, att) in [
+        ("x-r1-0", "x", r1, 0),
+        ("x-r1-1", "x", r1, 1),
+        ("x-r2-1", "x", r2, 1),
+        ("y-r1-1", "y", r1, 1),
+    ] {
+        let mut l = fx.line(exec2, LogLevel::Info, m);
+        l.task_id = Some(task.into());
+        l.task_run_id = Some(run);
+        l.attempt = Some(att);
+        ls.push(l);
+    }
+    fx.repo.insert_batch(&ls).await.unwrap();
+    let get = |f: LogFilter| {
+        let repo = fx.repo.clone();
+        let (ws, e) = (fx.ws, exec2);
+        async move {
+            repo.download_batch(ws, e, &f, None, 10, false)
+                .await
+                .unwrap()
+        }
+    };
+    let by_task = get(LogFilter {
+        task_id: Some("y".into()),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(messages(&by_task), vec!["y-r1-1"]);
+    let by_run = get(LogFilter {
+        task_run_id: Some(r2),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(messages(&by_run), vec!["x-r2-1"]);
+    let by_attempt = get(LogFilter {
+        attempt: Some(0),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(messages(&by_attempt), vec!["x-r1-0"]);
+    let errors = LogFilter {
+        min_level: Some(LogLevel::Error),
+        ..LogFilter::default()
+    };
+    assert_eq!(
+        messages(
+            &fx.repo
+                .download_batch(fx.ws, exec, &errors, None, 10, false)
+                .await
+                .unwrap()
+        ),
+        vec!["m1", "m3"]
+    );
 }

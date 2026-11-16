@@ -96,7 +96,9 @@ export interface ExecutionListItemDto {
      * the labels beyond the flow's own `labels:` (a backfill's, a replay's
      * copy); once a `Labels` task has run it holds the full merged list, the
      * flow's labels included. The detail's `effective_labels` is the list to
-     * display.
+     * display. Once a person replaced the labels (`POST …/labels`, package
+     * 7d), it holds the whole visible list, the flow's labels included or
+     * removed.
      * @nullable
      */
   labels?: LabelDto[] | null;

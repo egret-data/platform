@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
 import dayjs from "dayjs";
 import { ArrowDown, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Download, History, Loader2, RotateCw, ScrollText } from "lucide-react";
-import type { LogLevel, LogLineDto, TaskRunDto } from "@/api/generated/model";
+import { getWorkflowDownloadExecutionLogsUrl } from "@/api/generated/workflow/workflow";
+import type { LogLevel, LogLineDto, TaskRunDto, WorkflowDownloadExecutionLogsParams } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -15,18 +16,17 @@ import {
   type LogGroup,
   type LogRow,
 } from "@/components/workflows/executions/logs/logRows";
-import {
-  downloadLogs,
-  LOG_DOWNLOAD_MAX_LINES,
-  useLogFollow,
-  type LogFilters,
-} from "@/components/workflows/executions/logs/useLogFollow";
+import { useLogFollow, type LogFilters } from "@/components/workflows/executions/logs/useLogFollow";
 
 /**
  * THE LOG VIEW (W7b spec §7), shared by the Logs tab and the Gantt's run
  * panel. Kestra's `executions/Logs.vue` and `logs/TaskRunDetails.vue`: lines
  * grouped by task run, each group collapsible, the execution's own lines
  * first; a toolbar with expand/collapse all and Download. egret's visuals.
+ *
+ * **Download** is a link to the server's file (package 7d D7, Kestra's `LogController.download`):
+ * every line the filters select, written and capped by the server, which ends a capped file
+ * with its own truncation line. The session cookie authenticates it, as a file download does.
  *
  * **Windowed, not a library.** The repo has no virtualisation library, and
  * this list needs very little of one: every row's height is known from its
@@ -73,14 +73,13 @@ function groupLabel(g: LogGroup): string {
   return `${g.taskId ?? "Unknown task"}${run}${g.value ? ` (${g.value})` : ""}`;
 }
 
-/** Save `text` as a file, through a temporary link. */
-function saveText(name: string, text: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
+/** The download route's query: the filters the view reads with, without the ones it has not. */
+export function downloadParams(f: LogFilters): WorkflowDownloadExecutionLogsParams {
+  const params: WorkflowDownloadExecutionLogsParams = {};
+  if (f.taskId !== undefined) params.task_id = f.taskId;
+  if (f.taskRunId !== undefined) params.task_run_id = f.taskRunId;
+  if (f.minLevel !== undefined) params.min_level = f.minLevel;
+  return params;
 }
 
 const errorMessage = (e: unknown) => (e instanceof Error && e.message ? e.message : "the request failed");
@@ -113,9 +112,8 @@ export interface LogViewProps {
   endedAt?: string | null;
   /** The downloaded file's name; `<executionId>.log` by default. */
   downloadName?: string;
-  /** A download's page and cap, for tests. */
-  downloadPageSize?: number;
-  downloadMaxLines?: number;
+  /** More actions, rendered first in the toolbar, before Download. */
+  toolbar?: ReactNode;
 }
 
 export function LogView({
@@ -132,9 +130,8 @@ export function LogView({
   pageSize,
   windowLines,
   endedAt,
-  downloadPageSize,
-  downloadMaxLines = LOG_DOWNLOAD_MAX_LINES,
   downloadName,
+  toolbar,
 }: LogViewProps) {
   const follow = useLogFollow(ws, executionId, filters, { pageSize, windowLines, endedAt });
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
@@ -153,33 +150,6 @@ export function LogView({
       return next;
     });
   }, []);
-
-  const [download, setDownload] = useState<{ busy: boolean; capped: boolean; error: string | null }>({
-    busy: false,
-    capped: false,
-    error: null,
-  });
-  // A download in flight stops paging when the view goes away.
-  const downloadAbort = useRef<AbortController | null>(null);
-  useEffect(() => () => downloadAbort.current?.abort(), []);
-  const runDownload = async () => {
-    const abort = new AbortController();
-    downloadAbort.current = abort;
-    setDownload({ busy: true, capped: false, error: null });
-    try {
-      const file = await downloadLogs(ws, executionId, filters, {
-        pageSize: downloadPageSize,
-        maxLines: downloadMaxLines,
-        signal: abort.signal,
-      });
-      if (abort.signal.aborted) return;
-      saveText(downloadName ?? `${executionId}.log`, file.text);
-      setDownload({ busy: false, capped: file.capped, error: null });
-    } catch (e) {
-      if (abort.signal.aborted) return;
-      setDownload({ busy: false, capped: false, error: errorMessage(e) });
-    }
-  };
 
   // Error first (FE-STATE-1): only while nothing is loaded; a failed poll keeps the lines.
   let body;
@@ -273,6 +243,7 @@ export function LogView({
   return (
     <div data-testid="log-view" className={cn("flex min-w-0 flex-col", fill && "min-h-0 flex-1")}>
       <div className="mb-2 flex flex-wrap items-center justify-end gap-2">
+        {toolbar}
         {grouped && groupKeys.length > 0 ? (
           <Button
             variant="ghost"
@@ -283,28 +254,13 @@ export function LogView({
             {allCollapsed ? "Expand all" : "Collapse all"}
           </Button>
         ) : null}
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={download.busy}
-          title={`Saves every line the filters select, up to ${downloadMaxLines.toLocaleString("en-US")} lines.`}
-          onClick={() => void runDownload()}
-        >
-          {download.busy ? <Loader2 aria-hidden className="animate-spin" /> : <Download aria-hidden />}
-          {download.busy ? "Downloading…" : "Download"}
+        <Button asChild variant="outline" size="sm" title="Saves every line the filters select, up to 100,000 lines.">
+          <a href={getWorkflowDownloadExecutionLogsUrl(ws, executionId, downloadParams(filters))} download={downloadName ?? `${executionId}.log`}>
+            <Download aria-hidden />
+            Download
+          </a>
         </Button>
       </div>
-      {download.error ? (
-        <p role="alert" className="mb-2 text-sm text-destructive">
-          The logs could not be downloaded: {download.error}. Try again.
-        </p>
-      ) : null}
-      {download.capped ? (
-        <p role="status" className="mb-2 text-sm text-muted-foreground">
-          The file holds the first {downloadMaxLines.toLocaleString("en-US")} lines; the execution has more. Filter by task,
-          run or level to download the rest.
-        </p>
-      ) : null}
       {body}
     </div>
   );

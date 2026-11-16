@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { AFTER_RUN_FOLLOW_MS } from "@/components/workflows/executionState";
-import { downloadLogs, formatLogLine, useLogFollow, type LogFilters } from "@/components/workflows/executions/logs/useLogFollow";
+import { useLogFollow, type LogFilters } from "@/components/workflows/executions/logs/useLogFollow";
 import { EXEC, line, LogServer, page, WS } from "./logServer";
 
 /** Let the read in flight answer, and run whatever it scheduled at once. */
@@ -372,55 +372,5 @@ describe("useLogFollow: Load earlier against a poll", () => {
     await act(async () => result.current.loadEarlier());
     await settle();
     expect(ids(result)).toEqual([7, 8, 9, 10, 11, 12]);
-  });
-});
-
-describe("downloadLogs", () => {
-  it("reads every page with the current filters, and writes one line per log line", async () => {
-    vi.useRealTimers();
-    const server = new LogServer().install();
-    server.lines = [
-      line(1, { message: "start" }),
-      line(2, { level: "ERROR", task_id: "extract", task_run_id: "r-0", attempt: 1, message: "boom" }),
-      line(3, { level: "DEBUG" }),
-      line(4, { level: "WARN", message: "late" }),
-    ];
-    const file = await downloadLogs(WS, EXEC, { minLevel: "WARN" }, { pageSize: 1 });
-    expect(file.capped).toBe(false);
-    expect(file.lines).toBe(2);
-    expect(file.text).toBe(`${formatLogLine(server.lines[1])}\n${formatLogLine(server.lines[3])}\n`);
-    expect(file.text).toContain("ERROR [extract attempt 2] boom");
-    // Every read carried the filter, and the cursor walked: none, 2, 4.
-    expect(server.queries.every((q) => q.get("min_level") === "WARN")).toBe(true);
-    expect(server.afters()).toEqual([null, 2, 4]);
-  });
-
-  it("stops reading when its signal is aborted", async () => {
-    vi.useRealTimers();
-    const server = new LogServer().install();
-    server.lines = Array.from({ length: 6 }, (_, i) => line(i + 1));
-    const abort = new AbortController();
-    abort.abort();
-    await expect(downloadLogs(WS, EXEC, {}, { pageSize: 2, signal: abort.signal })).rejects.toThrow();
-    expect(server.queries.length).toBeLessThanOrEqual(1);
-  });
-
-  it("stops at the cap and says so", async () => {
-    vi.useRealTimers();
-    const server = new LogServer().install();
-    server.lines = Array.from({ length: 5 }, (_, i) => line(i + 1));
-    const file = await downloadLogs(WS, EXEC, {}, { pageSize: 2, maxLines: 3 });
-    expect(file.capped).toBe(true);
-    expect(file.lines).toBe(3);
-    expect(file.text.trimEnd().split("\n")).toHaveLength(3);
-  });
-
-  it("is not capped when the log has exactly the cap", async () => {
-    vi.useRealTimers();
-    const server = new LogServer().install();
-    server.lines = Array.from({ length: 3 }, (_, i) => line(i + 1));
-    const file = await downloadLogs(WS, EXEC, {}, { pageSize: 2, maxLines: 3 });
-    expect(file.capped).toBe(false);
-    expect(file.lines).toBe(3);
   });
 });

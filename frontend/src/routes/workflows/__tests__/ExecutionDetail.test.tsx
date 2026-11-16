@@ -9,7 +9,12 @@ const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.
 vi.mock("sonner", () => ({ toast }));
 
 import { AFTER_RUN_FOLLOW_MS } from "@/components/workflows/executionState";
-import { PAUSE_KILLING_REASON, pauseRefusal } from "@/components/workflows/executions/actions";
+import {
+  DELETE_NOT_IDLE_REASON,
+  LABELS_NOT_IDLE_REASON,
+  PAUSE_KILLING_REASON,
+  pauseRefusal,
+} from "@/components/workflows/executions/actions";
 import ExecutionDetail from "@/routes/workflows/ExecutionDetail";
 
 const WS = "eng";
@@ -72,6 +77,8 @@ function execution(state: string, extra: Record<string, unknown> = {}) {
     can_manage: true,
     worker_enabled: true,
     paused_by_hand: false,
+    // Ended, with no live afterExecution run (package 7d S7).
+    idle: terminal,
     ...extra,
   };
 }
@@ -113,7 +120,7 @@ class Server {
       const [path, qs] = String(input).split("?");
       this.calls.push({ method, path, query: new URLSearchParams(qs ?? "") });
       const { status, body } = this.route(method, path);
-      return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      return new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     }));
   }
 
@@ -985,7 +992,10 @@ describe("ExecutionDetail: Restart, Change status and Change state (execution op
     expect(restart).toBeDisabled();
     expect(restart).toHaveAccessibleDescription(new RegExp(NEW));
     expect(screen.getByRole("button", { name: "Change status" })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Actions for extract" })).toBeNull();
+    // The row menu keeps Delete logs (package 7d), and offers no state change.
+    await userEvent.click(screen.getByRole("button", { name: "Actions for extract" }));
+    expect(await screen.findByRole("menuitem", { name: "Delete logs" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Change state" })).toBeNull();
   });
 
   it("restarts after a confirm, re-reads the execution and the list, and toasts", async () => {
@@ -1124,15 +1134,17 @@ describe("ExecutionDetail: Replay from a task (package 7b)", () => {
   it("does not offer it while the execution runs", async () => {
     new Server(ok(execution("RUNNING")));
     renderPage();
-    await screen.findByRole("region", { name: "Task runs" });
-    expect(screen.queryByRole("button", { name: /^Actions for / })).toBeNull();
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for extract" }));
+    expect(await screen.findByRole("menuitem", { name: "Delete logs" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Replay from this task" })).toBeNull();
   });
 
   it("does not offer it on a loop iteration", async () => {
     new Server(ok(execution("SUCCESS", { parent_execution_id: NEW, loop_index: 1 })));
     renderPage();
-    await screen.findByRole("region", { name: "Task runs" });
-    expect(screen.queryByRole("button", { name: /^Actions for / })).toBeNull();
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for extract" }));
+    expect(await screen.findByRole("menuitem", { name: "Delete logs" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Replay from this task" })).toBeNull();
   });
 
   it("does not offer it without can_manage, nor once the flow was deleted for good (KI-297)", async () => {
@@ -1148,5 +1160,77 @@ describe("ExecutionDetail: Replay from a task (package 7b)", () => {
     // The menu keeps Change state, and offers no replay.
     expect(await screen.findByRole("menuitem", { name: "Change state" })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Replay from this task" })).toBeNull();
+  });
+});
+
+describe("ExecutionDetail: Edit labels and Delete (package 7d D10)", () => {
+  it("offers both, enabled, on an idle execution", async () => {
+    new Server(ok(execution("SUCCESS")));
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Edit labels" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
+  });
+
+  it("disables both, saying why, while the execution runs", async () => {
+    new Server(ok(execution("RUNNING")));
+    renderPage();
+    const labels = await screen.findByRole("button", { name: "Edit labels" });
+    expect(labels).toBeDisabled();
+    expect(labels).toHaveAccessibleDescription(LABELS_NOT_IDLE_REASON);
+    const del = screen.getByRole("button", { name: "Delete" });
+    expect(del).toBeDisabled();
+    expect(del).toHaveAccessibleDescription(DELETE_NOT_IDLE_REASON);
+  });
+
+  it("disables both while an ended execution's afterExecution tasks still run", async () => {
+    new Server(ok(execution("SUCCESS", { idle: false })));
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Edit labels" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+  });
+
+  it("disables Delete on a loop iteration, pointing at the run's first execution", async () => {
+    new Server(ok(execution("SUCCESS", { parent_execution_id: NEW, loop_index: 1 })));
+    renderPage();
+    const del = await screen.findByRole("button", { name: "Delete" });
+    expect(del).toBeDisabled();
+    expect(del).toHaveAccessibleDescription(/belongs to another execution's run\. Delete the run's first execution instead/);
+    expect(screen.getByRole("button", { name: "Edit labels" })).toBeEnabled();
+  });
+
+  it("shows neither without can_manage", async () => {
+    new Server(ok(execution("SUCCESS", { can_manage: false })));
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: EXEC });
+    expect(screen.queryByRole("button", { name: "Edit labels" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Delete" })).toBeNull();
+  });
+
+  it("opens each dialog from its button", async () => {
+    new Server(ok(execution("SUCCESS", { effective_labels: [{ key: "team", value: "data" }] })));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Edit labels" }));
+    const labels = await screen.findByRole("dialog", { name: "Edit labels" });
+    expect(within(labels).getByRole("textbox", { name: "Key of label 1" })).toHaveValue("team");
+    await userEvent.click(within(labels).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    expect(await screen.findByRole("alertdialog", { name: "Delete this execution?" })).toBeInTheDocument();
+  });
+});
+
+describe("ExecutionDetail: Delete logs of a task run (package 7d D8)", () => {
+  it("is in a task run's menu for a manager, and the dialog names the run", async () => {
+    const server = new Server(ok(execution("SUCCESS")));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Actions for load" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete logs" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Delete these logs?" });
+    expect(dialog).toHaveTextContent("Deletes the logs of load #1.");
+    server.extra[`DELETE ${EXEC_PATH}/logs`] = { status: 204, body: null };
+    await userEvent.click(within(dialog).getByRole("button", { name: "Delete logs" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Deleted the logs of load #1"));
+    const call = server.calls.find((c) => c.method === "DELETE" && c.path === `${EXEC_PATH}/logs`);
+    expect(call?.query.get("task_run_id")).toBe("r-1");
   });
 });
