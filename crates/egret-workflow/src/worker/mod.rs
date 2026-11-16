@@ -81,6 +81,7 @@ mod cancel;
 mod claim;
 pub mod commands;
 mod copy;
+mod delete;
 mod flow_outputs;
 mod force_close;
 pub mod handlers;
@@ -150,6 +151,7 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
     (e.running, e.terminal)
 }
 pub use copy::{replay_execution, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest};
+pub use delete::{delete_execution, DeleteRefused, DeleteRequest, Deleted};
 pub use kill::{kill_execution, kill_execution_reporting, KillOutcome};
 pub use pause::{pause_by_hand, resume_with, Paused, ResumeRefused, ResumeRequest};
 pub use reaper::reap;
