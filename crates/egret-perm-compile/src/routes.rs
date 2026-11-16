@@ -2978,8 +2978,29 @@ pub(crate) async fn explain_users(
             let masked_read_skips_access = engine == EngineType::StarRocks
                 && mask.as_ref().is_some_and(|m| is_mask_null(&m.decision));
 
+            // SP5a: a privilege the matrix says this target cannot enforce has
+            // no access to evaluate; the explain says so instead.
+            let gap = crate::explain_effect::gated_privilege(action).and_then(|p| {
+                egret_perm_ir::matrix::privilege_gap(
+                    egret_perm_ir::matrix::EpKind {
+                        engine,
+                        mechanism: egret_perm_ir::matrix::Mechanism::Ranger,
+                    },
+                    Some(match plugin_version {
+                        egret_ranger_eval::eval::PluginVersion::Ranger2_5_0 => "2.5.0",
+                        egret_ranger_eval::eval::PluginVersion::Ranger2_8_0 => "2.8.0",
+                        egret_ranger_eval::eval::PluginVersion::Ranger2_9_0 => "2.9.0",
+                    }),
+                    p,
+                )
+            });
+            let access_types = if gap.is_some() {
+                Vec::new()
+            } else {
+                engine_accesses(action, engine)?
+            };
             let mut accesses = Vec::new();
-            for access_type in engine_accesses(action, engine)? {
+            for access_type in access_types {
                 let request = AccessRequest {
                     user: user.clone(),
                     // **Both empty, and that is the answer, not a shortcut.** See
@@ -3114,8 +3135,11 @@ pub(crate) async fn explain_users(
                 effect_lines: Vec::new(),
             };
             let (tied, tag_names) = line_names(&mut *conn, &mut cache, &profile).await?;
-            profile.effect_lines =
-                crate::explain_effect::effect_lines(&crate::explain_effect::EffectInput {
+            profile.effect_lines = match &gap {
+                Some(gap) => vec![crate::explain_effect::privilege_not_enforced_line(
+                    user, gap,
+                )],
+                None => crate::explain_effect::effect_lines(&crate::explain_effect::EffectInput {
                     subject: user,
                     action,
                     target,
@@ -3124,7 +3148,8 @@ pub(crate) async fn explain_users(
                     tied: &tied,
                     tag_names: &tag_names,
                     cleared_for: &column_clearances,
-                });
+                }),
+            };
             per_user[i].push(profile);
         }
     }

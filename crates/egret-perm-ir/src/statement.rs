@@ -177,6 +177,9 @@ pub enum ReasonCode {
     NotMeasured,
     VersionsDisagree,
     InvalidEnginePrivilege,
+    /// SP5a: the target cannot enforce this privilege (capability matrix
+    /// `Capability::EnforcePrivilege`).
+    PrivilegeNotEnforceable,
 }
 
 /// A source that lowered to nothing (or to something weaker), and why.

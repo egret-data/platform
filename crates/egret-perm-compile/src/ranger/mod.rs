@@ -78,9 +78,12 @@ pub(crate) fn emit(
     let engine = l.ep.kind.engine;
     let profile = l.profile_name.as_str();
     for s in &lowered.statements {
-        if egret_perm_ir::lower::grants::is_browse_only(s) {
-            continue; // lowered: no Ranger access type to emit (a direct browse DENY is dropped too: nothing enforces browse yet)
-        }
+        // What the matrix says this target cannot enforce (browse) has no
+        // Ranger access type to emit; a statement left with nothing is dropped.
+        let Some(s) = egret_perm_ir::lower::grants::strip_unenforced(&l.ep, s) else {
+            continue;
+        };
+        let s = &s;
         let (key, policy) = match &s.source {
             Source::Grant { .. } => {
                 let r = grants::render(s, profile, engine)?;
@@ -223,7 +226,7 @@ mod browse_lowering_tests {
         let kept: Vec<_> = lowered
             .statements
             .iter()
-            .filter(|s| !egret_perm_ir::lower::grants::is_browse_only(s))
+            .filter_map(|s| egret_perm_ir::lower::grants::strip_unenforced(&ep, s))
             .collect();
         assert_eq!(kept.len(), 1, "every implied browse is lowered away");
         assert!(matches!(
@@ -231,15 +234,15 @@ mod browse_lowering_tests {
             egret_perm_ir::statement::Effect::Allow { privileges }
                 if privileges == &[egret_perm_ir::statement::Privilege::Read]
         ));
-        let body = grants::render(kept[0], "trino-1", EngineType::Trino).unwrap();
+        let body = grants::render(&kept[0], "trino-1", EngineType::Trino).unwrap();
         let direct =
             crate::ranger::grants::compile_grant(&g, "sales", "trino-1", EngineType::Trino)
                 .unwrap();
         assert_eq!(body.name, direct.name);
         // Every statement, implied browse included, renders without error or is skipped.
         for s in &lowered.statements {
-            if !egret_perm_ir::lower::grants::is_browse_only(s) {
-                grants::render(s, "trino-1", EngineType::Trino).unwrap();
+            if let Some(s) = egret_perm_ir::lower::grants::strip_unenforced(&ep, s) {
+                grants::render(&s, "trino-1", EngineType::Trino).unwrap();
             }
         }
     }

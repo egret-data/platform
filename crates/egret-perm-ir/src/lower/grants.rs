@@ -81,6 +81,7 @@ use uuid::Uuid;
 
 use crate::audience::{audience, audience_from_expanded, Audience, Directory};
 use crate::ep::EpInput;
+use crate::matrix::privilege_gap_for_ep;
 use crate::statement::{
     Derivation, Effect, Level, LowerResult, Lowered, Lowering, Path, Privilege, ReasonCode, Source,
     Statement, Target,
@@ -434,6 +435,13 @@ pub fn lower_grants(ep: &EpInput, grants: &[Grant], dir: &Directory) -> LowerRes
         }
         match statement_for_audience(g, a, catalog_name, g.scope.catalog_id) {
             Ok(s) => {
+                if let Effect::Allow { privileges } | Effect::Deny { privileges } = &s.effect {
+                    out.lowerings.extend(unenforced_lowerings(
+                        &|p| privilege_gap_for_ep(ep, p),
+                        g,
+                        privileges,
+                    ));
+                }
                 let implied = implied_browse(&s);
                 out.statements.push(s);
                 out.statements.extend(implied);
@@ -461,18 +469,71 @@ pub fn lower_grants(ep: &EpInput, grants: &[Grant], dir: &Directory) -> LowerRes
     Ok(out)
 }
 
-/// A grant statement whose every privilege is `browse` (direct or implied).
-/// Neither current target enforces browse, so each drops these: rendering one
-/// would be an access-less Ranger policy, and in the OPA evaluator a
-/// `Level::Unnamed` browse allow would count as reaching every sibling object.
-pub fn is_browse_only(s: &Statement) -> bool {
-    matches!(s.source, Source::Grant { .. })
-        && match &s.effect {
-            Effect::Allow { privileges } | Effect::Deny { privileges } => {
-                !privileges.is_empty() && privileges.iter().all(|p| *p == Privilege::Browse)
-            }
-            _ => false,
-        }
+/// The gated privileges of the vocabulary: the ones a target may not enforce
+/// (`read`/`write` are enforced everywhere and never consulted).
+const GATED: [Privilege; 3] = [Privilege::Browse, Privilege::Create, Privilege::Manage];
+
+/// Remove from a grant statement every privilege the capability matrix says
+/// `ep`'s target cannot enforce (`browse` everywhere; `create`/`manage` on
+/// OPA). A statement left with no privilege is dropped (`None`). Both targets
+/// call this before rendering or snapshotting, so an unenforced privilege never
+/// reaches them: in the OPA evaluator a `Level::Unnamed` allow of ANY privilege
+/// counts as reaching every sibling object (`check_reach`), so a browse-only,
+/// create-only or manage-only allow must not enter the snapshot. A direct deny
+/// of an unenforced privilege is dropped too: nothing enforces it.
+/// Statements of other sources pass through unchanged.
+pub fn strip_unenforced(ep: &EpInput, s: &Statement) -> Option<Statement> {
+    strip_unenforced_by(&|p| privilege_gap_for_ep(ep, p), s)
+}
+
+/// [`strip_unenforced`] with the matrix's answer supplied, so a test can flip
+/// one entry and watch the lowering follow.
+pub fn strip_unenforced_by(
+    gap: &dyn Fn(Privilege) -> Option<String>,
+    s: &Statement,
+) -> Option<Statement> {
+    if !matches!(s.source, Source::Grant { .. }) {
+        return Some(s.clone());
+    }
+    let (Effect::Allow { privileges } | Effect::Deny { privileges }) = &s.effect else {
+        return Some(s.clone());
+    };
+    let kept: Vec<Privilege> = privileges
+        .iter()
+        .copied()
+        .filter(|p| !GATED.contains(p) || gap(*p).is_none())
+        .collect();
+    if kept.is_empty() && !privileges.is_empty() {
+        return None;
+    }
+    let mut out = s.clone();
+    out.effect = match &s.effect {
+        Effect::Allow { .. } => Effect::Allow { privileges: kept },
+        _ => Effect::Deny { privileges: kept },
+    };
+    Some(out)
+}
+
+/// A [`Lowering`] per privilege `g` declares that the target cannot enforce.
+/// `browse` is reported only for a grant that asks for nothing else: beside
+/// another privilege it is the implication every allow already carries, not a
+/// request. The text is the matrix's (`privilege_gap`).
+fn unenforced_lowerings(
+    gap: &dyn Fn(Privilege) -> Option<String>,
+    g: &Grant,
+    privileges: &[Privilege],
+) -> Vec<Lowering> {
+    let browse_only = privileges.iter().all(|p| *p == Privilege::Browse);
+    privileges
+        .iter()
+        .filter(|p| GATED.contains(p) && (**p != Privilege::Browse || browse_only))
+        .filter_map(|p| gap(*p))
+        .map(|detail| Lowering {
+            source: Source::Grant { grant_id: g.id },
+            code: ReasonCode::PrivilegeNotEnforceable,
+            detail,
+        })
+        .collect()
 }
 
 /// BROWSE implication (concepts spec D4): an ALLOW of `read`, `write`,
@@ -481,10 +542,9 @@ pub fn is_browse_only(s: &Statement) -> bool {
 /// ancestor (catalog, schema, table; the object itself last). One statement
 /// per level, all carrying the grant's source and audience, in
 /// catalog-to-object order. A deny implies nothing: denying `read` does not
-/// hide the object, and a deny of `browse` is its own statement. No SP5a
-/// target enforces `browse`: both current targets (Ranger `emit`, the OPA
-/// snapshot build) drop browse-only statements via [`is_browse_only`], and the
-/// IR keeps them for targets that will.
+/// hide the object, and a deny of `browse` is its own statement. The IR
+/// keeps them; each target drops what the capability matrix says it cannot
+/// enforce via [`strip_unenforced`] (no SP5a target enforces `browse`).
 ///
 /// The new actions need no inheritance code of their own: a statement on a
 /// path covers everything beneath it for every privilege, as `read`/`write`
@@ -954,5 +1014,137 @@ mod tests {
         assert!(out.statements[1..]
             .iter()
             .all(|s| matches!(s.effect, crate::statement::Effect::Allow { .. })));
+    }
+
+    fn opa_ep(c: Uuid) -> EpInput {
+        let mut e = ep(c);
+        e.kind.mechanism = Mechanism::Opa;
+        e.default_version = Ok("2.8.0".into());
+        e
+    }
+
+    fn lower(e: &EpInput, c: Uuid, actions: Vec<Action>, effect: Effect) -> Lowered {
+        lower_grants(
+            e,
+            &[grant_on(c, (Some("sch"), None), actions, effect)],
+            &Directory::default(),
+        )
+        .unwrap()
+    }
+
+    fn privs(s: &Statement) -> &[Privilege] {
+        match &s.effect {
+            crate::statement::Effect::Allow { privileges }
+            | crate::statement::Effect::Deny { privileges } => privileges,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_target_lacking_manage_lowers_it_with_the_matrix_reason() {
+        let c = Uuid::from_u128(9);
+        let out = lower(&opa_ep(c), c, vec![Action::Manage], Effect::Allow);
+        assert_eq!(out.lowerings.len(), 1);
+        assert_eq!(out.lowerings[0].code, ReasonCode::PrivilegeNotEnforceable);
+        assert_eq!(
+            out.lowerings[0].detail,
+            "manage not enforceable by opa@2.8.0"
+        );
+        // The statement is stripped to nothing for that target.
+        assert!(strip_unenforced(&opa_ep(c), &out.statements[0]).is_none());
+        // Create is lowered the same way on OPA.
+        let out = lower(&opa_ep(c), c, vec![Action::Create], Effect::Allow);
+        assert!(out.lowerings[0]
+            .detail
+            .starts_with("create not enforceable by opa@"));
+    }
+
+    #[test]
+    fn a_target_supporting_create_and_manage_keeps_them_without_a_reason() {
+        let c = Uuid::from_u128(9);
+        let e = ep(c);
+        let out = lower(&e, c, vec![Action::Create, Action::Manage], Effect::Allow);
+        assert!(out.lowerings.is_empty());
+        let kept = strip_unenforced(&e, &out.statements[0]).unwrap();
+        assert_eq!(privs(&kept), [Privilege::Create, Privilege::Manage]);
+    }
+
+    #[test]
+    fn browse_is_lowered_on_both_targets_with_a_reason() {
+        let c = Uuid::from_u128(9);
+        for e in [ep(c), opa_ep(c)] {
+            let out = lower(&e, c, vec![Action::Browse], Effect::Allow);
+            assert_eq!(out.lowerings.len(), 1, "{:?}", e.kind);
+            assert!(out.lowerings[0]
+                .detail
+                .starts_with("browse not enforceable by "));
+            assert!(strip_unenforced(&e, &out.statements[0]).is_none());
+        }
+    }
+
+    #[test]
+    fn an_implied_browse_is_stripped_silently_and_a_mixed_statement_keeps_its_enforced_part() {
+        let c = Uuid::from_u128(9);
+        for e in [ep(c), opa_ep(c)] {
+            let out = lower(&e, c, vec![Action::Read], Effect::Allow);
+            assert!(out.lowerings.is_empty(), "implied browse is no request");
+            let kept: Vec<_> = out
+                .statements
+                .iter()
+                .filter_map(|s| strip_unenforced(&e, s))
+                .collect();
+            assert_eq!(kept.len(), 1);
+            assert_eq!(privs(&kept[0]), [Privilege::Read]);
+        }
+        // An owner-shaped statement (all five) on OPA keeps read+write only.
+        let c = Uuid::from_u128(9);
+        let all = vec![
+            Action::Browse,
+            Action::Read,
+            Action::Write,
+            Action::Create,
+            Action::Manage,
+        ];
+        let out = lower(&opa_ep(c), c, all.clone(), Effect::Allow);
+        let kept = strip_unenforced(&opa_ep(c), &out.statements[0]).unwrap();
+        assert_eq!(privs(&kept), [Privilege::Read, Privilege::Write]);
+        let out = lower(&ep(c), c, all, Effect::Allow);
+        let kept = strip_unenforced(&ep(c), &out.statements[0]).unwrap();
+        assert_eq!(
+            privs(&kept),
+            [
+                Privilege::Read,
+                Privilege::Write,
+                Privilege::Create,
+                Privilege::Manage
+            ]
+        );
+    }
+
+    #[test]
+    fn the_lowering_follows_the_matrix_not_a_hard_coded_list() {
+        let c = Uuid::from_u128(9);
+        let out = lower(&ep(c), c, vec![Action::Create], Effect::Allow);
+        let s = &out.statements[0];
+        // The matrix as shipped: Ranger enforces create.
+        let shipped = |p| crate::matrix::privilege_gap_for_ep(&ep(c), p);
+        assert_eq!(strip_unenforced_by(&shipped, s).as_ref(), Some(s));
+        // Flip the one entry: create unenforced, and the same statement lowers.
+        let flipped =
+            |p| (p == Privilege::Create).then(|| "create not enforceable by x".to_string());
+        assert!(strip_unenforced_by(&flipped, s).is_none());
+        let g = grant_on(c, (Some("sch"), None), vec![Action::Create], Effect::Allow);
+        let reasons = unenforced_lowerings(&flipped, &g, &[Privilege::Create]);
+        assert_eq!(reasons[0].detail, "create not enforceable by x");
+        assert!(unenforced_lowerings(&shipped, &g, &[Privilege::Create]).is_empty());
+    }
+
+    #[test]
+    fn read_and_write_are_never_consulted_even_if_the_matrix_said_otherwise() {
+        let c = Uuid::from_u128(9);
+        let out = lower(&ep(c), c, vec![Action::Read, Action::Write], Effect::Allow);
+        let all_gap = |_p| Some("nope".to_string());
+        let kept = strip_unenforced_by(&all_gap, &out.statements[0]).unwrap();
+        assert_eq!(privs(&kept), [Privilege::Read, Privilege::Write]);
     }
 }

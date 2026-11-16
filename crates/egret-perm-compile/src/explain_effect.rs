@@ -310,6 +310,32 @@ pub(crate) fn not_enforced_line(
     l.finish(EffectAbout::Access, EffectOutcome::NotEnforced)
 }
 
+/// The privilege a gated action (browse, create, manage) is decided by; `None`
+/// for `read`/`write`, which every target enforces and the matrix is not asked.
+pub(crate) fn gated_privilege(action: Action) -> Option<egret_perm_ir::statement::Privilege> {
+    use egret_perm_ir::statement::Privilege;
+    match action {
+        Action::Browse => Some(Privilege::Browse),
+        Action::Create => Some(Privilege::Create),
+        Action::Manage => Some(Privilege::Manage),
+        Action::Read | Action::Write => None,
+    }
+}
+
+/// SP5a: the one line an explain of a privilege the target cannot enforce
+/// shows, in place of an access verdict. `gap` is the matrix's text
+/// (`egret_perm_ir::matrix::privilege_gap`).
+pub(crate) fn privilege_not_enforced_line(subject: &str, gap: &str) -> ExplainEffectLine {
+    let mut l = Line::default();
+    l.push(EffectPart::Subject {
+        text: subject.to_string(),
+    });
+    l.text(": ");
+    l.strong("not enforced");
+    l.text(format!(" ({gap})"));
+    l.finish(EffectAbout::Access, EffectOutcome::NotEnforced)
+}
+
 #[derive(Default)]
 struct Line {
     parts: Vec<EffectPart>,
