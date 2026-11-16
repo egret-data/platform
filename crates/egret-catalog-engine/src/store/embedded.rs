@@ -81,6 +81,9 @@ pub struct NewClient {
     pub workspace_id: Uuid,
     pub warehouse_id: Uuid,
     pub catalog_role_id: Uuid,
+    /// Owning workspace service account. Required: the verifier is fail-closed
+    /// on a NULL owner, so no client may be minted without one.
+    pub service_account_id: Uuid,
 }
 
 /// The one-time create result: the generated `client_id` + plaintext `client_secret`.
@@ -531,8 +534,8 @@ impl CatalogStore {
             .to_string();
         let id: Uuid = sqlx::query_scalar(
             "INSERT INTO catalog.catalog_clients \
-               (name, consumer_type, workspace_id, warehouse_id, catalog_role_id, client_id, client_secret_hash) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
+               (name, consumer_type, workspace_id, warehouse_id, catalog_role_id, client_id, client_secret_hash, service_account_id) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
         )
         .bind(&c.name)
         .bind(&c.consumer_type)
@@ -541,6 +544,7 @@ impl CatalogStore {
         .bind(c.catalog_role_id)
         .bind(&client_id)
         .bind(&hash)
+        .bind(c.service_account_id)
         .fetch_one(self.pool())
         .await?;
         Ok(CreatedClient {
@@ -575,21 +579,52 @@ impl CatalogStore {
     /// The row a Catalog Client mints from: `(id, client_secret_hash,
     /// warehouse name, role name)`. Read by both [`Self::verify_client`] and the
     /// `ClientVerifier::current` impl, so the secret path and the secret-free
-    /// path cannot disagree about which clients exist.
+    /// path cannot disagree about which clients exist or may mint.
+    ///
+    /// This is the service-account kill switch. A client with no owning service
+    /// account (the INNER JOIN drops a NULL `service_account_id`: fail-closed), a
+    /// disabled owner, a revoked or an expired credential all read as `None` —
+    /// the same answer as an unknown client, so a refusal is no probing oracle.
     async fn client_row(
         &self,
         client_id: &str,
     ) -> Result<Option<(Uuid, String, String, String)>, CatalogError> {
-        Ok(sqlx::query_as(
-            "SELECT c.id, c.client_secret_hash, w.name, r.name \
+        type Raw = (
+            Uuid,
+            String,
+            String,
+            String,
+            String,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            String,
+        );
+        let row: Option<Raw> = sqlx::query_as(
+            "SELECT c.id, c.client_secret_hash, w.name, r.name, \
+                    u.status, c.revoked_at, c.expires_at, ws.status \
              FROM catalog.catalog_clients c \
              JOIN catalog.warehouses w ON w.id = c.warehouse_id \
              JOIN catalog.catalog_roles r ON r.id = c.catalog_role_id \
+             JOIN service_accounts sa ON sa.user_id = c.service_account_id \
+             JOIN users u ON u.id = sa.user_id \
+             JOIN workspaces ws ON ws.id = c.workspace_id \
              WHERE c.client_id = $1",
         )
         .bind(client_id)
         .fetch_optional(self.pool())
-        .await?)
+        .await?;
+        let Some((id, hash, warehouse, role, status, revoked_at, expires_at, ws_status)) = row
+        else {
+            return Ok(None);
+        };
+        if status != "active"
+            || ws_status != "active"
+            || revoked_at.is_some()
+            || expires_at.is_some_and(|exp| exp <= Utc::now())
+        {
+            return Ok(None);
+        }
+        Ok(Some((id, hash, warehouse, role)))
     }
 
     /// Verify a client's secret; on success return its warehouse name + role name
@@ -862,8 +897,9 @@ impl egret_machine_idp::ClientVerifier for CatalogStore {
         ))
     }
 
-    /// A Catalog Client has no refusal beyond existing: revoking one DELETEs
-    /// its row. So the row read alone is the whole answer.
+    /// Revalidation on every IdP cache hit: the same gated row read as
+    /// `verify`, so a just-disabled owner or a revoked/expired client stops
+    /// minting on the next request instead of being served from the cache.
     async fn current(
         &self,
         client_id: &str,

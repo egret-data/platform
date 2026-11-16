@@ -736,6 +736,68 @@ pub async fn usernames_via(
         .collect())
 }
 
+/// Ensure a workspace-scoped service account owns a catalog client, returning
+/// its user id. The one place every catalog-client creator (warehouse-admin
+/// route, engine provisioning, the SA2 backfill) gets an owner, because the
+/// catalog verifier is fail-closed on a NULL `service_account_id`.
+///
+/// `key` is the deterministic identity of the client being owned (its row id
+/// for the backfill, a fresh id for a client not yet inserted); the email
+/// `svc-catalog-<key>@service.egret.local` is derived from it, so a retry with
+/// the same key returns the same account instead of minting a second one.
+/// Ledger-correct: the `svc-` username goes through [`ensure_username_via`].
+/// Runs on the caller's connection so the caller decides the transaction.
+pub async fn ensure_catalog_client_sa(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+    key: Uuid,
+    name: &str,
+) -> Result<Uuid> {
+    let email = format!("svc-catalog-{key}@service.egret.local");
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT u.id FROM users u JOIN service_accounts sa ON sa.user_id = u.id \
+          WHERE u.email = $1 AND sa.scope = 'workspace' AND sa.workspace_id = $2",
+    )
+    .bind(&email)
+    .bind(workspace_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+
+    // `(workspace_id, name)` is unique among workspace SAs and client names are
+    // not unique, so a taken name gets the key appended.
+    let mut sa_name = format!("catalog:{name}");
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM service_accounts \
+          WHERE scope = 'workspace' AND workspace_id = $1 AND name = $2)",
+    )
+    .bind(workspace_id)
+    .bind(&sa_name)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if taken {
+        sa_name = format!("{sa_name}-{key}");
+    }
+
+    let user_id = UserRepo::insert_service_with(&mut *conn, &email, &sa_name).await?;
+    ensure_username_via(conn, user_id).await?;
+    sqlx::query(
+        "INSERT INTO service_accounts (user_id, scope, workspace_id, name, description) \
+         VALUES ($1, 'workspace', $2, $3, 'Owns a catalog client; created with the client')",
+    )
+    .bind(user_id.0)
+    .bind(workspace_id)
+    .bind(&sa_name)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(user_id.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

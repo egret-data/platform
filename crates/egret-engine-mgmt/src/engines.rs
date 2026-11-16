@@ -3164,6 +3164,32 @@ async fn list_engines(
     Ok(Json(out))
 }
 
+/// Mint the workspace service account that owns an engine's catalog client.
+/// The catalog verifier is fail-closed on a NULL owner, so every
+/// `catalog.create_client` here is preceded by this. A fresh key per client
+/// (the row id does not exist yet); an owner left behind by a failed mint is
+/// an inert, credential-less account.
+pub(crate) async fn ensure_client_owner(
+    st: &CpState,
+    workspace_id: Uuid,
+    client_name: &str,
+) -> Result<Uuid, CpError> {
+    let mut conn = st
+        .engine_mgmt
+        .pool()
+        .acquire()
+        .await
+        .map_err(crate::http_error::db_error)?;
+    egret_auth::users::ensure_catalog_client_sa(
+        &mut conn,
+        workspace_id,
+        Uuid::new_v4(),
+        client_name,
+    )
+    .await
+    .map_err(CpError::from)
+}
+
 /// Find (or create) the shared per-warehouse engine role and return its id. A new
 /// role is granted catalog-wide `manage` so the engine can read + write the
 /// whole warehouse.
@@ -4018,9 +4044,12 @@ async fn create_engine(
         )
         .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
+    let service_account_id =
+        ensure_client_owner(&st, wh.workspace_id, &format!("engine-{}", b.name)).await?;
     let client = st
         .catalog
         .create_client(NewClient {
+            service_account_id,
             name: format!("engine-{}", b.name),
             consumer_type: "engine".into(),
             workspace_id: wh.workspace_id,
@@ -5050,9 +5079,12 @@ async fn create_starrocks_engine(
         )
         .await?;
     let role_id = ensure_engine_role(&st, wh.id).await?;
+    let service_account_id =
+        ensure_client_owner(&st, wh.workspace_id, &format!("engine-{}", b.name)).await?;
     let client = st
         .catalog
         .create_client(NewClient {
+            service_account_id,
             name: format!("engine-{}", b.name),
             consumer_type: "engine".into(),
             workspace_id: wh.workspace_id,
@@ -10148,9 +10180,14 @@ mod tests {
             .await
             .expect("commit");
         let role_id = ensure_engine_role(&st, wh.id).await.expect("role");
+        let service_account_id =
+            ensure_client_owner(&st, wh.workspace_id, &format!("engine-{}", engine.name))
+                .await
+                .expect("owner");
         let client = st
             .catalog
             .create_client(NewClient {
+                service_account_id,
                 name: format!("engine-{}", engine.name),
                 consumer_type: "engine".into(),
                 workspace_id: wh.workspace_id,
@@ -10159,6 +10196,16 @@ mod tests {
             })
             .await
             .expect("client");
+        // SA2: the engine-minted client is born owned (the verifier is
+        // fail-closed on a NULL owner).
+        let owner: Option<Uuid> = sqlx::query_scalar(
+            "SELECT service_account_id FROM catalog.catalog_clients WHERE id = $1",
+        )
+        .bind(client.id)
+        .fetch_one(st.engine_mgmt.pool())
+        .await
+        .expect("owner row");
+        assert_eq!(owner, Some(service_account_id), "engine mint has an owner");
 
         compensate_failed_create(
             &st,

@@ -14,6 +14,7 @@
 //! avoid colliding with the embedded-catalog `roles`/`role_id` routes already
 //! served by `warehouses.rs`.
 
+mod credentials;
 mod service_accounts;
 
 use axum::extract::{Path, State};
@@ -67,6 +68,7 @@ pub fn router() -> Router<CpState> {
         .route("/access/effective", get(get_effective_access))
         .route("/access/who-can-access", get(who_can_access))
         .merge(service_accounts::router())
+        .merge(credentials::router())
 }
 
 /// Revoke platform role `role_id` from (`principal_type`, `principal_id`)
@@ -1545,6 +1547,11 @@ async fn who_can_access(
         service_accounts::remove_service_account_group,
         service_accounts::add_service_account_role,
         service_accounts::remove_service_account_role,
+        credentials::list_credentials,
+        credentials::create_credential,
+        credentials::rotate_credential,
+        credentials::revoke_credential,
+        credentials::set_credential_expiry,
     ),
     components(schemas(
         UserDto,
@@ -1580,6 +1587,13 @@ async fn who_can_access(
         service_accounts::CreateServiceAccountBody,
         service_accounts::AddGroupBody,
         service_accounts::AddRoleBody,
+        credentials::Credential,
+        credentials::CreatedCredential,
+        credentials::CreateCredentialBody,
+        credentials::SetExpiryBody,
+        credentials::CatalogBinding,
+        credentials::Audience,
+        credentials::CredentialStatus,
         ErrorBody,
     )),
     tags((name = "control-plane-access", description = "Platform access control: users, groups, roles, and the permission catalog")),

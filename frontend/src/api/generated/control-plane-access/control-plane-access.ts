@@ -33,10 +33,13 @@ import type {
   ControlPlaneAccessListServiceAccountsParams,
   ControlPlaneAccessWhoCanAccessParams,
   ControlPlaneUserDto,
+  CreateCredentialBody,
   CreateGroupInput,
   CreateRoleInput,
   CreateServiceAccountBody,
   CreateUserInput,
+  CreatedCredential,
+  Credential,
   EffectiveAccess,
   ErrorBody,
   GroupDto,
@@ -48,6 +51,7 @@ import type {
   RoleDto,
   ServiceAccountDetailDto,
   ServiceAccountDto,
+  SetExpiryBody,
   SetPermissionsInput,
   UpdateRoleInput,
   UpdateUserInput,
@@ -2730,6 +2734,544 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getControlPlaneAccessDeleteServiceAccountMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessListCredentialsResponse200 = {
+  data: Credential[]
+  status: 200
+}
+
+export type controlPlaneAccessListCredentialsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessListCredentialsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessListCredentialsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessListCredentialsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessListCredentialsResponseSuccess = (controlPlaneAccessListCredentialsResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessListCredentialsResponseError = (controlPlaneAccessListCredentialsResponse401 | controlPlaneAccessListCredentialsResponse403 | controlPlaneAccessListCredentialsResponse404 | controlPlaneAccessListCredentialsResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessListCredentialsResponse = (controlPlaneAccessListCredentialsResponseSuccess | controlPlaneAccessListCredentialsResponseError)
+
+export const getControlPlaneAccessListCredentialsUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/credentials`
+}
+
+export const controlPlaneAccessListCredentials = async (id: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessListCredentialsResponse> => {
+
+  return customInstance<controlPlaneAccessListCredentialsResponse>(getControlPlaneAccessListCredentialsUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessListCredentialsQueryKey = (id: string,) => {
+    return [
+    `/api/control-plane/service-accounts/${encodeURIComponent(id)}/credentials`
+    ] as const;
+    }
+
+
+export const getControlPlaneAccessListCredentialsQueryOptions = <TData = Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError = ErrorBody>(id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlaneAccessListCredentialsQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>> = ({ signal }) => controlPlaneAccessListCredentials(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlaneAccessListCredentialsQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>>
+export type ControlPlaneAccessListCredentialsQueryError = ErrorBody
+
+
+export function useControlPlaneAccessListCredentials<TData = Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError = ErrorBody>(
+ id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessListCredentials<TData = Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlaneAccessListCredentials<TData = Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlaneAccessListCredentials<TData = Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError = ErrorBody>(
+ id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlaneAccessListCredentials>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlaneAccessListCredentialsQueryOptions(id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlaneAccessCreateCredentialResponse201 = {
+  data: CreatedCredential
+  status: 201
+}
+
+export type controlPlaneAccessCreateCredentialResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type controlPlaneAccessCreateCredentialResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessCreateCredentialResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessCreateCredentialResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessCreateCredentialResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessCreateCredentialResponseSuccess = (controlPlaneAccessCreateCredentialResponse201) & {
+  headers: Headers;
+};
+export type controlPlaneAccessCreateCredentialResponseError = (controlPlaneAccessCreateCredentialResponse400 | controlPlaneAccessCreateCredentialResponse401 | controlPlaneAccessCreateCredentialResponse403 | controlPlaneAccessCreateCredentialResponse404 | controlPlaneAccessCreateCredentialResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessCreateCredentialResponse = (controlPlaneAccessCreateCredentialResponseSuccess | controlPlaneAccessCreateCredentialResponseError)
+
+export const getControlPlaneAccessCreateCredentialUrl = (id: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/credentials`
+}
+
+export const controlPlaneAccessCreateCredential = async (id: string,
+    createCredentialBody: CreateCredentialBody, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessCreateCredentialResponse> => {
+
+  return customInstance<controlPlaneAccessCreateCredentialResponse>(getControlPlaneAccessCreateCredentialUrl(id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(createCredentialBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessCreateCredentialMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessCreateCredential>>, TError,{id: string;data: CreateCredentialBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessCreateCredential>>, TError,{id: string;data: CreateCredentialBody}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessCreateCredential'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessCreateCredential>>, {id: string;data: CreateCredentialBody}> = (props) => {
+          const {id,data} = props ?? {};
+
+          return  controlPlaneAccessCreateCredential(id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessCreateCredentialMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessCreateCredential>>>
+    export type ControlPlaneAccessCreateCredentialMutationBody = CreateCredentialBody
+    export type ControlPlaneAccessCreateCredentialMutationError = ErrorBody
+
+    export const useControlPlaneAccessCreateCredential = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessCreateCredential>>, TError,{id: string;data: CreateCredentialBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessCreateCredential>>,
+        TError,
+        {id: string;data: CreateCredentialBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessCreateCredentialMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessSetCredentialExpiryResponse200 = {
+  data: Credential
+  status: 200
+}
+
+export type controlPlaneAccessSetCredentialExpiryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessSetCredentialExpiryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessSetCredentialExpiryResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessSetCredentialExpiryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessSetCredentialExpiryResponseSuccess = (controlPlaneAccessSetCredentialExpiryResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessSetCredentialExpiryResponseError = (controlPlaneAccessSetCredentialExpiryResponse401 | controlPlaneAccessSetCredentialExpiryResponse403 | controlPlaneAccessSetCredentialExpiryResponse404 | controlPlaneAccessSetCredentialExpiryResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessSetCredentialExpiryResponse = (controlPlaneAccessSetCredentialExpiryResponseSuccess | controlPlaneAccessSetCredentialExpiryResponseError)
+
+export const getControlPlaneAccessSetCredentialExpiryUrl = (id: string,
+    cid: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/credentials/${encodeURIComponent(cid)}/expiry`
+}
+
+export const controlPlaneAccessSetCredentialExpiry = async (id: string,
+    cid: string,
+    setExpiryBody: SetExpiryBody, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessSetCredentialExpiryResponse> => {
+
+  return customInstance<controlPlaneAccessSetCredentialExpiryResponse>(getControlPlaneAccessSetCredentialExpiryUrl(id,cid),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(setExpiryBody)
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessSetCredentialExpiryMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessSetCredentialExpiry>>, TError,{id: string;cid: string;data: SetExpiryBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessSetCredentialExpiry>>, TError,{id: string;cid: string;data: SetExpiryBody}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessSetCredentialExpiry'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessSetCredentialExpiry>>, {id: string;cid: string;data: SetExpiryBody}> = (props) => {
+          const {id,cid,data} = props ?? {};
+
+          return  controlPlaneAccessSetCredentialExpiry(id,cid,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessSetCredentialExpiryMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessSetCredentialExpiry>>>
+    export type ControlPlaneAccessSetCredentialExpiryMutationBody = SetExpiryBody
+    export type ControlPlaneAccessSetCredentialExpiryMutationError = ErrorBody
+
+    export const useControlPlaneAccessSetCredentialExpiry = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessSetCredentialExpiry>>, TError,{id: string;cid: string;data: SetExpiryBody}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessSetCredentialExpiry>>,
+        TError,
+        {id: string;cid: string;data: SetExpiryBody},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessSetCredentialExpiryMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessRevokeCredentialResponse200 = {
+  data: Credential
+  status: 200
+}
+
+export type controlPlaneAccessRevokeCredentialResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessRevokeCredentialResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessRevokeCredentialResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessRevokeCredentialResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessRevokeCredentialResponseSuccess = (controlPlaneAccessRevokeCredentialResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessRevokeCredentialResponseError = (controlPlaneAccessRevokeCredentialResponse401 | controlPlaneAccessRevokeCredentialResponse403 | controlPlaneAccessRevokeCredentialResponse404 | controlPlaneAccessRevokeCredentialResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessRevokeCredentialResponse = (controlPlaneAccessRevokeCredentialResponseSuccess | controlPlaneAccessRevokeCredentialResponseError)
+
+export const getControlPlaneAccessRevokeCredentialUrl = (id: string,
+    cid: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/credentials/${encodeURIComponent(cid)}/revoke`
+}
+
+export const controlPlaneAccessRevokeCredential = async (id: string,
+    cid: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessRevokeCredentialResponse> => {
+
+  return customInstance<controlPlaneAccessRevokeCredentialResponse>(getControlPlaneAccessRevokeCredentialUrl(id,cid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessRevokeCredentialMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRevokeCredential>>, TError,{id: string;cid: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRevokeCredential>>, TError,{id: string;cid: string}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessRevokeCredential'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessRevokeCredential>>, {id: string;cid: string}> = (props) => {
+          const {id,cid} = props ?? {};
+
+          return  controlPlaneAccessRevokeCredential(id,cid,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessRevokeCredentialMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessRevokeCredential>>>
+
+    export type ControlPlaneAccessRevokeCredentialMutationError = ErrorBody
+
+    export const useControlPlaneAccessRevokeCredential = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRevokeCredential>>, TError,{id: string;cid: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessRevokeCredential>>,
+        TError,
+        {id: string;cid: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessRevokeCredentialMutationOptions(options), queryClient);
+    }
+    export type controlPlaneAccessRotateCredentialResponse200 = {
+  data: CreatedCredential
+  status: 200
+}
+
+export type controlPlaneAccessRotateCredentialResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneAccessRotateCredentialResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneAccessRotateCredentialResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneAccessRotateCredentialResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneAccessRotateCredentialResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneAccessRotateCredentialResponseSuccess = (controlPlaneAccessRotateCredentialResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneAccessRotateCredentialResponseError = (controlPlaneAccessRotateCredentialResponse401 | controlPlaneAccessRotateCredentialResponse403 | controlPlaneAccessRotateCredentialResponse404 | controlPlaneAccessRotateCredentialResponse409 | controlPlaneAccessRotateCredentialResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneAccessRotateCredentialResponse = (controlPlaneAccessRotateCredentialResponseSuccess | controlPlaneAccessRotateCredentialResponseError)
+
+export const getControlPlaneAccessRotateCredentialUrl = (id: string,
+    cid: string,) => {
+
+
+
+
+  return `/api/control-plane/service-accounts/${encodeURIComponent(id)}/credentials/${encodeURIComponent(cid)}/rotate`
+}
+
+export const controlPlaneAccessRotateCredential = async (id: string,
+    cid: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneAccessRotateCredentialResponse> => {
+
+  return customInstance<controlPlaneAccessRotateCredentialResponse>(getControlPlaneAccessRotateCredentialUrl(id,cid),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneAccessRotateCredentialMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRotateCredential>>, TError,{id: string;cid: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRotateCredential>>, TError,{id: string;cid: string}, TContext> => {
+
+const mutationKey = ['controlPlaneAccessRotateCredential'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneAccessRotateCredential>>, {id: string;cid: string}> = (props) => {
+          const {id,cid} = props ?? {};
+
+          return  controlPlaneAccessRotateCredential(id,cid,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneAccessRotateCredentialMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneAccessRotateCredential>>>
+
+    export type ControlPlaneAccessRotateCredentialMutationError = ErrorBody
+
+    export const useControlPlaneAccessRotateCredential = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneAccessRotateCredential>>, TError,{id: string;cid: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneAccessRotateCredential>>,
+        TError,
+        {id: string;cid: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneAccessRotateCredentialMutationOptions(options), queryClient);
     }
     export type controlPlaneAccessDisableServiceAccountResponse200 = {
   data: ServiceAccountDetailDto

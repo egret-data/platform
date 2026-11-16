@@ -1154,9 +1154,16 @@ async fn attach_to_engine_inner(
             }
             None => ensure_engine_role(st, wh.id).await?,
         };
+        let service_account_id = crate::engines::ensure_client_owner(
+            st,
+            wh.workspace_id,
+            &format!("engine-{}-{}", engine.name, catalog.name),
+        )
+        .await?;
         let client = st
             .catalog
             .create_client(NewClient {
+                service_account_id,
                 name: format!("engine-{}-{}", engine.name, catalog.name),
                 consumer_type: "engine".into(),
                 workspace_id: wh.workspace_id,

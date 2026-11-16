@@ -31,8 +31,10 @@ async fn create_client_then_verify() {
         .await
         .unwrap();
 
+    let sa = common::seed_service_account(&store, ws).await;
     let created = store
         .create_client(&NewClient {
+            service_account_id: sa,
             name: "trino-eng".into(),
             consumer_type: "engine".into(),
             workspace_id: ws,
@@ -43,6 +45,8 @@ async fn create_client_then_verify() {
         .unwrap();
     assert!(created.client_id.starts_with("egret_"));
     assert!(!created.client_secret.is_empty());
+
+    // A client verifies only while an active service account owns it (SA2).
 
     // Correct secret verifies + returns (warehouse name, role name).
     let vc = store
@@ -84,8 +88,10 @@ async fn current_mirrors_verify_without_the_secret() {
         .create_role(wh.id, "engine", "engine", None)
         .await
         .unwrap();
+    let sa = common::seed_service_account(&store, ws).await;
     let created = store
         .create_client(&NewClient {
+            service_account_id: sa,
             name: "trino-eng".into(),
             consumer_type: "engine".into(),
             workspace_id: ws,

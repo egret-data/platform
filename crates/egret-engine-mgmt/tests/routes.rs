@@ -4004,8 +4004,17 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
         )
         .await
         .unwrap();
+    let owner = egret_auth::users::ensure_catalog_client_sa(
+        &mut catalog_store.pool().acquire().await.unwrap(),
+        wh.workspace_id,
+        uuid::Uuid::new_v4(),
+        "not-minted-by-the-engine",
+    )
+    .await
+    .unwrap();
     let foreign = catalog_store
         .create_client(&egret_catalog_engine::NewClient {
+            service_account_id: owner,
             name: "not-minted-by-the-engine".into(),
             consumer_type: "external".into(),
             workspace_id: wh.workspace_id,
