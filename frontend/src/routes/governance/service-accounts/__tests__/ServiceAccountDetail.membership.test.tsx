@@ -14,6 +14,7 @@ const api = vi.hoisted(() => ({
   removeServiceAccountGroup: vi.fn(),
   addServiceAccountRole: vi.fn(),
   removeServiceAccountRole: vi.fn(),
+  listCredentials: vi.fn(),
 }));
 const access = vi.hoisted(() => ({ listGroups: vi.fn(), listRoles: vi.fn() }));
 
@@ -79,6 +80,7 @@ async function choose(user: ReturnType<typeof userEvent.setup>, label: string, o
 
 beforeEach(() => {
   api.getServiceAccount.mockResolvedValue(SA);
+  api.listCredentials.mockResolvedValue([]);
   api.addServiceAccountGroup.mockResolvedValue(undefined);
   api.removeServiceAccountGroup.mockResolvedValue(undefined);
   api.addServiceAccountRole.mockResolvedValue(undefined);

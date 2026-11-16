@@ -9,6 +9,7 @@ import { PageContainer } from "@/components/layout/PageContainer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Badge } from "@/components/ui/badge";
+import { CredentialsPanel } from "@/routes/governance/service-accounts/CredentialsPanel";
 import { MembershipSection } from "@/routes/governance/service-accounts/MembershipSection";
 import { SERVICE_ACCOUNTS_BASE } from "@/routes/governance/service-accounts/serviceAccountsUrl";
 import { Section, TabError } from "@/routes/governance/tabParts";
@@ -75,9 +76,7 @@ export default function ServiceAccountDetail() {
           </div>
         </Section>
         <MembershipSection account={sa} />
-        <Section title="Credentials">
-          <p className="text-sm text-muted-foreground">Credentials are coming soon.</p>
-        </Section>
+        <CredentialsPanel account={sa} />
       </div>
     </PageContainer>
   );
