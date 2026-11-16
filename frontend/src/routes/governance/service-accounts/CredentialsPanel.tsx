@@ -2,6 +2,7 @@ import { useState } from "react";
 import dayjs from "dayjs";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock, Plus, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
 import { listRoles, listWarehouses } from "@/api/controlPlane";
 import {
   credentialsQueryKey,
@@ -116,7 +117,10 @@ export function CredentialsPanel({ account }: { account: ServiceAccountDetailDto
   const revoke = useMutation({
     mutationFn: (c: Credential) => revokeCredential(id, c.id),
     onMutate: () => setActionError(null),
-    onSuccess: refresh,
+    onSuccess: async () => {
+      await refresh();
+      toast.success("Credential revoked.");
+    },
     onError: fail,
   });
   const expiry = useMutation({
@@ -126,6 +130,7 @@ export function CredentialsPanel({ account }: { account: ServiceAccountDetailDto
     onSuccess: async () => {
       await refresh();
       setExpiring(null);
+      toast.success("Expiry updated.");
     },
     onError: (e) => {
       fail(e);

@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Plus } from "lucide-react";
+import { toast } from "sonner";
 import { useAdminWorkspacesListWs } from "@/api/generated/admin-workspaces/admin-workspaces";
 import {
   createServiceAccount,
@@ -93,13 +94,19 @@ export default function ServiceAccountsIndex() {
     mutationFn: (sa: ServiceAccountDto) =>
       sa.status === "active" ? disableServiceAccount(sa.user_id) : enableServiceAccount(sa.user_id),
     onMutate: () => setActionError(null),
-    onSuccess: invalidate,
+    onSuccess: async (_, sa) => {
+      await invalidate();
+      toast.success(sa.status === "active" ? "Service account disabled." : "Service account enabled.");
+    },
     onError: (e) => setActionError(errorText(e)),
   });
   const remove = useMutation({
     mutationFn: (sa: ServiceAccountDto) => deleteServiceAccount(sa.user_id),
     onMutate: () => setActionError(null),
-    onSuccess: invalidate,
+    onSuccess: async () => {
+      await invalidate();
+      toast.success("Service account deleted.");
+    },
     onError: (e) => setActionError(errorText(e)),
   });
   const [deleting, setDeleting] = useState<ServiceAccountDto | null>(null);

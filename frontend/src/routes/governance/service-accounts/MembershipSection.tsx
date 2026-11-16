@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, X } from "lucide-react";
+import { toast } from "sonner";
 import { ApiError } from "@/api/client";
 import { listGroups, listRoles } from "@/api/access";
 import {
@@ -141,18 +142,30 @@ export function MembershipSection({ account }: { account: ServiceAccountDetailDt
   const groups = useQuery({ queryKey: ["access", "groups"], queryFn: listGroups });
   const roles = useQuery({ queryKey: ["access", "roles"], queryFn: listRoles });
 
-  const settle = {
+  const settle = (message: string) => ({
     onMutate: () => setError(null),
-    onSuccess: () => qc.invalidateQueries({ queryKey: serviceAccountQueryKey(id) }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: serviceAccountQueryKey(id) });
+      toast.success(message);
+    },
     onError: (e: unknown) => setError(membershipErrorText(e)),
-  };
-  const addGroup = useMutation({ mutationFn: (groupId: string) => addServiceAccountGroup(id, { group_id: groupId }), ...settle });
+  });
+  const addGroup = useMutation({
+    mutationFn: (groupId: string) => addServiceAccountGroup(id, { group_id: groupId }),
+    ...settle("Added to group."),
+  });
   const addRole = useMutation({
     mutationFn: (roleId: string) => addServiceAccountRole(id, { role_id: roleId, scope_type: "platform" }),
-    ...settle,
+    ...settle("Role added."),
   });
-  const removeGroup = useMutation({ mutationFn: (groupId: string) => removeServiceAccountGroup(id, groupId), ...settle });
-  const removeRole = useMutation({ mutationFn: (roleId: string) => removeServiceAccountRole(id, roleId), ...settle });
+  const removeGroup = useMutation({
+    mutationFn: (groupId: string) => removeServiceAccountGroup(id, groupId),
+    ...settle("Removed from group."),
+  });
+  const removeRole = useMutation({
+    mutationFn: (roleId: string) => removeServiceAccountRole(id, roleId),
+    ...settle("Role removed."),
+  });
 
   const allGroups = groups.data ?? [];
   const platformRoles = (roles.data ?? []).filter((r) => r.scope === "platform");

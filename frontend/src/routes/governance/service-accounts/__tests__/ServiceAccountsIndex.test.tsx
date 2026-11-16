@@ -3,6 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { toast } from "sonner";
 import type { ServiceAccountDto } from "@/api/serviceAccounts";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ServiceAccountsRoutes from "@/routes/governance/service-accounts/ServiceAccountsRoutes";
@@ -15,6 +16,7 @@ const api = vi.hoisted(() => ({
   deleteServiceAccount: vi.fn(),
 }));
 
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 vi.mock("@/api/serviceAccounts", async (importActual) => ({
   ...(await importActual<typeof import("@/api/serviceAccounts")>()),
   ...api,
@@ -186,6 +188,8 @@ describe("ServiceAccountsIndex", () => {
     await waitFor(() => expect(invalidate).toHaveBeenCalled());
     await user.click(screen.getByRole("button", { name: "Enable etl" }));
     await waitFor(() => expect(api.enableServiceAccount).toHaveBeenCalledWith("sa-2"));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Service account disabled."));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Service account enabled."));
   });
 
   it("surfaces a 409 from disable inline", async () => {
@@ -207,5 +211,6 @@ describe("ServiceAccountsIndex", () => {
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(api.deleteServiceAccount).toHaveBeenCalledWith("sa-2"));
     await waitFor(() => expect(invalidate).toHaveBeenCalled());
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Service account deleted."));
   });
 });

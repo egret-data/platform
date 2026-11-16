@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { ApiError } from "@/api/client";
 import type { ServiceAccountDetailDto } from "@/api/serviceAccounts";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -18,6 +19,7 @@ const api = vi.hoisted(() => ({
 }));
 const access = vi.hoisted(() => ({ listGroups: vi.fn(), listRoles: vi.fn() }));
 
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 vi.mock("@/api/serviceAccounts", async (importActual) => ({
   ...(await importActual<typeof import("@/api/serviceAccounts")>()),
   ...api,
@@ -56,16 +58,22 @@ const role = (id: string, name: string, scope = "platform") => ({
   inheritedPermissions: [],
 });
 
-function open() {
+function Where() {
+  const l = useLocation();
+  return <output data-testid="where">{l.pathname + l.search}</output>;
+}
+
+function open(url = "/governance/service-accounts/sa-1?tab=membership") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const invalidate = vi.spyOn(qc, "invalidateQueries");
   render(
     <QueryClientProvider client={qc}>
       <TooltipProvider>
-        <MemoryRouter initialEntries={["/governance/service-accounts/sa-1"]}>
+        <MemoryRouter initialEntries={[url]}>
           <Routes>
             <Route path="/governance/service-accounts/*" element={<ServiceAccountsRoutes />} />
           </Routes>
+          <Where />
         </MemoryRouter>
       </TooltipProvider>
     </QueryClientProvider>,
@@ -97,16 +105,35 @@ afterEach(() => vi.clearAllMocks());
 
 describe("ServiceAccountDetail identity and membership", () => {
   it("shows the identity and the current memberships", async () => {
-    open();
+    open("/governance/service-accounts/sa-1");
     expect(await screen.findByRole("heading", { level: 1, name: "ci-bot" })).toBeInTheDocument();
     expect(screen.getByText("Runs the nightly build")).toBeInTheDocument();
     expect(screen.getAllByText("Workspace").length).toBeGreaterThan(0);
     expect(screen.getByText("Acme")).toBeInTheDocument();
     expect(screen.getByText("Active")).toBeInTheDocument();
     expect(screen.getByText(/never signs in and can never hold platform_admin/)).toBeInTheDocument();
+  });
+
+  it("shows the current memberships on the Membership tab", async () => {
+    open();
     expect(await screen.findByRole("button", { name: "Remove etl" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove viewer" })).toBeInTheDocument();
+  });
+
+  it("lands on the tab named by ?tab= and writes the selected tab to the URL", async () => {
+    const user = userEvent.setup();
+    open("/governance/service-accounts/sa-1?tab=credentials");
+    expect(await screen.findByRole("tab", { name: "Credentials", selected: true })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Credentials" })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Membership" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/governance/service-accounts/sa-1?tab=membership");
+    await user.click(screen.getByRole("tab", { name: "Identity" }));
+    expect(screen.getByTestId("where")).toHaveTextContent(/^\/governance\/service-accounts\/sa-1$/);
+  });
+
+  it("shows the first tab when ?tab= is unknown", async () => {
+    open("/governance/service-accounts/sa-1?tab=nope");
+    expect(await screen.findByRole("tab", { name: "Identity", selected: true })).toBeInTheDocument();
   });
 
   it("adds a group and invalidates the account", async () => {
@@ -115,6 +142,7 @@ describe("ServiceAccountDetail identity and membership", () => {
     await choose(user, "Add to group", "analysts");
     await user.click(screen.getByRole("button", { name: "Add group" }));
     await waitFor(() => expect(api.addServiceAccountGroup).toHaveBeenCalledWith("sa-1", { group_id: "g-2" }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Added to group."));
     await waitFor(() => expect(invalidate).toHaveBeenCalled());
   });
 
@@ -159,6 +187,8 @@ describe("ServiceAccountDetail identity and membership", () => {
     await waitFor(() => expect(api.removeServiceAccountGroup).toHaveBeenCalledWith("sa-1", "g-1"));
     await user.click(screen.getByRole("button", { name: "Remove viewer" }));
     await waitFor(() => expect(api.removeServiceAccountRole).toHaveBeenCalledWith("sa-1", "r-1"));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Removed from group."));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Role removed."));
     await waitFor(() => expect(invalidate).toHaveBeenCalled());
   });
 

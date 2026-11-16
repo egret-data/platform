@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { ApiError } from "@/api/client";
 import { credentialsQueryKey, type CreatedCredential, type Credential, type ServiceAccountDetailDto } from "@/api/serviceAccounts";
 import { CredentialsPanel } from "@/routes/governance/service-accounts/CredentialsPanel";
@@ -15,6 +16,7 @@ const api = vi.hoisted(() => ({
 }));
 const cp = vi.hoisted(() => ({ listWarehouses: vi.fn(), listRoles: vi.fn() }));
 
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 vi.mock("@/api/serviceAccounts", async (importActual) => ({
   ...(await importActual<typeof import("@/api/serviceAccounts")>()),
   ...api,
@@ -226,6 +228,7 @@ describe("CredentialsPanel", () => {
     await user.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(api.revokeCredential).toHaveBeenCalledWith("sa-1", "c-1"));
     await waitFor(() => expect(invalidate).toHaveBeenCalled());
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Credential revoked."));
   });
 
   it("sets and clears an expiry", async () => {
@@ -239,6 +242,7 @@ describe("CredentialsPanel", () => {
       expect(api.setCredentialExpiry).toHaveBeenCalledWith("sa-1", "c-1", { expires_at: new Date("2030-01-02T03:04").toISOString() }),
     );
     await waitFor(() => expect(invalidate).toHaveBeenCalled());
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Expiry updated."));
 
     await user.click(await screen.findByRole("button", { name: "Set expiry for api key" }));
     await user.click(await screen.findByRole("button", { name: "Clear expiry" }));
