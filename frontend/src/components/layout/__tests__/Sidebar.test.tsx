@@ -451,7 +451,7 @@ describe("Sidebar – Governance app", () => {
       .map((b) => b.textContent);
     expect(headings).toEqual(["Governance"]);
     const group = groupOf("Governance")!;
-    expect(within(group).getAllByRole("link")).toHaveLength(6);
+    expect(within(group).getAllByRole("link")).toHaveLength(7);
     expect(within(group).getByRole("link", { name: "Engine & policy" })).toHaveAttribute("href", "/governance/engines");
     expect(within(group).getByRole("link", { name: "Classifications" })).toHaveAttribute("href", "/governance/classifications");
     expect(within(group).getByRole("link", { name: "Data Lineage" })).toHaveAttribute("href", "/governance/data-lineage");
@@ -491,6 +491,7 @@ describe("Sidebar – Governance app", () => {
       "Overview",
       "Data",
       "People & groups",
+      "Service accounts",
       "Classifications",
       "Data Lineage",
       "Engine & policy",
