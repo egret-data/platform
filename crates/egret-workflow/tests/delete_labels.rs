@@ -17,7 +17,10 @@ use std::sync::Arc;
 use egret_metastore::Db;
 use egret_storage::{MemStore, ObjectStore, StorageError};
 use egret_workflow::storage::{Caps, FileStore};
-use egret_workflow::worker::{delete_execution, DeleteRefused, DeleteRequest, Handlers, Registry};
+use egret_workflow::worker::{
+    delete_execution, set_execution_labels, DeleteRefused, DeleteRequest, Handlers, LabelsRefused,
+    LabelsSet, Registry,
+};
 use uuid::Uuid;
 
 mod common;
@@ -839,4 +842,129 @@ impl Registry for Fails {
             task.task_id
         );
     }
+}
+
+// ── Labels (T4) ─────────────────────────────────────────────────────────────
+
+const LABELLED: &str = "id: labelled\nnamespace: t\nlabels:\n  team: data\n  Team2: x\ntasks:\n  \
+     - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+
+fn label(k: &str, v: &str) -> egret_workflow::models::Label {
+    egret_workflow::models::Label {
+        key: k.into(),
+        value: v.into(),
+    }
+}
+
+async fn stored(pool: &sqlx::PgPool, ex: Uuid) -> (Option<serde_json::Value>, bool) {
+    sqlx::query_as("SELECT labels, labels_replaced FROM workflow.executions WHERE id = $1")
+        .bind(ex)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replace_removes_a_flow_label_and_keeps_the_system_ones(pool: sqlx::PgPool) {
+    // Arrange: ended, and restarted once (the engine's own label).
+    let (db, ws, user) = setup(&pool).await;
+    let ex = start(&pool, &db, ws, user, LABELLED).await;
+    settle_everything(&pool, &handlers()).await;
+    sqlx::query("UPDATE workflow.executions SET labels = $2 WHERE id = $1")
+        .bind(ex)
+        .bind(serde_json::json!([{"key": "system.restarted", "value": "true"}]))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Act: `team` is left out, `Team2` (a flow key outside Kestra's pattern) resent.
+    let got = set_execution_labels(&pool, ws, ex, &[label("Team2", "x"), label("env", "dev")])
+        .await
+        .unwrap();
+
+    // Assert
+    assert_eq!(
+        got,
+        Ok(LabelsSet {
+            keys_before: vec!["team".into(), "Team2".into(), "system.restarted".into()],
+            keys_after: vec!["Team2".into(), "env".into(), "system.restarted".into()],
+        })
+    );
+    assert_eq!(
+        stored(&pool, ex).await,
+        (
+            Some(serde_json::json!([
+                {"key": "Team2", "value": "x"},
+                {"key": "env", "value": "dev"},
+                {"key": "system.restarted", "value": "true"}
+            ])),
+            true
+        )
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_second_replace_works_on_the_replaced_list(pool: sqlx::PgPool) {
+    let (db, ws, user) = setup(&pool).await;
+    let ex = start(&pool, &db, ws, user, LABELLED).await;
+    settle_everything(&pool, &handlers()).await;
+    set_execution_labels(&pool, ws, ex, &[label("env", "dev")])
+        .await
+        .unwrap()
+        .unwrap();
+    // `team` is no longer visible, so a new key `Team` must match the pattern.
+    let got = set_execution_labels(&pool, ws, ex, &[label("Team", "x")])
+        .await
+        .unwrap();
+    assert!(
+        matches!(got, Err(LabelsRefused::Invalid(ref m)) if m.contains("Team")),
+        "{got:?}"
+    );
+    let got = set_execution_labels(&pool, ws, ex, &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.keys_before, vec!["env".to_string()]);
+    assert_eq!(stored(&pool, ex).await, (Some(serde_json::json!([])), true));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_running_execution_cannot_be_relabelled(pool: sqlx::PgPool) {
+    let (db, ws, user) = setup(&pool).await;
+    let ex = start(&pool, &db, ws, user, LABELLED).await; // RUNNING
+    let got = set_execution_labels(&pool, ws, ex, &[label("env", "dev")])
+        .await
+        .unwrap();
+    assert_eq!(got, Err(LabelsRefused::NotIdle("RUNNING".into())));
+    assert_eq!(stored(&pool, ex).await, (None, false));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_changed_or_new_system_label_is_refused_and_nothing_is_written(pool: sqlx::PgPool) {
+    let (db, ws, user) = setup(&pool).await;
+    let ex = start(&pool, &db, ws, user, LABELLED).await;
+    settle_everything(&pool, &handlers()).await;
+    for body in [
+        vec![label("system.restarted", "true")],
+        vec![label("system.replay", "x")],
+    ] {
+        let got = set_execution_labels(&pool, ws, ex, &body).await.unwrap();
+        assert!(
+            matches!(got, Err(LabelsRefused::Invalid(ref m)) if m.contains(&body[0].key)),
+            "{got:?}"
+        );
+    }
+    assert_eq!(stored(&pool, ex).await, (None, false));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_foreign_workspace_cannot_relabel(pool: sqlx::PgPool) {
+    let (db, ws, user) = setup(&pool).await;
+    let (other_ws, _) = common::seed_workspace(&db).await;
+    let ex = start(&pool, &db, ws, user, LABELLED).await;
+    settle_everything(&pool, &handlers()).await;
+    let err = set_execution_labels(&pool, other_ws, ex, &[])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, egret_core::Error::NotFound(_)), "{err}");
 }

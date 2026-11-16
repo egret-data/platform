@@ -80,12 +80,10 @@ pub(crate) fn backfill_labels_refusal(labels: &[Label]) -> Option<String> {
 /// The prefix of the labels only the engine writes (`system.restarted`,
 /// `system.replay`; Kestra `Label.SYSTEM_PREFIX`). Case-sensitive, as
 /// Kestra's `startsWith`.
-#[allow(dead_code)] // read by package 7d T2 (readers) and T5 (set-labels)
 pub(crate) const SYSTEM_LABEL_PREFIX: &str = "system.";
 
 /// Kestra's label key pattern (`Label.java`, `@Pattern`): a lower-case
 /// letter, then letters, digits, `.`, `_` and `-`.
-#[allow(dead_code)] // read by package 7d T2 (readers) and T5 (set-labels)
 static LABEL_KEY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"^\p{Ll}[\p{L}0-9._-]*$").expect("the label key pattern compiles")
 });
@@ -114,7 +112,6 @@ pub(crate) fn visible_labels(flow: &[Label], own: &[Label], replaced: bool) -> V
 ///   sending the list back unchanged must not fail;
 /// - a `system.*` label passes only if the same key AND value are visible
 ///   (Kestra: "System labels can only be set by Kestra itself").
-#[allow(dead_code)] // read by package 7d T2 (readers) and T5 (set-labels)
 pub(crate) fn edit_labels_refusal(body: &[Label], visible: &[Label]) -> Option<String> {
     if body.len() > MAX_BACKFILL_LABELS {
         return Some(format!(
@@ -165,7 +162,6 @@ pub(crate) fn edit_labels_refusal(body: &[Label], visible: &[Label]) -> Option<S
 /// body, then each `system.*` label of `visible` whose key the body does
 /// not hold, in `visible`'s order. Call after [`edit_labels_refusal`],
 /// which has already refused a `system.*` label the body changed.
-#[allow(dead_code)] // read by package 7d T2 (readers) and T5 (set-labels)
 pub(crate) fn merge_system_labels(body: &[Label], visible: &[Label]) -> Vec<Label> {
     let mut out = body.to_vec();
     for l in visible
