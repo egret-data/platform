@@ -1548,14 +1548,15 @@ impl ExecutionRepo {
     /// `afterExecution:` run, or an `Exit` sibling, logs after its execution
     /// is terminal.
     pub async fn log_status(&self, ws: Uuid, id: Uuid) -> Result<ExecutionLogStatus> {
-        let row: Option<(String, bool)> = sqlx::query_as(
+        let row: Option<(String, bool, bool)> = sqlx::query_as(
             "SELECT e.state, \
+                    COALESCE(workflow.execution_is_idle(e.id), false) AS idle, \
                     COALESCE(workflow.execution_is_idle(e.id), false) \
                       AND GREATEST(e.updated_at, \
                                    (SELECT max(COALESCE(r.ended_at, r.updated_at)) \
                                       FROM workflow.task_runs r \
                                      WHERE r.execution_id = e.id)) \
-                          < now() - make_interval(secs => $3) \
+                          < now() - make_interval(secs => $3) AS complete \
                FROM workflow.executions e WHERE e.id = $1 AND e.workspace_id = $2",
         )
         .bind(id)
@@ -1564,8 +1565,12 @@ impl ExecutionRepo {
         .fetch_optional(&self.db.pool)
         .await
         .map_err(db_err)?;
-        let (state, complete) = row.ok_or_else(|| Error::NotFound("execution".into()))?;
-        Ok(ExecutionLogStatus { state, complete })
+        let (state, idle, complete) = row.ok_or_else(|| Error::NotFound("execution".into()))?;
+        Ok(ExecutionLogStatus {
+            state,
+            complete,
+            idle,
+        })
     }
 }
 
@@ -1684,4 +1689,7 @@ pub struct ExecutionLogStatus {
     /// Idle (terminal, no task run live), and its last work ended longer
     /// ago than the settle lag.
     pub complete: bool,
+    /// Package 7d D7: terminal, and no task run live (`workflow.execution_is_idle`);
+    /// `complete` without the settle lag.
+    pub idle: bool,
 }

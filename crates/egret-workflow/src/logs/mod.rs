@@ -19,7 +19,9 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub use prune::{spawn_pruner, PruneConfig};
-pub use repo::{InsertError, LogQuery, LogRepo, PurgeQuery, StoredLine, ERROR_LOGS_PAGE};
+pub use repo::{
+    InsertError, LogFilter, LogQuery, LogRepo, PurgeQuery, StoredLine, ERROR_LOGS_PAGE,
+};
 pub use run_log::{mask, RunIdentity, RunLog, MASK};
 pub use writer::{spawn_writer, Barrier, Inserter, PgLogSink, WriterConfig};
 
@@ -159,6 +161,31 @@ pub struct LogLine {
 
 /// W11 Task 1's measured fixture, for the tests that assert its typed
 /// `egret_expected` values rather than a reading of its prose.
+/// Package 7d D7: the most lines `GET …/executions/{id}/logs/download`
+/// writes (the frontend's former client-side cap).
+pub const LOG_DOWNLOAD_MAX_LINES: i64 = 100_000;
+/// How many lines the download reads per statement (plan S11): it streams,
+/// so 100 000 lines of up to 15 360 characters are never held at once.
+pub const LOG_DOWNLOAD_BATCH: i64 = 2_000;
+
+/// The download's last line when there were more lines than the cap.
+pub fn truncated_line() -> String {
+    format!("… truncated at {LOG_DOWNLOAD_MAX_LINES} lines")
+}
+
+/// One line of the download (D7; Kestra `LogEntry.toPrettyString`,
+/// `LogEntry.java:136-138`): the instant in RFC 3339 UTC with
+/// milliseconds, the level, the message. Lines are joined with `\n` and
+/// the file has no trailing newline, as Kestra's.
+pub fn download_line(line: &StoredLine) -> String {
+    format!(
+        "{} {} {}",
+        line.ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        line.level.as_str(),
+        line.message
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod fixture {
     /// The whole of `oracle-exec/w11-logs.json`.
@@ -208,5 +235,44 @@ pub(crate) mod fixture {
             );
             level(&serde_json::json!(v));
         }
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn line(level: LogLevel, ms: u32, message: &str) -> StoredLine {
+        StoredLine {
+            id: 1,
+            task_run_id: None,
+            task_id: None,
+            attempt: None,
+            level,
+            ts: chrono::Utc
+                .with_ymd_and_hms(2026, 11, 16, 10, 0, 0)
+                .unwrap()
+                + chrono::Duration::milliseconds(i64::from(ms)),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_download_line_is_kestras_pretty_string_with_millis() {
+        assert_eq!(
+            download_line(&line(LogLevel::Info, 123, "hello")),
+            "2026-11-16T10:00:00.123Z INFO hello"
+        );
+        // Whole seconds keep the three digits; a multi-line message is kept as it is.
+        assert_eq!(
+            download_line(&line(LogLevel::Error, 0, "a\nb")),
+            "2026-11-16T10:00:00.000Z ERROR a\nb"
+        );
+    }
+
+    #[test]
+    fn the_truncation_line_names_the_cap() {
+        assert_eq!(truncated_line(), "… truncated at 100000 lines");
     }
 }

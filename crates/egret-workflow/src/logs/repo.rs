@@ -86,6 +86,17 @@ pub struct LogQuery {
     pub min_level: Option<LogLevel>,
 }
 
+/// The filters of `DELETE …/logs` (D8) and `GET …/logs/download` (D7), ANDed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LogFilter {
+    pub task_id: Option<String>,
+    pub task_run_id: Option<Uuid>,
+    /// 0-based, as `StoredLine::attempt` (plan S15). The download has none.
+    pub attempt: Option<i32>,
+    /// This level and above.
+    pub min_level: Option<LogLevel>,
+}
+
 /// A stored line: [`LogLine`]'s fields minus the two ids the caller queried
 /// by, plus the row's `id` (the cursor).
 #[derive(Clone, Debug, PartialEq)]
@@ -271,6 +282,74 @@ impl LogRepo {
         .bind(q.task_run_id)
         .bind(q.min_level.map(LogLevel::as_i16))
         .bind(q.limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(db_err)?;
+        rows.iter().map(stored).collect()
+    }
+
+    /// **`DELETE …/executions/{id}/logs`** (package 7d D8; Kestra
+    /// `deleteByQuery`, `AbstractJdbcLogDataStore.java:318-349`): every line
+    /// of `execution` in `ws` that matches every given filter. Both ids are in
+    /// the predicate, as in [`Self::page`]. No state check (Q6): a line
+    /// written after the statement stays.
+    pub async fn delete_for_execution(
+        &self,
+        ws: Uuid,
+        execution: Uuid,
+        f: &LogFilter,
+    ) -> Result<u64> {
+        sqlx::query(
+            "DELETE FROM workflow.task_logs \
+          WHERE workspace_id = $1 AND execution_id = $2 \
+            AND ($3::text IS NULL OR task_id = $3) \
+            AND ($4::uuid IS NULL OR task_run_id = $4) \
+            AND ($5::int4 IS NULL OR attempt = $5) \
+            AND ($6::int2 IS NULL OR level >= $6)",
+        )
+        .bind(ws)
+        .bind(execution)
+        .bind(f.task_id.as_deref())
+        .bind(f.task_run_id)
+        .bind(f.attempt)
+        .bind(f.min_level.map(LogLevel::as_i16))
+        .execute(&self.pool)
+        .await
+        .map(|r| r.rows_affected())
+        .map_err(db_err)
+    }
+
+    /// **One batch of `GET …/logs/download`** (package 7d D7, S11): the
+    /// matching lines after `after`, in id order, at most `limit`. Unlike
+    /// [`Self::page`] there is no settle watermark: a download is one read of
+    /// what is committed now, not a cursor a client keeps.
+    pub async fn download_batch(
+        &self,
+        ws: Uuid,
+        execution: Uuid,
+        f: &LogFilter,
+        after: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<StoredLine>> {
+        let rows = sqlx::query(
+            "SELECT id, task_run_id, task_id, attempt, level, ts, message \
+           FROM workflow.task_logs \
+          WHERE workspace_id = $1 AND execution_id = $2 AND id > COALESCE($3, 0) \
+            AND ($4::text IS NULL OR task_id = $4) \
+            AND ($5::uuid IS NULL OR task_run_id = $5) \
+            AND ($6::int4 IS NULL OR attempt = $6) \
+            AND ($7::int2 IS NULL OR level >= $7) \
+          ORDER BY id \
+          LIMIT $8",
+        )
+        .bind(ws)
+        .bind(execution)
+        .bind(after)
+        .bind(f.task_id.as_deref())
+        .bind(f.task_run_id)
+        .bind(f.attempt)
+        .bind(f.min_level.map(LogLevel::as_i16))
+        .bind(limit.max(0))
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
