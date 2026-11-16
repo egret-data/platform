@@ -14,6 +14,7 @@
     "test:bundle:workflows": "node scripts/assert-workflows-lazy.mjs",
     "test:bundle:governance-data": "node scripts/assert-governance-data-lazy.mjs",
     "test:bundle:governance-people": "node scripts/assert-governance-people-lazy.mjs",
+    "test:bundle:governance-service-accounts": "node scripts/assert-governance-service-accounts-lazy.mjs",
     "test:bundle:governance-overview": "node scripts/assert-governance-overview-lazy.mjs",
     "test:bundle:governance-engines": "node scripts/assert-governance-engines-lazy.mjs",
     "test:bundle:governance-classification": "node scripts/assert-governance-classification-lazy.mjs",
