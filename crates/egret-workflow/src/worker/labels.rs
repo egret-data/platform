@@ -38,8 +38,7 @@ pub async fn set_execution_labels(
 ) -> Result<std::result::Result<LabelsSet, LabelsRefused>> {
     let mut tx = pool.begin().await.map_err(db_err)?;
     let row = sqlx::query(
-        "SELECT state, source, labels, labels_replaced, \
-                COALESCE(workflow.execution_is_idle(id), false) AS idle \
+        "SELECT state, source, labels, labels_replaced \
            FROM workflow.executions WHERE id = $1 AND workspace_id = $2 FOR NO KEY UPDATE",
     )
     .bind(id)
@@ -48,9 +47,18 @@ pub async fn set_execution_labels(
     .await
     .map_err(db_err)?
     .ok_or_else(|| Error::NotFound("execution".into()))?;
-    if !row.get::<bool, _>("idle") {
+    // A second statement: `execution_is_idle` is STABLE, so it reads the snapshot
+    // of the statement that calls it. Taken here, after the lock wait, it sees a
+    // restart or settle that committed while the lock was held elsewhere.
+    let idle: bool = sqlx::query_scalar("SELECT COALESCE(workflow.execution_is_idle($1), false)")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    if !idle {
         return Ok(Err(LabelsRefused::NotIdle(row.get("state"))));
     }
+    // A frozen source that no longer parses contributes no flow labels.
     let flow_labels = crate::spec::parse(row.get::<&str, _>("source"))
         .map(|f| f.labels)
         .unwrap_or_default();
@@ -60,9 +68,10 @@ pub async fn set_execution_labels(
         return Ok(Err(LabelsRefused::Invalid(why)));
     }
     let stored = merge_system_labels(body, &visible);
-    sqlx::query("UPDATE workflow.executions SET labels = $2, labels_replaced = true WHERE id = $1")
+    sqlx::query("UPDATE workflow.executions SET labels = $2, labels_replaced = true WHERE id = $1 AND workspace_id = $3")
         .bind(id)
         .bind(serde_json::to_value(&stored).expect("labels serialise"))
+        .bind(workspace)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;

@@ -968,3 +968,56 @@ async fn a_foreign_workspace_cannot_relabel(pool: sqlx::PgPool) {
         .unwrap_err();
     assert!(matches!(err, egret_core::Error::NotFound(_)), "{err}");
 }
+
+/// Fix round 1: the idle check runs after the lock wait, on a fresh snapshot.
+/// A transaction holds the row and makes it RUNNING (a restart); the labels
+/// call waits on the lock, then must see RUNNING and refuse.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_committed_during_the_lock_wait_makes_the_labels_refuse(pool: sqlx::PgPool) {
+    let (db, ws, user) = setup(&pool).await;
+    let ex = start(&pool, &db, ws, user, LABELLED).await;
+    settle_everything(&pool, &handlers()).await;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM workflow.executions WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(ex)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let setting = {
+        let pool = pool.clone();
+        tokio::spawn(
+            async move { set_execution_labels(&pool, ws, ex, &[label("env", "dev")]).await },
+        )
+    };
+    let mut waited = false;
+    for _ in 0..500 {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                AND query LIKE '%FOR NO KEY UPDATE%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if n > 0 {
+            waited = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        waited,
+        "control: set_execution_labels waited on the row lock"
+    );
+    sqlx::query("UPDATE workflow.executions SET state = 'RUNNING', ended_at = NULL WHERE id = $1")
+        .bind(ex)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+
+    let got = setting.await.unwrap().unwrap();
+
+    assert_eq!(got, Err(LabelsRefused::NotIdle("RUNNING".into())));
+    assert_eq!(stored(&pool, ex).await, (None, false));
+}
