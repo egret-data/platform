@@ -333,6 +333,21 @@ pub async fn build_catalog_enforcement_snapshot(
         &leaving,
     )?;
 
+    // FAIL CLOSED. A mask, row filter or withhold that was skipped instead of
+    // lowered emits no statement, so `table_read_restricted` would answer
+    // `false` for a table that IS restricted: a leak at the catalog. The only
+    // skips that leave the restriction in force are the ones whose own detail
+    // says a deny was still compiled (`NotMeasured`: enforced as a deny;
+    // `ViewNotMeasured`/`TableNotInCatalog`: the whole-table deny is compiled,
+    // only the view guard is not). Anything else is refused: the caller
+    // treats a build error as "cannot enforce", never as "nothing restricts".
+    refuse_dropped_restrictions(
+        ruled
+            .lowerings
+            .iter()
+            .chain(withheld.lowered.lowerings.iter()),
+    )?;
+
     let statements: Vec<Statement> = ruled
         .statements
         .iter()
@@ -349,6 +364,28 @@ pub async fn build_catalog_enforcement_snapshot(
     })
     .map(Some)
     .map_err(|e| CompileError::Db(format!("catalog enforcement snapshot: {e}")))
+}
+
+/// The fail-closed check of [`build_catalog_enforcement_snapshot`]: `Err`
+/// for any skip that is not one of the three whose detail says the deny was
+/// still compiled.
+fn refuse_dropped_restrictions<'a>(
+    skips: impl Iterator<Item = &'a egret_perm_ir::statement::Lowering>,
+) -> Result<(), CompileError> {
+    use egret_perm_ir::statement::ReasonCode;
+    match skips.into_iter().find(|l| {
+        !matches!(
+            l.code,
+            ReasonCode::NotMeasured | ReasonCode::ViewNotMeasured | ReasonCode::TableNotInCatalog
+        )
+    }) {
+        Some(l) => Err(CompileError::Db(format!(
+            "catalog enforcement snapshot: a restricting rule was skipped, so the catalog \
+             cannot be enforced ({:?}: {})",
+            l.code, l.detail
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// The `default_version` a catalog snapshot's EP carries: unread, exactly as the
@@ -377,4 +414,44 @@ pub async fn build_snapshot_via(
     })
     .map(Some)
     .map_err(|e| CompileError::Db(format!("OPA snapshot: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egret_perm_ir::statement::{Lowering, ReasonCode, Source};
+
+    fn skip(code: ReasonCode) -> Lowering {
+        Lowering {
+            source: Source::Rule {
+                rule_id: Uuid::nil(),
+                rule_name: "r".into(),
+            },
+            code,
+            detail: "d".into(),
+        }
+    }
+
+    #[test]
+    fn a_dropped_mask_or_filter_is_refused() {
+        for code in [
+            ReasonCode::NoClassificationChannel,
+            ReasonCode::UnexpandedPrincipal,
+            ReasonCode::UnknownClassification,
+            ReasonCode::EmptyAudience,
+        ] {
+            assert!(refuse_dropped_restrictions([skip(code)].iter()).is_err());
+        }
+    }
+
+    #[test]
+    fn a_skip_that_still_compiled_its_deny_is_accepted() {
+        for code in [
+            ReasonCode::NotMeasured,
+            ReasonCode::ViewNotMeasured,
+            ReasonCode::TableNotInCatalog,
+        ] {
+            assert!(refuse_dropped_restrictions([skip(code)].iter()).is_ok());
+        }
+    }
 }

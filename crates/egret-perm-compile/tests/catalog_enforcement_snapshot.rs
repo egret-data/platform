@@ -108,3 +108,83 @@ async fn an_unknown_catalog_has_no_snapshot() {
     assert!(none.is_none());
     tx.rollback().await.expect("rollback");
 }
+
+#[tokio::test]
+async fn the_snapshot_carries_no_grant_or_owner_statement() {
+    // Arrange: a catalog with a grant and no rule at all.
+    let db = db().await;
+    let mut names = Names::default();
+    let mut tx = db.pool.begin().await.expect("tx");
+    let wh = warehouse(&mut tx, "cng", &mut names).await;
+    let cat = catalog(&mut tx, "cng.lake", wh, &[], &mut names).await;
+    user(&mut tx, "cng.ann", Some("cng_ann"), &mut names).await;
+    grant(
+        &mut tx,
+        "cng.read",
+        Effect::Allow,
+        &[Action::Read],
+        scope(cat, None, None, None),
+        set(&[user_ref("cng_ann")], &[]),
+        &mut names,
+    )
+    .await;
+    let grants_only = egret_perm_compile::opa::build::build_catalog_snapshot_via(&mut tx, cat)
+        .await
+        .expect("builds")
+        .expect("catalog");
+    assert!(
+        !grants_only.is_empty(),
+        "the grant snapshot does carry the grant"
+    );
+
+    // Act
+    let snap = egret_perm_compile::opa::build::build_catalog_enforcement_snapshot(&mut tx, cat)
+        .await
+        .expect("builds")
+        .expect("catalog");
+
+    // Assert
+    assert!(
+        snap.is_empty(),
+        "no grant or owner statement enters: {}",
+        snap.len()
+    );
+    tx.rollback().await.expect("rollback");
+}
+
+#[tokio::test]
+async fn a_clearance_withhold_restricts_the_uncleared_and_spares_the_cleared() {
+    // Arrange: classification pii on orders.ssn, cleared for a role bob holds.
+    let db = db().await;
+    let mut names = Names::default();
+    let mut tx = db.pool.begin().await.expect("tx");
+    let wh = warehouse(&mut tx, "cwh", &mut names).await;
+    let cat = catalog(&mut tx, "cwh.lake", wh, &[], &mut names).await;
+    let lake: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(cat)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("catalog name");
+    user(&mut tx, "cwh.ann", Some("cwh_ann"), &mut names).await;
+    let bob = user(&mut tx, "cwh.bob", Some("cwh_bob"), &mut names).await;
+    let pii = tag(&mut tx, "cwh_pii", &mut names).await;
+    tag_column(&mut tx, pii, wh, "s", "orders", "ssn").await;
+    platform_role(&mut tx, "cwh_cleared", &mut names).await;
+    role_held(&mut tx, bob, "cwh_cleared").await;
+    gate(&mut tx, pii, &["cwh_cleared"], &[]).await;
+
+    // Act
+    let snap = egret_perm_compile::opa::build::build_catalog_enforcement_snapshot(&mut tx, cat)
+        .await
+        .expect("the snapshot builds")
+        .expect("a registry catalog");
+
+    // Assert
+    assert!(snap.table_read_restricted("cwh_ann", &lake, "s", "orders"));
+    assert!(
+        !snap.table_read_restricted("cwh_bob", &lake, "s", "orders"),
+        "cleared"
+    );
+    assert!(!snap.table_read_restricted("cwh_ann", &lake, "s", "plain"));
+    tx.rollback().await.expect("rollback");
+}
