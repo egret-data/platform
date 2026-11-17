@@ -125,10 +125,16 @@ pub async fn snapshot_parts_via(
     let Some(lowered) = crate::trigger::lower_ep_via(conn, service_id, missing).await? else {
         return Ok(None);
     };
+    let ep = &lowered.loaded.ep;
     let data: Vec<Statement> = lowered
         .families
-        .into_iter()
-        .flat_map(|f| f.statements)
+        .iter()
+        .flat_map(|f| f.statements.iter())
+        // What the matrix says OPA cannot enforce (browse, create, manage)
+        // never enters the snapshot: an allow of any privilege on a
+        // catalog/schema (levels `Unnamed`) counts as reaching every sibling
+        // object in the evaluator.
+        .filter_map(|s| egret_perm_ir::lower::grants::strip_unenforced(ep, s))
         .collect();
     let Some(infra) = lower_infra_via(conn, service_id, missing).await? else {
         return Ok(None);

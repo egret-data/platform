@@ -145,9 +145,19 @@ pub(crate) async fn load_ep(
     // Principals are expanded below for these rows only, so a compile mints a
     // username only for someone this profile's policies name.
     let reachable: Vec<Uuid> = catalog_names.keys().copied().collect();
-    let grants = list_grants_for_catalogs_via(conn, &reachable)
+    let mut grants = list_grants_for_catalogs_via(conn, &reachable)
         .await
         .map_err(CompileError::from_perm)?;
+    // SP5a: each securable's single OWNER is an allow of every privilege on it
+    // and below it. It joins the grants here, so it lowers, expands principals
+    // and loses to a deny exactly like any other allow (D6).
+    grants.extend(
+        egret_perm::list_owners_for_catalogs_via(conn, &reachable)
+            .await
+            .map_err(CompileError::from_perm)?
+            .iter()
+            .map(egret_perm::owner_grant),
+    );
     let rules = list_rules_for_catalogs_via(conn, &reachable)
         .await
         .map_err(CompileError::from_perm)?;

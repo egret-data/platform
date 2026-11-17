@@ -1144,9 +1144,16 @@ async fn record_compiled(
     ) {
         return Ok(());
     }
+    // **An OWNER records none either** (SP5a). Its statement is a synthesised
+    // `Source::Grant` keyed by the `perm.securable_owners` id, which is not a
+    // `perm.grants` row, so the FK would refuse it; the guard below records a
+    // grant source only when the grant exists. The policy name carries the
+    // owner id and the sweep reaps by name prefix, not by this table, so
+    // enforcement is unaffected; owner provenance in this table is SP5b's.
     sqlx::query(
         "INSERT INTO perm.compiled (service_id, policy_id, source_kind, grant_id, rule_id) \
-         VALUES ($1, $2, $3, $4, $5) \
+         SELECT $1, $2, $3, $4, $5 \
+         WHERE $4::uuid IS NULL OR EXISTS (SELECT 1 FROM perm.grants WHERE id = $4::uuid) \
          ON CONFLICT (service_id, policy_id) DO NOTHING",
     )
     .bind(service_id)

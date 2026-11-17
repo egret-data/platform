@@ -35,6 +35,10 @@ pub enum Capability {
     PoliciesReachMetadataTables,
     EngineAsksAboutMetadataTables,
     MaskType(String),
+    /// SP5a: the target enforces this privilege of the grant vocabulary
+    /// (`browse`, `create`, `manage`; `read`/`write` listed for completeness).
+    /// `owner` is no privilege: it expands to these, so it has no row.
+    EnforcePrivilege(Privilege),
 }
 
 /// How a capability the EP lacks natively is lowered into ones it has.
@@ -441,6 +445,143 @@ pub const ENTRIES: &[Entry] = &[
         evidence: "crates/egret-perm-compile/tests/opa_differential.rs:opa_decisions_agree_with_ranger (MASK, MASK_HASH, MASK_NULL, MASK_NONE and CUSTOM masks, asked by GetColumnMask)",
         min_egret_image: None,
     },
+    // SP5a: privilege vocabulary. Ranger enforces everything but browse; OPA
+    // only the data privileges.
+    Entry {
+        kind: TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Read)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Read)),
+        answer: Answer::Native,
+        evidence: "ranger/grants.rs:104-118 render: engine_accesses(Read) = select",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Write)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Write)),
+        answer: Answer::Native,
+        evidence: "ranger/grants.rs:104-118 render: engine_accesses(Write)",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Create)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Create)),
+        answer: Answer::Native,
+        evidence: "egret-perm actions.rs:746-766 engine_accesses(Create): Trino `create`, StarRocks `create database|table|view` (both service-defs declare them)",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Manage)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Manage)),
+        answer: Answer::Native,
+        evidence: "egret-perm actions.rs:746-766 engine_accesses(Manage): Trino drop/alter/grant/revoke, StarRocks drop/alter/grant",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Browse)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Browse)),
+        answer: Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+        evidence: "actions.rs:759 no distinct Ranger access type for metadata visibility on either plugin (engine_accesses(Browse) is UnsupportedAction)",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: STARROCKS,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Read)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Read)),
+        answer: Answer::Native,
+        evidence: "ranger/grants.rs:104-118 render: engine_accesses(Read) = select",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: STARROCKS,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Write)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Write)),
+        answer: Answer::Native,
+        evidence: "ranger/grants.rs:104-118 render: engine_accesses(Write)",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: STARROCKS,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Create)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Create)),
+        answer: Answer::Native,
+        evidence: "egret-perm actions.rs:746-766 engine_accesses(Create): Trino `create`, StarRocks `create database|table|view` (both service-defs declare them)",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: STARROCKS,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Manage)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Manage)),
+        answer: Answer::Native,
+        evidence: "egret-perm actions.rs:746-766 engine_accesses(Manage): Trino drop/alter/grant/revoke, StarRocks drop/alter/grant",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: STARROCKS,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Browse)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Browse)),
+        answer: Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+        evidence: "actions.rs:759 no distinct Ranger access type for metadata visibility on either plugin (engine_accesses(Browse) is UnsupportedAction)",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Read)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Read)),
+        answer: Answer::Native,
+        evidence: "egret-perm-eval decide.rs:451-557: select decided by check_data",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Write)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Write)),
+        answer: Answer::Native,
+        evidence: "egret-perm-eval decide.rs:451-557: insert/delete decided by check_data",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Create)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Create)),
+        answer: Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+        evidence: "egret-perm-eval decide.rs:451-557 decides data privileges (read/write) only; no create verdict exists",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Manage)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Manage)),
+        answer: Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+        evidence: "egret-perm-eval decide.rs:451-557 decides data privileges (read/write) only; no manage verdict exists",
+        min_egret_image: None,
+    },
+    Entry {
+        kind: OPA_TRINO,
+        versions: Versions::Any,
+        capability: "EnforcePrivilege(Browse)",
+        key: Key::Fixed(|c| *c == Capability::EnforcePrivilege(Privilege::Browse)),
+        answer: Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+        evidence: "egret-perm-eval decide.rs:451-557 decides data privileges (read/write) only; browse never enters the reach",
+        min_egret_image: None,
+    },
 ];
 
 fn version_matches(v: Versions, version: Option<&str>) -> bool {
@@ -523,6 +664,58 @@ pub fn support(ep: &EpInput, cap: &Capability) -> Support {
         });
     }
     chosen.unwrap_or(Support::Missing(ReasonCode::NotMeasured))
+}
+
+/// Why `p` is not enforced on `kind` at `version`, in the text a lowering and
+/// an explain report (`"<privilege> not enforceable by <target>@<version>"`),
+/// or `None` when the matrix says the target enforces it. Reads the matrix
+/// only: the single place that says which target enforces which privilege.
+pub fn privilege_gap(kind: EpKind, version: Option<&str>, p: Privilege) -> Option<String> {
+    match support_for_kind(kind, version, None, false, &Capability::EnforcePrivilege(p)) {
+        Support::Native | Support::Lowered(_) => None,
+        Support::Missing(_) => Some(gap_text(kind, version, p)),
+    }
+}
+
+/// [`privilege_gap`] for an EP: the most restrictive answer across its bound
+/// engines (the default image's version when none is bound).
+pub fn privilege_gap_for_ep(ep: &EpInput, p: Privilege) -> Option<String> {
+    match support(ep, &Capability::EnforcePrivilege(p)) {
+        Support::Native | Support::Lowered(_) => None,
+        Support::Missing(_) => {
+            let version = ep
+                .engines
+                .first()
+                .map(|e| &e.version)
+                .unwrap_or(&ep.default_version)
+                .as_deref()
+                .ok();
+            Some(gap_text(ep.kind, version, p))
+        }
+    }
+}
+
+fn gap_text(kind: EpKind, version: Option<&str>, p: Privilege) -> String {
+    let target = match kind.mechanism {
+        Mechanism::Ranger => "ranger",
+        Mechanism::Opa => "opa",
+    };
+    format!(
+        "{} not enforceable by {target}@{}",
+        privilege_name(p),
+        version.unwrap_or("unknown")
+    )
+}
+
+fn privilege_name(p: Privilege) -> &'static str {
+    match p {
+        Privilege::Read => "read",
+        Privilege::Write => "write",
+        Privilege::CreateMaterializedView => "create_materialized_view",
+        Privilege::Browse => "browse",
+        Privilege::Create => "create",
+        Privilege::Manage => "manage",
+    }
 }
 
 #[cfg(test)]
@@ -658,8 +851,20 @@ mod tests {
     /// so every Trino row has an OPA twin that answers the same.
     #[test]
     fn every_trino_row_has_an_identical_opa_trino_row() {
-        let trino: Vec<_> = ENTRIES.iter().filter(|e| e.kind == TRINO).collect();
-        let opa: Vec<_> = ENTRIES.iter().filter(|e| e.kind == OPA_TRINO).collect();
+        // SP5a: the privilege rows are the one place the twins differ on
+        // purpose (OPA decides read/write only, Ranger also create/manage);
+        // `the_privilege_rows_say_what_each_target_enforces` pins them.
+        let not_privilege = |e: &&Entry| !e.capability.starts_with("EnforcePrivilege");
+        let trino: Vec<_> = ENTRIES
+            .iter()
+            .filter(|e| e.kind == TRINO)
+            .filter(not_privilege)
+            .collect();
+        let opa: Vec<_> = ENTRIES
+            .iter()
+            .filter(|e| e.kind == OPA_TRINO)
+            .filter(not_privilege)
+            .collect();
         assert_eq!(trino.len(), opa.len());
         for t in &trino {
             assert!(
@@ -810,5 +1015,38 @@ mod tests {
         ];
         // One engine can't enforce the mask: the whole EP lowers to deny.
         assert_eq!(support(&e, &cap), Support::Missing(ReasonCode::NotMeasured));
+    }
+
+    #[test]
+    fn the_privilege_rows_say_what_each_target_enforces() {
+        let opa = EpKind {
+            engine: EngineType::Trino,
+            mechanism: Mechanism::Opa,
+        };
+        for (kind, version) in [(trino(), "2.5.0"), (starrocks(), "2.8.0"), (opa, "2.8.0")] {
+            for p in [Privilege::Read, Privilege::Write] {
+                assert_eq!(
+                    privilege_gap(kind, Some(version), p),
+                    None,
+                    "{kind:?} {p:?}"
+                );
+            }
+            assert_eq!(
+                privilege_gap(kind, Some(version), Privilege::Browse),
+                Some(format!(
+                    "browse not enforceable by {}@{version}",
+                    if kind == opa { "opa" } else { "ranger" }
+                ))
+            );
+        }
+        for kind in [trino(), starrocks()] {
+            assert_eq!(privilege_gap(kind, None, Privilege::Create), None);
+            assert_eq!(privilege_gap(kind, None, Privilege::Manage), None);
+        }
+        assert_eq!(
+            privilege_gap(opa, Some("2.8.0"), Privilege::Manage).as_deref(),
+            Some("manage not enforceable by opa@2.8.0")
+        );
+        assert!(privilege_gap(opa, None, Privilege::Create).is_some());
     }
 }

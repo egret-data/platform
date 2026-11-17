@@ -172,6 +172,10 @@ pub fn compare_or_bless(fixture: &str, captured: Value, names: &Names) {
     }
 }
 
+/// The tests of this binary share one database and `seed_service_defs` is not
+/// concurrency-safe; they run one at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn golden_db() -> Db {
     let dsn = egret_test_db::url().await.expect("a test database");
     let db = Db::connect(&dsn, 5).await.expect("connect");
@@ -182,6 +186,7 @@ async fn golden_db() -> Db {
 
 #[tokio::test]
 async fn every_golden_fixture_compiles_to_its_golden_bytes() {
+    let _serial = SERIAL.lock().await;
     let db = golden_db().await;
     let mut ran = 0;
     for f in fixtures::ALL {
@@ -218,5 +223,45 @@ async fn g21_compile_timing() {
     println!(
         "g21_compile_timing: median={:.3}s runs={times:?}",
         times[times.len() / 2]
+    );
+}
+
+/// SP5a: no owner row is seeded on the corpus (the production backfill is
+/// SP5b), so every golden above is unchanged; this pins the other half — that a
+/// SEEDED owner does reach the compiled artifact, so "unchanged" is not just
+/// "owners are ignored".
+#[tokio::test]
+async fn a_seeded_owner_reaches_the_compiled_artifact() {
+    use egret_perm::{set_owner_via, Principal, PrincipalKind, Scope};
+    let _serial = SERIAL.lock().await;
+    let db = golden_db().await;
+    let mut names = Names::default();
+    let (tr, _, _) = fixtures::profile(&db, "own1", "trino", false, &mut names).await;
+    let mut tx = db.pool.begin().await.expect("tx");
+    let wh = fixtures::warehouse(&mut tx, "own1", &mut names).await;
+    let cat = fixtures::catalog_attached(&mut tx, "own1", wh, &[(tr, "trino")], &mut names).await;
+    fixtures::user(&mut tx, "own1.zed", Some("own1_zed"), &mut names).await;
+    let before = capture(&mut tx, &[(tr, None)]).await.to_string();
+    assert!(!before.contains("own1_zed"));
+    set_owner_via(
+        &mut tx,
+        &Scope {
+            catalog_id: cat,
+            schema: None,
+            table: None,
+            column: None,
+        },
+        &Principal {
+            kind: PrincipalKind::User,
+            r#ref: "own1_zed".into(),
+        },
+    )
+    .await
+    .expect("owner");
+    let after = capture(&mut tx, &[(tr, None)]).await.to_string();
+    tx.rollback().await.expect("rollback");
+    assert!(
+        after.contains("own1_zed"),
+        "the owner never compiled: {after}"
     );
 }

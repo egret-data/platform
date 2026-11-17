@@ -669,3 +669,49 @@ async fn delete_grant_and_delete_rule_remove_their_rows() {
         "deleting an already-deleted rule returns false, not an error"
     );
 }
+
+/// SP5a: the widened vocabulary survives the database round trip, a junk
+/// spelling is still refused by the CHECK, and the enum's serde spelling is
+/// the stored spelling.
+#[tokio::test]
+async fn the_full_privilege_vocabulary_round_trips_and_junk_is_still_refused() {
+    let Some(db) = test_db().await else { return };
+    let store = PermStore::new(db.pool.clone());
+    let catalog_id = seed_catalog(&db.pool).await;
+
+    for action in [Action::Browse, Action::Create, Action::Manage] {
+        assert_eq!(serde_json::to_value(action).unwrap(), action.as_str());
+        assert_eq!(Action::parse(action.as_str()), Some(action));
+        let g = Grant {
+            id: Uuid::nil(),
+            effect: Effect::Allow,
+            actions: vec![action],
+            scope: Scope {
+                catalog_id,
+                schema: Some("sales".into()),
+                table: None,
+                column: None,
+            },
+            principals: PrincipalSet {
+                include: vec![Principal {
+                    kind: PrincipalKind::Group,
+                    r#ref: "finance".into(),
+                }],
+                exclude: vec![],
+            },
+            origin: GrantOrigin::Explicit,
+        };
+        let id = store.create_grant(&g).await.expect("create");
+        let back = store.list_grants().await.expect("list");
+        let got = back.iter().find(|x| x.id == id).expect("present");
+        assert_eq!(got.actions, vec![action]);
+    }
+
+    let junk = sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id) VALUES ('allow', ARRAY['owner'], $1)",
+    )
+    .bind(catalog_id)
+    .execute(&db.pool)
+    .await;
+    assert!(junk.is_err(), "'owner' is not an action");
+}

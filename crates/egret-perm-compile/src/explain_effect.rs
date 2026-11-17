@@ -159,7 +159,12 @@ pub(crate) struct EffectInput<'a> {
 pub(crate) fn effect_lines(input: &EffectInput<'_>) -> Vec<ExplainEffectLine> {
     let b = Builder { input };
     match input.action {
-        Action::Write => vec![b.write_line()],
+        Action::Write => vec![b.access_line("can write")],
+        Action::Create => vec![b.access_line("can create under")],
+        Action::Manage => vec![b.access_line("can manage")],
+        // SP5a: browse has no engine access type (it is lowered, see
+        // `egret_perm::engine_accesses`), so there is no verdict to word.
+        Action::Browse => Vec::new(),
         Action::Read => {
             let first = match &input.target.column {
                 Some(column) => b.column_line(column),
@@ -302,6 +307,32 @@ pub(crate) fn not_enforced_line(
         NotEnforced::NoEngine => " has no engine.",
         _ => "'s engines have no policy profile.",
     });
+    l.finish(EffectAbout::Access, EffectOutcome::NotEnforced)
+}
+
+/// The privilege a gated action (browse, create, manage) is decided by; `None`
+/// for `read`/`write`, which every target enforces and the matrix is not asked.
+pub(crate) fn gated_privilege(action: Action) -> Option<egret_perm_ir::statement::Privilege> {
+    use egret_perm_ir::statement::Privilege;
+    match action {
+        Action::Browse => Some(Privilege::Browse),
+        Action::Create => Some(Privilege::Create),
+        Action::Manage => Some(Privilege::Manage),
+        Action::Read | Action::Write => None,
+    }
+}
+
+/// SP5a: the one line an explain of a privilege the target cannot enforce
+/// shows, in place of an access verdict. `gap` is the matrix's text
+/// (`egret_perm_ir::matrix::privilege_gap`).
+pub(crate) fn privilege_not_enforced_line(subject: &str, gap: &str) -> ExplainEffectLine {
+    let mut l = Line::default();
+    l.push(EffectPart::Subject {
+        text: subject.to_string(),
+    });
+    l.text(": ");
+    l.strong("not enforced");
+    l.text(format!(" ({gap})"));
     l.finish(EffectAbout::Access, EffectOutcome::NotEnforced)
 }
 
@@ -1071,8 +1102,9 @@ impl Builder<'_> {
         l.code(filter_expr);
     }
 
-    /// A `write` is a summary of its access verdicts (spec §12).
-    fn write_line(&self) -> ExplainEffectLine {
+    /// A `write` (and, SP5a, a `create` or `manage`) is a summary of its
+    /// access verdicts (spec §12); `allowed_verb` words the allowed case.
+    fn access_line(&self, allowed_verb: &str) -> ExplainEffectLine {
         let p = self.input.profile;
         let target = match &self.input.target.column {
             Some(c) => format!("{}.{c}", self.table_label()),
@@ -1102,7 +1134,7 @@ impl Builder<'_> {
         }
         self.subject(&mut l);
         l.text(" ");
-        l.strong("can write");
+        l.strong(allowed_verb);
         l.text(" ");
         l.code(target);
         l.finish(EffectAbout::Access, EffectOutcome::Allowed)

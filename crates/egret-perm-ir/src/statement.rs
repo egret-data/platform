@@ -108,6 +108,11 @@ pub enum Privilege {
     Read,
     Write,
     CreateMaterializedView,
+    // SP5a: the grant vocabulary's other privileges (concepts spec D4).
+    // Appended so the derived `Ord` of the existing variants is unchanged.
+    Browse,
+    Create,
+    Manage,
 }
 
 /// What a statement does to its audience on its target.
@@ -172,6 +177,9 @@ pub enum ReasonCode {
     NotMeasured,
     VersionsDisagree,
     InvalidEnginePrivilege,
+    /// SP5a: the target cannot enforce this privilege (capability matrix
+    /// `Capability::EnforcePrivilege`).
+    PrivilegeNotEnforceable,
 }
 
 /// A source that lowered to nothing (or to something weaker), and why.

@@ -7,15 +7,21 @@
  */
 
 /**
- * The two actions SP4a knows. `read` compiles to `select` on every engine;
- * `write` compiles to `insert,delete` on Trino (no `update` access type
- * exists there) and `insert,update,delete` on StarRocks. DDL is out of
- * scope for SP4a — see the programme's global constraints.
+ * The grant privilege vocabulary (SP5a, concepts spec D4; `OWNER` is not an
+ * action). `read` compiles to `select` on every engine; `write` compiles to
+ * `insert,delete` on Trino (no `update` access type exists there) and
+ * `insert,update,delete` on StarRocks; `create` and `manage` compile to the
+ * engines' DDL/ownership access types; `browse` has no distinct grantable
+ * access type on either engine and is lowered. See
+ * [`crate::engine_accesses`].
  */
 export type Action = typeof Action[keyof typeof Action];
 
 
 export const Action = {
+  browse: 'browse',
   read: 'read',
   write: 'write',
+  create: 'create',
+  manage: 'manage',
 } as const;

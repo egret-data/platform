@@ -150,6 +150,11 @@ fn accesses_for(action: Action) -> &'static [(&'static str, DataPrivilege)] {
             ("insert", DataPrivilege::Write),
             ("delete", DataPrivilege::Write),
         ],
+        // SP5a: the OPA evaluator decides only data privileges (read/write);
+        // the capability matrix lowers browse/create/manage on OPA, and
+        // `opa_profile` explains that as a NotEnforced line. NO accesses, so
+        // an explain of one never answers as a read or a write.
+        Action::Browse | Action::Create | Action::Manage => &[],
     }
 }
 
@@ -283,6 +288,16 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> ExplainProfile {
         });
     }
     let opa = answered.ok().and_then(|(_, opa)| opa);
+    let gap = crate::explain_effect::gated_privilege(i.action).and_then(|p| {
+        egret_perm_ir::matrix::privilege_gap(
+            egret_perm_ir::matrix::EpKind {
+                engine: i.engine,
+                mechanism: egret_perm_ir::matrix::Mechanism::Opa,
+            },
+            None,
+            p,
+        )
+    });
 
     let mut profile = ExplainProfile {
         service_id: i.service_id,
@@ -302,7 +317,11 @@ pub(super) fn opa_profile(i: &OpaProfileInput<'_>) -> ExplainProfile {
         other_columns_access: None,
         effect_lines: Vec::new(),
     };
-    profile.effect_lines =
-        crate::explain_effect::opa_effect_lines(i.user, i.action, target, &profile);
+    profile.effect_lines = match &gap {
+        Some(gap) => vec![crate::explain_effect::privilege_not_enforced_line(
+            i.user, gap,
+        )],
+        None => crate::explain_effect::opa_effect_lines(i.user, i.action, target, &profile),
+    };
     profile
 }

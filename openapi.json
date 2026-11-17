@@ -42489,10 +42489,13 @@
       },
       "Action": {
         "type": "string",
-        "description": "The two actions SP4a knows. `read` compiles to `select` on every engine;\n`write` compiles to `insert,delete` on Trino (no `update` access type\nexists there) and `insert,update,delete` on StarRocks. DDL is out of\nscope for SP4a — see the programme's global constraints.",
+        "description": "The grant privilege vocabulary (SP5a, concepts spec D4; `OWNER` is not an\naction). `read` compiles to `select` on every engine; `write` compiles to\n`insert,delete` on Trino (no `update` access type exists there) and\n`insert,update,delete` on StarRocks; `create` and `manage` compile to the\nengines' DDL/ownership access types; `browse` has no distinct grantable\naccess type on either engine and is lowered. See\n[`crate::engine_accesses`].",
         "enum": [
+          "browse",
           "read",
-          "write"
+          "write",
+          "create",
+          "manage"
         ]
       },
       "ActivityCallDto": {

@@ -914,6 +914,12 @@ fn actions(it: &PolicyItem, engine: EngineType, b: &mut Vec<Blocker>) -> Vec<Act
         return Vec::new();
     }
 
+    // SP5a: deliberately read/write only. `create`/`manage` DO expand to engine
+    // access types (`engine_accesses`), but recognising them here would change
+    // what the Ranger -> model classifier says about policies it refuses today
+    // (`alter` is an unknown access type; `drop,alter,...` a partial `manage`).
+    // Importing create/manage from Ranger is a separate decision, not SP5a's.
+    // `browse` is lowered and has no expansion at all.
     // An action the engine cannot express contributes nothing — and an EMPTY
     // expansion must not be read as "fully present", which `all` would do.
     let expansions: Vec<(Action, Vec<&'static str>)> = [Action::Read, Action::Write]
