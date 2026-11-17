@@ -14,7 +14,7 @@ use egret_catalog_engine::store::CatalogStore;
 use egret_catalog_engine::unified_decide::{
     catalog_enforces_rules, catalog_grant_source, covers, service_account_username,
     unified_listing_grants, unified_name_matching_is_exact, CatalogEnforcementSnapshotCache,
-    Source,
+    CatalogSnapshotCache, Source,
 };
 use egret_perm_compile::catalog_rbac_migrate::fold_catalog;
 use egret_perm_compile::opa::build::build_catalog_snapshot_via;
@@ -267,6 +267,60 @@ async fn the_enforcement_snapshot_cache_builds_and_reuses() {
         .expect("snapshot");
     assert!(std::sync::Arc::ptr_eq(&a, &b), "unchanged version is a hit");
     assert!(cache.get(&mut c, Uuid::new_v4()).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_new_rule_rebuilds_the_enforcement_snapshot_and_restricts_the_table() {
+    let Some(f) = fixture().await else { return };
+    let mut c = f.pool.acquire().await.unwrap();
+    let lake: String = sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+        .bind(f.catalog_id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let cache = CatalogEnforcementSnapshotCache::new();
+    let before = cache.get(&mut c, f.catalog_id).await.unwrap().unwrap();
+    assert!(!before.table_read_restricted("someone", &lake, "s", "orders"));
+
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, \
+                                 schema_name, table_name, column_name) \
+         VALUES ($1, 'mask'::perm.rule_kind, 'MASK_NULL', 'path'::perm.selector_kind, \
+                 $2, 's', 'orders', 'ssn')",
+    )
+    .bind(format!("sp5c-{}", Uuid::new_v4()))
+    .bind(f.catalog_id)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+
+    let after = cache.get(&mut c, f.catalog_id).await.unwrap().unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&before, &after),
+        "a new rule must rebuild the cached snapshot"
+    );
+    assert!(after.table_read_restricted("someone", &lake, "s", "orders"));
+
+    // An in-place edit (no new row, no timestamp) must rebuild too.
+    sqlx::query("UPDATE perm.rules SET column_name = 'dob' WHERE catalog_id = $1")
+        .bind(f.catalog_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let edited = cache.get(&mut c, f.catalog_id).await.unwrap().unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&after, &edited), "an edit rebuilds");
+}
+
+#[tokio::test]
+async fn the_grant_snapshot_cache_reads_the_real_database() {
+    let Some(f) = fixture().await else { return };
+    let mut c = f.pool.acquire().await.unwrap();
+    let got = CatalogSnapshotCache::new().get(&mut c, f.catalog_id).await;
+    assert!(
+        got.is_ok(),
+        "pins the version_of created_at fix: {:?}",
+        got.err()
+    );
 }
 
 #[tokio::test]
