@@ -32,7 +32,9 @@ use serde::Serialize;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use egret_perm_compile::opa::build::build_catalog_snapshot_via;
+use egret_perm_compile::opa::build::{
+    build_catalog_snapshot_via, load_classified_columns_for_catalog_via,
+};
 
 use crate::catalog_migrate_gate::{equivalence_report, Divergence, EquivalenceReport, GateError};
 use crate::store::CatalogStore;
@@ -65,6 +67,12 @@ pub struct IcebergRestPlan {
     pub grant_divergences: Vec<Divergence>,
     /// The intended allow→deny flips (reported, not refused).
     pub new_denies: Vec<RuleDeny>,
+    /// `true` when every restricting rule resolved to enumerated tables, so
+    /// `new_denies` is the whole story. `false` means a catalog-wide or
+    /// schema-wide path rule exists (or nothing was computed): ADDITIONAL tables
+    /// beyond `new_denies` will be denied, and an empty/short list must not be
+    /// read as "nothing will be denied".
+    pub preview_complete: bool,
 }
 
 /// Does the warehouse still have legacy `catalog.catalog_grants` rows?
@@ -122,16 +130,18 @@ async fn sample_principals(
     .await
 }
 
-/// The catalog's NAMED tables: `(namespace levels, table)` named by a legacy
-/// table grant (while it exists) or targeted by a rule on this catalog (a rule
-/// naming a schema and a table). Catalog-/schema-wide rules and tables named
-/// nowhere are not enumerated here — the sample is the SP5b one, not a crawl of
-/// the object store.
+/// The candidate tables `(namespace levels, table)` plus whether they cover every
+/// restricting rule. Candidates are the UNION of: tables named by a legacy table
+/// grant (while it exists), tables named by a path rule, and every table carrying
+/// a tag/classification in the catalog (tag rules carry no path, so the tagged
+/// tables are where they land). A path rule naming no table (schema-wide or
+/// catalog-wide) restricts tables that cannot be listed without a crawl of the
+/// object store, so it makes the preview incomplete (`false`).
 async fn sample_tables(
     conn: &mut PgConnection,
     warehouse_id: Uuid,
     catalog_id: Uuid,
-) -> Result<Vec<(Vec<String>, String)>, sqlx::Error> {
+) -> Result<(Vec<(Vec<String>, String)>, bool), GateError> {
     let mut out: Vec<(Vec<String>, String)> = Vec::new();
     let mut push = |ns: Vec<String>, t: String| {
         if !ns.is_empty() && !out.iter().any(|(n, x)| *n == ns && *x == t) {
@@ -151,17 +161,23 @@ async fn sample_tables(
             push(ns, t);
         }
     }
-    let rules: Vec<(String, String)> = sqlx::query_as(
-        "SELECT schema_name, table_name FROM perm.rules \
-          WHERE catalog_id = $1 AND schema_name IS NOT NULL AND table_name IS NOT NULL",
-    )
-    .bind(catalog_id)
-    .fetch_all(&mut *conn)
-    .await?;
-    for (s, t) in rules {
-        push(s.split('.').map(str::to_string).collect(), t);
+    let rules: Vec<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT schema_name, table_name FROM perm.rules WHERE catalog_id = $1")
+            .bind(catalog_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    let mut complete = true;
+    for (schema, table) in rules {
+        match (schema, table) {
+            (Some(s), Some(t)) => push(s.split('.').map(str::to_string).collect(), t),
+            _ => complete = false,
+        }
     }
-    Ok(out)
+    let tagged = load_classified_columns_for_catalog_via(conn, catalog_id).await?;
+    for c in tagged {
+        push(c.schema.split('.').map(str::to_string).collect(), c.table);
+    }
+    Ok((out, complete))
 }
 
 /// **plan**: preview switching rule enforcement on. Changes nothing.
@@ -189,6 +205,7 @@ pub async fn plan(
             grants_identical: false,
             grant_divergences: Vec::new(),
             new_denies: Vec::new(),
+            preview_complete: false,
         });
     }
 
@@ -200,7 +217,7 @@ pub async fn plan(
         .await?
         .ok_or(GateError::NoRegistryCatalog(catalog_id))?;
     let principals = sample_principals(&mut conn, warehouse_id).await?;
-    let tables = sample_tables(&mut conn, warehouse_id, catalog_id).await?;
+    let (tables, preview_complete) = sample_tables(&mut conn, warehouse_id, catalog_id).await?;
     drop(conn);
 
     let mut new_denies = Vec::new();
@@ -233,6 +250,7 @@ pub async fn plan(
         grants_identical,
         grant_divergences,
         new_denies,
+        preview_complete,
     })
 }
 

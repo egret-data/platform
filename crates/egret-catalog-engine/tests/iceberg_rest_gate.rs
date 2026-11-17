@@ -458,3 +458,97 @@ async fn routes_are_platform_admin_only() {
     let (st, _) = call(&e.app, "POST", &uri(s.catalog_id, "plan"), &e.admin, None).await;
     assert_eq!(st, StatusCode::OK);
 }
+
+/// A path mask at the given level (`schema`/`table` may be NULL = wider rule).
+async fn path_mask(pool: &PgPool, catalog_id: Uuid, schema: Option<&str>, table: Option<&str>) {
+    let column = table.map(|_| "id");
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, \
+                                 schema_name, table_name, column_name) \
+         VALUES ($1,'mask'::perm.rule_kind,'MASK_NULL','path'::perm.selector_kind,$2,$3,$4,$5)",
+    )
+    .bind(unique("sp5c-"))
+    .bind(catalog_id)
+    .bind(schema)
+    .bind(table)
+    .bind(column)
+    .execute(pool)
+    .await
+    .expect("path rule");
+}
+
+#[tokio::test]
+async fn a_tag_mask_on_a_tagged_table_appears_in_new_denies() {
+    let Some(e) = env().await else { return };
+    let s = seed_catalog(&e.db.pool, CORPUS).await;
+    let pool = &e.db.pool;
+    let key = unique("sp5c-tag");
+    let tag: Uuid = sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1,$2) RETURNING id")
+        .bind(&key)
+        .bind(unique("Sp5cTag"))
+        .fetch_one(pool)
+        .await
+        .expect("tag");
+    sqlx::query(
+        "INSERT INTO catalog_tag_assignments (tag_id, warehouse_id, schema_name, table_name, \
+         column_name) VALUES ($1,$2,'sales','orders','id')",
+    )
+    .bind(tag)
+    .bind(s.warehouse_id)
+    .execute(pool)
+    .await
+    .expect("assign");
+    // The ONLY rule is a tag mask: no path rule names the table.
+    sqlx::query(
+        "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, tag_key) \
+         VALUES ($1,'mask'::perm.rule_kind,'MASK_NULL','tag'::perm.selector_kind,$2)",
+    )
+    .bind(unique("sp5c-"))
+    .bind(&key)
+    .execute(pool)
+    .await
+    .expect("tag rule");
+    grants_to_unified(&e, s.catalog_id).await;
+
+    let (st, plan) = call(&e.app, "POST", &uri(s.catalog_id, "plan"), &e.admin, None).await;
+    assert_eq!(st, StatusCode::OK, "{plan}");
+    let denied: Vec<&str> = plan["newDenies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["principal"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        denied.len(),
+        2,
+        "both readers lose the tagged table: {plan}"
+    );
+    assert_eq!(plan["newDenies"][0]["table"], json!("orders"), "{plan}");
+    assert_eq!(plan["previewComplete"], json!(true), "{plan}");
+}
+
+#[tokio::test]
+async fn preview_complete_is_false_for_wide_rules_true_for_named_tables() {
+    let Some(e) = env().await else { return };
+    let s = seed_catalog(&e.db.pool, CORPUS).await;
+    path_mask(&e.db.pool, s.catalog_id, Some("sales"), Some("orders")).await;
+    grants_to_unified(&e, s.catalog_id).await;
+    let (_, plan) = call(&e.app, "POST", &uri(s.catalog_id, "plan"), &e.admin, None).await;
+    assert_eq!(plan["previewComplete"], json!(true), "{plan}");
+
+    // A schema-wide rule restricts tables that cannot be listed.
+    path_mask(&e.db.pool, s.catalog_id, Some("sales"), None).await;
+    let (_, plan) = call(&e.app, "POST", &uri(s.catalog_id, "plan"), &e.admin, None).await;
+    assert_eq!(plan["previewComplete"], json!(false), "schema-wide: {plan}");
+
+    // A catalog-wide rule likewise.
+    let s2 = seed_catalog(&e.db.pool, CORPUS).await;
+    path_mask(&e.db.pool, s2.catalog_id, None, None).await;
+    grants_to_unified(&e, s2.catalog_id).await;
+    let (_, plan) = call(&e.app, "POST", &uri(s2.catalog_id, "plan"), &e.admin, None).await;
+    assert_eq!(
+        plan["previewComplete"],
+        json!(false),
+        "catalog-wide: {plan}"
+    );
+}
