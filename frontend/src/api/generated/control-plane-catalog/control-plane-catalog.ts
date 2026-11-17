@@ -39,7 +39,9 @@ import type {
   CreatedClientDto,
   DeleteProfileBody,
   DeletedTabularDto,
+  EquivalenceReport,
   ErrorBody,
+  FinalizeSummary,
   FormatPolicyBody,
   GrantDto,
   NamespaceDto,
@@ -265,6 +267,461 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getControlPlaneCatalogRevokeGrantMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogCatalogMigrateFinalizeResponse200 = {
+  data: FinalizeSummary
+  status: 200
+}
+
+export type controlPlaneCatalogCatalogMigrateFinalizeResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogCatalogMigrateFinalizeResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogCatalogMigrateFinalizeResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogCatalogMigrateFinalizeResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneCatalogCatalogMigrateFinalizeResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogCatalogMigrateFinalizeResponseSuccess = (controlPlaneCatalogCatalogMigrateFinalizeResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogCatalogMigrateFinalizeResponseError = (controlPlaneCatalogCatalogMigrateFinalizeResponse401 | controlPlaneCatalogCatalogMigrateFinalizeResponse403 | controlPlaneCatalogCatalogMigrateFinalizeResponse404 | controlPlaneCatalogCatalogMigrateFinalizeResponse409 | controlPlaneCatalogCatalogMigrateFinalizeResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogCatalogMigrateFinalizeResponse = (controlPlaneCatalogCatalogMigrateFinalizeResponseSuccess | controlPlaneCatalogCatalogMigrateFinalizeResponseError)
+
+export const getControlPlaneCatalogCatalogMigrateFinalizeUrl = (catalog: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/catalog-migrate/${encodeURIComponent(catalog)}/finalize`
+}
+
+/**
+ * @summary **finalize**: close the catalog onto the unified store, irreversibly — refused
+(409, unchanged) unless it is switched to `unified`, and refused for any
+non-ASCII folded name (where unified would under-grant). NULLs the clients'
+role (keeping the clients), drops the warehouse's `catalog_grants` +
+`catalog_roles`, and so makes a later `undo` impossible.
+ */
+export const controlPlaneCatalogCatalogMigrateFinalize = async (catalog: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogCatalogMigrateFinalizeResponse> => {
+
+  return customInstance<controlPlaneCatalogCatalogMigrateFinalizeResponse>(getControlPlaneCatalogCatalogMigrateFinalizeUrl(catalog),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogCatalogMigrateFinalizeMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateFinalize>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateFinalize>>, TError,{catalog: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogCatalogMigrateFinalize'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateFinalize>>, {catalog: string}> = (props) => {
+          const {catalog} = props ?? {};
+
+          return  controlPlaneCatalogCatalogMigrateFinalize(catalog,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogCatalogMigrateFinalizeMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateFinalize>>>
+
+    export type ControlPlaneCatalogCatalogMigrateFinalizeMutationError = ErrorBody
+
+    /**
+ * @summary **finalize**: close the catalog onto the unified store, irreversibly — refused
+(409, unchanged) unless it is switched to `unified`, and refused for any
+non-ASCII folded name (where unified would under-grant). NULLs the clients'
+role (keeping the clients), drops the warehouse's `catalog_grants` +
+`catalog_roles`, and so makes a later `undo` impossible.
+ */
+export const useControlPlaneCatalogCatalogMigrateFinalize = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateFinalize>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateFinalize>>,
+        TError,
+        {catalog: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogCatalogMigrateFinalizeMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogCatalogMigratePlanResponse200 = {
+  data: EquivalenceReport
+  status: 200
+}
+
+export type controlPlaneCatalogCatalogMigratePlanResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogCatalogMigratePlanResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogCatalogMigratePlanResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogCatalogMigratePlanResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneCatalogCatalogMigratePlanResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogCatalogMigratePlanResponseSuccess = (controlPlaneCatalogCatalogMigratePlanResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogCatalogMigratePlanResponseError = (controlPlaneCatalogCatalogMigratePlanResponse401 | controlPlaneCatalogCatalogMigratePlanResponse403 | controlPlaneCatalogCatalogMigratePlanResponse404 | controlPlaneCatalogCatalogMigratePlanResponse409 | controlPlaneCatalogCatalogMigratePlanResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogCatalogMigratePlanResponse = (controlPlaneCatalogCatalogMigratePlanResponseSuccess | controlPlaneCatalogCatalogMigratePlanResponseError)
+
+export const getControlPlaneCatalogCatalogMigratePlanUrl = (catalog: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/catalog-migrate/${encodeURIComponent(catalog)}/plan`
+}
+
+/**
+ * @summary **plan**: fold the catalog's RBAC into the unified `perm.grants` store WITHOUT
+switching (idempotent), and return the equivalence report comparing the legacy
+and unified stores over a sample of the catalog's authenticatable principals ×
+its named objects × read/write. A clean report (no divergences) is what
+`switch` requires. Changes nothing a caller may do.
+ */
+export const controlPlaneCatalogCatalogMigratePlan = async (catalog: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogCatalogMigratePlanResponse> => {
+
+  return customInstance<controlPlaneCatalogCatalogMigratePlanResponse>(getControlPlaneCatalogCatalogMigratePlanUrl(catalog),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogCatalogMigratePlanMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigratePlan>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigratePlan>>, TError,{catalog: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogCatalogMigratePlan'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigratePlan>>, {catalog: string}> = (props) => {
+          const {catalog} = props ?? {};
+
+          return  controlPlaneCatalogCatalogMigratePlan(catalog,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogCatalogMigratePlanMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigratePlan>>>
+
+    export type ControlPlaneCatalogCatalogMigratePlanMutationError = ErrorBody
+
+    /**
+ * @summary **plan**: fold the catalog's RBAC into the unified `perm.grants` store WITHOUT
+switching (idempotent), and return the equivalence report comparing the legacy
+and unified stores over a sample of the catalog's authenticatable principals ×
+its named objects × read/write. A clean report (no divergences) is what
+`switch` requires. Changes nothing a caller may do.
+ */
+export const useControlPlaneCatalogCatalogMigratePlan = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigratePlan>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigratePlan>>,
+        TError,
+        {catalog: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogCatalogMigratePlanMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogCatalogMigrateSwitchResponse200 = {
+  data: EquivalenceReport
+  status: 200
+}
+
+export type controlPlaneCatalogCatalogMigrateSwitchResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogCatalogMigrateSwitchResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogCatalogMigrateSwitchResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogCatalogMigrateSwitchResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneCatalogCatalogMigrateSwitchResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogCatalogMigrateSwitchResponseSuccess = (controlPlaneCatalogCatalogMigrateSwitchResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogCatalogMigrateSwitchResponseError = (controlPlaneCatalogCatalogMigrateSwitchResponse401 | controlPlaneCatalogCatalogMigrateSwitchResponse403 | controlPlaneCatalogCatalogMigrateSwitchResponse404 | controlPlaneCatalogCatalogMigrateSwitchResponse409 | controlPlaneCatalogCatalogMigrateSwitchResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogCatalogMigrateSwitchResponse = (controlPlaneCatalogCatalogMigrateSwitchResponseSuccess | controlPlaneCatalogCatalogMigrateSwitchResponseError)
+
+export const getControlPlaneCatalogCatalogMigrateSwitchUrl = (catalog: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/catalog-migrate/${encodeURIComponent(catalog)}/switch`
+}
+
+/**
+ * @summary **switch**: flip the catalog to the unified store — refused (409, unchanged)
+unless it was folded (`plan`) and the two stores are, at this instant,
+equivalent. Returns the clean report it switched on.
+ */
+export const controlPlaneCatalogCatalogMigrateSwitch = async (catalog: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogCatalogMigrateSwitchResponse> => {
+
+  return customInstance<controlPlaneCatalogCatalogMigrateSwitchResponse>(getControlPlaneCatalogCatalogMigrateSwitchUrl(catalog),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogCatalogMigrateSwitchMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateSwitch>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateSwitch>>, TError,{catalog: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogCatalogMigrateSwitch'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateSwitch>>, {catalog: string}> = (props) => {
+          const {catalog} = props ?? {};
+
+          return  controlPlaneCatalogCatalogMigrateSwitch(catalog,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogCatalogMigrateSwitchMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateSwitch>>>
+
+    export type ControlPlaneCatalogCatalogMigrateSwitchMutationError = ErrorBody
+
+    /**
+ * @summary **switch**: flip the catalog to the unified store — refused (409, unchanged)
+unless it was folded (`plan`) and the two stores are, at this instant,
+equivalent. Returns the clean report it switched on.
+ */
+export const useControlPlaneCatalogCatalogMigrateSwitch = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateSwitch>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateSwitch>>,
+        TError,
+        {catalog: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogCatalogMigrateSwitchMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogCatalogMigrateUndoResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneCatalogCatalogMigrateUndoResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogCatalogMigrateUndoResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogCatalogMigrateUndoResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneCatalogCatalogMigrateUndoResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogCatalogMigrateUndoResponseSuccess = (controlPlaneCatalogCatalogMigrateUndoResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogCatalogMigrateUndoResponseError = (controlPlaneCatalogCatalogMigrateUndoResponse401 | controlPlaneCatalogCatalogMigrateUndoResponse403 | controlPlaneCatalogCatalogMigrateUndoResponse409 | controlPlaneCatalogCatalogMigrateUndoResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogCatalogMigrateUndoResponse = (controlPlaneCatalogCatalogMigrateUndoResponseSuccess | controlPlaneCatalogCatalogMigrateUndoResponseError)
+
+export const getControlPlaneCatalogCatalogMigrateUndoUrl = (catalog: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/catalog-migrate/${encodeURIComponent(catalog)}/undo`
+}
+
+/**
+ * @summary **undo**: return the catalog to the legacy store and remove the folded rows,
+atomically — refused (409, unchanged) if the legacy RBAC changed since the
+fold or was finalized. Reversible only while the migration is open.
+ */
+export const controlPlaneCatalogCatalogMigrateUndo = async (catalog: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogCatalogMigrateUndoResponse> => {
+
+  return customInstance<controlPlaneCatalogCatalogMigrateUndoResponse>(getControlPlaneCatalogCatalogMigrateUndoUrl(catalog),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogCatalogMigrateUndoMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateUndo>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateUndo>>, TError,{catalog: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogCatalogMigrateUndo'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateUndo>>, {catalog: string}> = (props) => {
+          const {catalog} = props ?? {};
+
+          return  controlPlaneCatalogCatalogMigrateUndo(catalog,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogCatalogMigrateUndoMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateUndo>>>
+
+    export type ControlPlaneCatalogCatalogMigrateUndoMutationError = ErrorBody
+
+    /**
+ * @summary **undo**: return the catalog to the legacy store and remove the folded rows,
+atomically — refused (409, unchanged) if the legacy RBAC changed since the
+fold or was finalized. Reversible only while the migration is open.
+ */
+export const useControlPlaneCatalogCatalogMigrateUndo = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateUndo>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogCatalogMigrateUndo>>,
+        TError,
+        {catalog: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogCatalogMigrateUndoMutationOptions(options), queryClient);
     }
     export type controlPlaneCatalogDeleteRoleResponse204 = {
   data: void

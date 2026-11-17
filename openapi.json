@@ -8450,6 +8450,321 @@
         }
       }
     },
+    "/api/control-plane/perm/catalog-migrate/{catalog}/finalize": {
+      "post": {
+        "tags": [
+          "control-plane-catalog"
+        ],
+        "summary": "**finalize**: close the catalog onto the unified store, irreversibly — refused\n(409, unchanged) unless it is switched to `unified`, and refused for any\nnon-ASCII folded name (where unified would under-grant). NULLs the clients'\nrole (keeping the clients), drops the warehouse's `catalog_grants` +\n`catalog_roles`, and so makes a later `undo` impossible.",
+        "operationId": "catalog_migrate_finalize",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Finalized; what was removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FinalizeSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing changed: not switched to unified, or a non-ASCII folded name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/catalog-migrate/{catalog}/plan": {
+      "post": {
+        "tags": [
+          "control-plane-catalog"
+        ],
+        "summary": "**plan**: fold the catalog's RBAC into the unified `perm.grants` store WITHOUT\nswitching (idempotent), and return the equivalence report comparing the legacy\nand unified stores over a sample of the catalog's authenticatable principals ×\nits named objects × read/write. A clean report (no divergences) is what\n`switch` requires. Changes nothing a caller may do.",
+        "operationId": "catalog_migrate_plan",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The catalog is folded; its legacy/unified equivalence report (clean ⇒ it may switch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EquivalenceReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The catalog's RBAC is malformed or unmappable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/catalog-migrate/{catalog}/switch": {
+      "post": {
+        "tags": [
+          "control-plane-catalog"
+        ],
+        "summary": "**switch**: flip the catalog to the unified store — refused (409, unchanged)\nunless it was folded (`plan`) and the two stores are, at this instant,\nequivalent. Returns the clean report it switched on.",
+        "operationId": "catalog_migrate_switch",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Switched to the unified store; the (clean) equivalence report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EquivalenceReport"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing changed: not folded, or not equivalent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/catalog-migrate/{catalog}/undo": {
+      "post": {
+        "tags": [
+          "control-plane-catalog"
+        ],
+        "summary": "**undo**: return the catalog to the legacy store and remove the folded rows,\natomically — refused (409, unchanged) if the legacy RBAC changed since the\nfold or was finalized. Reversible only while the migration is open.",
+        "operationId": "catalog_migrate_undo",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Reverted to the legacy store; folded rows removed"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing changed: the catalog RBAC changed since the fold, or was finalized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/clearances/{tag_id}/people": {
       "get": {
         "tags": [
@@ -48374,6 +48689,54 @@
           }
         }
       },
+      "Divergence": {
+        "type": "object",
+        "description": "One sampled decision where the legacy and unified stores disagree.",
+        "required": [
+          "principal",
+          "role",
+          "namespace",
+          "write",
+          "legacy",
+          "unified"
+        ],
+        "properties": {
+          "principal": {
+            "type": "string",
+            "description": "The service-account username evaluated."
+          },
+          "role": {
+            "type": "string",
+            "description": "The catalog role whose legacy grants decided the legacy side."
+          },
+          "namespace": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The namespace probed (empty only never happens here)."
+          },
+          "table": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The table probed, if any."
+          },
+          "write": {
+            "type": "boolean",
+            "description": "`true` for a write probe, `false` for a read."
+          },
+          "legacy": {
+            "type": "boolean",
+            "description": "What the legacy store (`catalog_grant_covers_by`) decided."
+          },
+          "unified": {
+            "type": "boolean",
+            "description": "What the unified store (`unified_decide::covers`) decided."
+          }
+        }
+      },
       "DuplicateDataset": {
         "type": "object",
         "description": "Body of `POST /datasets/{id}/duplicate`.",
@@ -49655,6 +50018,45 @@
               "$ref": "#/components/schemas/BlockedPolicy"
             },
             "description": "Operator policies that cannot be migrated at all; each blocks\ncompleteness until the operator removes or rewrites it."
+          }
+        }
+      },
+      "EquivalenceReport": {
+        "type": "object",
+        "description": "The result of comparing the legacy and unified stores for one catalog over a\nsample of principals × objects × accesses. Clean iff [`Self::divergences`] is\nempty.",
+        "required": [
+          "catalogId",
+          "principals",
+          "objects",
+          "comparisons",
+          "divergences"
+        ],
+        "properties": {
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "principals": {
+            "type": "integer",
+            "description": "Authenticatable principals sampled (valid clients' `(sa, role)` pairs).",
+            "minimum": 0
+          },
+          "objects": {
+            "type": "integer",
+            "description": "Distinct objects sampled (named namespaces/tables + sibling probes).",
+            "minimum": 0
+          },
+          "comparisons": {
+            "type": "integer",
+            "description": "Total (principal, object, access) comparisons made.",
+            "minimum": 0
+          },
+          "divergences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Divergence"
+            },
+            "description": "Every disagreement found. Empty ⇒ the catalog may switch."
           }
         }
       },
@@ -51012,39 +51414,35 @@
       },
       "FinalizeSummary": {
         "type": "object",
-        "description": "What finalize removed.",
+        "description": "What [`finalize`] removed when it closed a catalog onto the unified store.",
         "required": [
-          "policy_migrations_deleted",
-          "clearance_migrations_deleted",
-          "role_principal_migrations_deleted",
-          "ws_assignment_migrations_deleted",
-          "original_policies_deleted"
+          "catalogId",
+          "clientsDetached",
+          "grantsDropped",
+          "rolesDropped"
         ],
         "properties": {
-          "policy_migrations_deleted": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Rows deleted from `perm.migrated_from`."
+          "catalogId": {
+            "type": "string",
+            "format": "uuid"
           },
-          "clearance_migrations_deleted": {
+          "clientsDetached": {
             "type": "integer",
             "format": "int64",
-            "description": "Rows deleted from `perm.clearance_migration`."
+            "description": "Clients whose `catalog_role_id` was NULLed (the clients themselves survive).",
+            "minimum": 0
           },
-          "role_principal_migrations_deleted": {
+          "grantsDropped": {
             "type": "integer",
             "format": "int64",
-            "description": "Rows deleted from `perm.role_principal_migration`."
+            "description": "`catalog.catalog_grants` rows dropped for the warehouse.",
+            "minimum": 0
           },
-          "ws_assignment_migrations_deleted": {
+          "rolesDropped": {
             "type": "integer",
             "format": "int64",
-            "description": "Rows deleted from `perm.ws_assignment_migration`."
-          },
-          "original_policies_deleted": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Switched-off original operator policies deleted."
+            "description": "`catalog.catalog_roles` rows dropped for the warehouse.",
+            "minimum": 0
           }
         }
       },

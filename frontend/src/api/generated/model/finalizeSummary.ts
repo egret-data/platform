@@ -7,17 +7,23 @@
  */
 
 /**
- * What finalize removed.
+ * What [`finalize`] removed when it closed a catalog onto the unified store.
  */
 export interface FinalizeSummary {
-  /** Rows deleted from `perm.migrated_from`. */
-  policy_migrations_deleted: number;
-  /** Rows deleted from `perm.clearance_migration`. */
-  clearance_migrations_deleted: number;
-  /** Rows deleted from `perm.role_principal_migration`. */
-  role_principal_migrations_deleted: number;
-  /** Rows deleted from `perm.ws_assignment_migration`. */
-  ws_assignment_migrations_deleted: number;
-  /** Switched-off original operator policies deleted. */
-  original_policies_deleted: number;
+  catalogId: string;
+  /**
+     * Clients whose `catalog_role_id` was NULLed (the clients themselves survive).
+     * @minimum 0
+     */
+  clientsDetached: number;
+  /**
+     * `catalog.catalog_grants` rows dropped for the warehouse.
+     * @minimum 0
+     */
+  grantsDropped: number;
+  /**
+     * `catalog.catalog_roles` rows dropped for the warehouse.
+     * @minimum 0
+     */
+  rolesDropped: number;
 }
