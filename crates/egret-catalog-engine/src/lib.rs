@@ -23,6 +23,8 @@ pub mod error;
 /// How a catalog grant covers a namespace or a table: the rule the catalog
 /// guard and [`authorizer::EgretAuthorizer`] share.
 pub mod grant_match;
+/// SP5c Task 4: plan/switch/undo for per-catalog iceberg-rest rule enforcement.
+pub mod iceberg_rest_gate;
 /// The view-governance lineage sweep (spec B3): recompute every view's
 /// lineage and re-tag it, on a schedule and on demand.
 pub mod lineage_sweep;
