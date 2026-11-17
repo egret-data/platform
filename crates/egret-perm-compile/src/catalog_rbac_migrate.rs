@@ -7,7 +7,8 @@
 //! principals are those service accounts, as `kind='user'` principals named by
 //! `users.username` (the only identity an engine sees; see `principal_refs`).
 //! A role with no bound service account contributes nothing and is reported in
-//! [`FoldReport::skipped_roles`]. Revoked clients are not counted.
+//! [`FoldReport::skipped_roles`]. Only clients that could authenticate now count (mirrors
+//! `EmbeddedStore::client_row`: active user and workspace, not revoked, not expired).
 //!
 //! # Reversible
 //!
@@ -192,9 +193,14 @@ pub async fn fold_catalog(
     let mut skipped = Vec::new();
     for role in &src.roles {
         let sa_ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT service_account_id FROM catalog.catalog_clients \
-              WHERE catalog_role_id = $1 AND service_account_id IS NOT NULL \
-                AND revoked_at IS NULL ORDER BY 1",
+            "SELECT DISTINCT c.service_account_id FROM catalog.catalog_clients c \
+               JOIN service_accounts sa ON sa.user_id = c.service_account_id \
+               JOIN users u ON u.id = sa.user_id \
+               JOIN workspaces ws ON ws.id = c.workspace_id \
+              WHERE c.catalog_role_id = $1 \
+                AND u.status = 'active' AND ws.status = 'active' \
+                AND c.revoked_at IS NULL \
+                AND (c.expires_at IS NULL OR c.expires_at > now()) ORDER BY 1",
         )
         .bind(role.id)
         .fetch_all(&mut *tx)
@@ -332,7 +338,6 @@ mod tests {
         pool: PgPool,
         catalog_id: Uuid,
         wh: Uuid,
-        role_a: Uuid,
         grant_a1: Uuid,
         sa1: Uuid,
         sa2: Uuid,
@@ -472,7 +477,6 @@ mod tests {
             pool,
             catalog_id,
             wh,
-            role_a,
             grant_a1,
             sa1,
             sa2,
@@ -593,6 +597,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clients_that_could_not_authenticate_are_not_folded() {
+        let Some(f) = fixture().await else { return };
+        let ws: Uuid =
+            sqlx::query_scalar("SELECT workspace_id FROM catalog.warehouses WHERE id=$1")
+                .bind(f.wh)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        // Role c: three clients, each invalid in a different way.
+        let rc = role(&f.pool, f.wh, "c").await;
+        grant(&f.pool, rc, "catalog", None, None, "manage").await;
+        let tag = Uuid::new_v4().simple().to_string();
+        let mut bad = Vec::new();
+        for kind in ["expired", "revoked", "inactive"] {
+            let sa = user(&f.pool, &format!("{kind}-{}", &tag[..10])).await;
+            sqlx::query(
+                "INSERT INTO service_accounts (user_id, scope, workspace_id, name) \
+                 VALUES ($1,'workspace',$2,$3)",
+            )
+            .bind(sa)
+            .bind(ws)
+            .bind(format!("n-{sa}"))
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            client(&f.pool, f.wh, rc, sa, ws).await;
+            match kind {
+                "expired" => sqlx::query(
+                    "UPDATE catalog.catalog_clients SET expires_at = now() - interval '1 day' \
+                      WHERE service_account_id = $1",
+                ),
+                "revoked" => sqlx::query(
+                    "UPDATE catalog.catalog_clients SET revoked_at = now() \
+                      WHERE service_account_id = $1",
+                ),
+                _ => sqlx::query("UPDATE users SET status = 'disabled' WHERE id = $1"),
+            }
+            .bind(sa)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+            bad.push(sa);
+        }
+        let mut c = f.pool.acquire().await.unwrap();
+        let r = fold_catalog(&mut c, f.catalog_id, "t").await.unwrap();
+        assert!(r.skipped_roles.contains(&"c".to_string()), "{r:?}");
+        assert_eq!(r.created_grant_ids.len(), 2, "only role a's grants");
+        let leaked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM perm.grant_principals gp JOIN users u ON u.username::text = gp.ref \
+              WHERE gp.grant_id = ANY($1) AND u.id = ANY($2)",
+        )
+        .bind(&r.created_grant_ids)
+        .bind(&bad)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(leaked, 0);
+    }
+
+    #[tokio::test]
     async fn undo_refuses_after_a_source_grant_changed() {
         let Some(f) = fixture().await else { return };
         let mut c = f.pool.acquire().await.unwrap();
@@ -607,6 +671,5 @@ mod tests {
             Err(FoldError::SourceChanged)
         ));
         assert_eq!(perm_grant_count(&f.pool, f.catalog_id).await, 2);
-        let _ = f.role_a;
     }
 }
