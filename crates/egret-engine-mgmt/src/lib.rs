@@ -6,6 +6,7 @@ pub mod catalogs;
 pub mod delegation_default;
 pub mod delegator_policy;
 pub mod dependents;
+pub mod engine_catalog_grant;
 pub mod engines;
 pub mod error;
 pub mod external;

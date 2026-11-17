@@ -26,7 +26,7 @@ use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use egret_auth::principal::Auth;
+use egret_auth::principal::{Auth, PlatformAuth};
 use egret_auth::session::SessionService;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -321,6 +321,25 @@ fn router() -> Router<CatalogAdminState> {
         )
         .route("/warehouses/{id}/search", get(search_tabulars))
         .route("/warehouses/{id}/tasks", get(list_tasks))
+        // SP5b Task 6: the equivalence-gated catalog store migration. Admin-only
+        // (`platform_admin`); the URL keeps the brief's `/perm/catalog-migrate/…`
+        // namespace (both routers nest at `/api/control-plane`).
+        .route(
+            "/perm/catalog-migrate/{catalog}/plan",
+            post(catalog_migrate_plan),
+        )
+        .route(
+            "/perm/catalog-migrate/{catalog}/switch",
+            post(catalog_migrate_switch),
+        )
+        .route(
+            "/perm/catalog-migrate/{catalog}/undo",
+            post(catalog_migrate_undo),
+        )
+        .route(
+            "/perm/catalog-migrate/{catalog}/finalize",
+            post(catalog_migrate_finalize),
+        )
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1640,6 +1659,116 @@ async fn list_tasks(
 /// admin ops). Merged into `egret_catalog_engine::openapi()`. `RoleDto` is
 /// emitted as `CatalogRoleDto` (see its `#[schema(as = …)]`) so it does not
 /// clobber the control-plane RBAC `RoleDto` in the merged doc.
+// ── SP5b Task 6: equivalence-gated catalog store migration ───────────────────
+use crate::catalog_migrate_gate::{self, EquivalenceReport, FinalizeSummary};
+
+/// **plan**: fold the catalog's RBAC into the unified `perm.grants` store WITHOUT
+/// switching (idempotent), and return the equivalence report comparing the legacy
+/// and unified stores over a sample of the catalog's authenticatable principals ×
+/// its named objects × read/write. A clean report (no divergences) is what
+/// `switch` requires. Changes nothing a caller may do.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/catalog-migrate/{catalog}/plan",
+    tag = "control-plane-catalog",
+    params(("catalog" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 200, description = "The catalog is folded; its legacy/unified equivalence report (clean ⇒ it may switch)", body = EquivalenceReport),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not a platform admin", body = ErrorBody),
+        (status = 404, description = "No such registry catalog", body = ErrorBody),
+        (status = 409, description = "The catalog's RBAC is malformed or unmappable", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn catalog_migrate_plan(
+    State(st): State<CatalogAdminState>,
+    PlatformAuth(p): PlatformAuth,
+    Path(catalog): Path<Uuid>,
+) -> Result<Json<EquivalenceReport>, CatalogHttpError> {
+    let report = catalog_migrate_gate::plan(&st.store, catalog, &p.email).await?;
+    Ok(Json(report))
+}
+
+/// **switch**: flip the catalog to the unified store — refused (409, unchanged)
+/// unless it was folded (`plan`) and the two stores are, at this instant,
+/// equivalent. Returns the clean report it switched on.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/catalog-migrate/{catalog}/switch",
+    tag = "control-plane-catalog",
+    params(("catalog" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 200, description = "Switched to the unified store; the (clean) equivalence report", body = EquivalenceReport),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not a platform admin", body = ErrorBody),
+        (status = 404, description = "No such registry catalog", body = ErrorBody),
+        (status = 409, description = "Nothing changed: not folded, or not equivalent", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn catalog_migrate_switch(
+    State(st): State<CatalogAdminState>,
+    PlatformAuth(p): PlatformAuth,
+    Path(catalog): Path<Uuid>,
+) -> Result<Json<EquivalenceReport>, CatalogHttpError> {
+    let report = catalog_migrate_gate::switch(&st.store, catalog, &p.email).await?;
+    Ok(Json(report))
+}
+
+/// **undo**: return the catalog to the legacy store and remove the folded rows,
+/// atomically — refused (409, unchanged) if the legacy RBAC changed since the
+/// fold or was finalized. Reversible only while the migration is open.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/catalog-migrate/{catalog}/undo",
+    tag = "control-plane-catalog",
+    params(("catalog" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 204, description = "Reverted to the legacy store; folded rows removed"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not a platform admin", body = ErrorBody),
+        (status = 409, description = "Nothing changed: the catalog RBAC changed since the fold, or was finalized", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn catalog_migrate_undo(
+    State(st): State<CatalogAdminState>,
+    PlatformAuth(p): PlatformAuth,
+    Path(catalog): Path<Uuid>,
+) -> Result<StatusCode, CatalogHttpError> {
+    catalog_migrate_gate::undo(&st.store, catalog, &p.email).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// **finalize**: close the catalog onto the unified store, irreversibly — refused
+/// (409, unchanged) unless it is switched to `unified`, and refused for any
+/// non-ASCII folded name (where unified would under-grant). NULLs the clients'
+/// role (keeping the clients), drops the warehouse's `catalog_grants` +
+/// `catalog_roles`, and so makes a later `undo` impossible.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/catalog-migrate/{catalog}/finalize",
+    tag = "control-plane-catalog",
+    params(("catalog" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 200, description = "Finalized; what was removed", body = FinalizeSummary),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not a platform admin", body = ErrorBody),
+        (status = 404, description = "No such registry catalog", body = ErrorBody),
+        (status = 409, description = "Nothing changed: not switched to unified, or a non-ASCII folded name", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn catalog_migrate_finalize(
+    State(st): State<CatalogAdminState>,
+    _admin: PlatformAuth,
+    Path(catalog): Path<Uuid>,
+) -> Result<Json<FinalizeSummary>, CatalogHttpError> {
+    let summary = catalog_migrate_gate::finalize(&st.store, catalog).await?;
+    Ok(Json(summary))
+}
+
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(
@@ -1670,6 +1799,10 @@ async fn list_tasks(
         rotate_credential,
         search_tabulars,
         list_tasks,
+        catalog_migrate_plan,
+        catalog_migrate_switch,
+        catalog_migrate_undo,
+        catalog_migrate_finalize,
     ),
     components(schemas(
         WarehouseDto,
@@ -1699,6 +1832,9 @@ async fn list_tasks(
         RotateCredBody,
         SearchResultDto,
         TaskDto,
+        EquivalenceReport,
+        catalog_migrate_gate::Divergence,
+        FinalizeSummary,
         ErrorBody,
     )),
     tags((name = "control-plane-catalog", description = "Embedded-catalog warehouse management: warehouses, catalog roles/grants/clients, browse, and admin ops")),

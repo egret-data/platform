@@ -143,6 +143,7 @@ async fn env_with_profile(profile: Option<Value>) -> Option<Env> {
     let guard: Arc<dyn egret_catalog_engine::CatalogGuard> = Arc::new(EgretCatalogGuard {
         keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
         catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
+        snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache::new(),
     });
     let hold = Arc::new(ViewHold::new(db.clone(), Arc::new(NoExplain)));
     let hook = Arc::new(TableHook::new(db.clone()));

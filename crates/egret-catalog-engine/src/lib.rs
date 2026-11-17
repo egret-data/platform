@@ -13,6 +13,10 @@ pub mod admin;
 pub mod authorizer;
 pub mod bootstrap;
 pub mod browse;
+/// SP5b Task 6: the equivalence gate + plan/switch/undo/finalize operations that
+/// migrate an embedded catalog from the legacy `catalog.catalog_grants` store to
+/// the unified `perm.grants` store, reversibly then terminally.
+pub mod catalog_migrate_gate;
 /// Crate-level engine domain error ([`CatalogEngineError`]) for the per-request
 /// warehouse/browse operations — distinct from the store's [`CatalogError`].
 pub mod error;
@@ -32,6 +36,7 @@ pub mod store;
 // D2: recompile StarRocks profiles when a table classified as a whole changes
 // schema.
 pub mod table_hook;
+pub mod unified_decide;
 /// The view-governance DEFINER audit's reader (spec B5): every view in
 /// egret's catalogs and its stored `trino.run-as-owner`.
 pub mod view_audit;

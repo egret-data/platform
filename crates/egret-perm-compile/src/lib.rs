@@ -211,3 +211,6 @@ pub use trigger::{
     PATH_MASK_REFUSAL_PREFIX, PROFILE_EXPANSION_CEILING,
 };
 pub use view_tags::{dependent_view_warehouses, retag_view_in_tx, RetagSummary, ViewRetag};
+// SP5b Task 2: the reversible fold of an embedded catalog's RBAC
+// (`catalog_roles`/`catalog_grants`) into `perm.grants`, with provenance.
+pub mod catalog_rbac_migrate;

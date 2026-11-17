@@ -162,6 +162,9 @@ pub struct EgretAuthorizer {
     system: UserId,
     /// The catalog RBAC store the grants are read from.
     grants: CatalogStore,
+    /// SP5b: per-catalog unified `perm` snapshots, used only for catalogs whose
+    /// switch is `unified` (`crate::unified_decide`).
+    snapshot_cache: crate::unified_decide::CatalogSnapshotCache,
 }
 
 impl std::fmt::Debug for EgretAuthorizer {
@@ -179,6 +182,7 @@ impl EgretAuthorizer {
             server_id,
             system,
             grants,
+            snapshot_cache: crate::unified_decide::CatalogSnapshotCache::new(),
         }
     }
 
@@ -195,16 +199,39 @@ impl EgretAuthorizer {
         let unavailable = |e: crate::store::CatalogError| {
             IsAllowedActionError::from(AuthorizationBackendUnavailable::new(e))
         };
-        let scoped = self
+        let warehouse = self
             .grants
             .get_warehouse_by_name(&client.warehouse)
             .await
-            .map_err(unavailable)?
-            .and_then(|w| w.lakekeeper_warehouse_id)
+            .map_err(unavailable)?;
+        let scoped = warehouse
+            .as_ref()
+            .and_then(|w| w.lakekeeper_warehouse_id.as_deref())
             .is_some_and(|id| id == lakekeeper_warehouse_id);
         if !scoped {
             return Ok(vec![false; asks.len()]);
         }
+        let warehouse = warehouse.expect("a scoped request names a warehouse");
+
+        // SP5b: which store decides this catalog. `catalog_rbac` (the default)
+        // keeps the legacy rule below; `unified` evaluates the caller's
+        // service-account principal against the catalog's folded `perm.grants`.
+        let mut conn = self
+            .grants
+            .pool()
+            .acquire()
+            .await
+            .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
+        let (catalog, source) =
+            crate::unified_decide::resolve_catalog_switch(&mut conn, warehouse.id)
+                .await
+                .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
+        if source == crate::unified_decide::Source::Unified {
+            return self
+                .client_may_unified(&mut conn, client, catalog, asks)
+                .await;
+        }
+
         let grants = self
             .grants
             .grants_for_role(&client.warehouse, &client.role)
@@ -223,6 +250,52 @@ impl EgretAuthorizer {
                 grants.iter().any(|g| {
                     catalog_grant_covers_by(g, Some(ns), Some(table), *write, &|a, b| eq.eq(a, b))
                 })
+            })
+            .collect())
+    }
+
+    /// The unified answer for each ask (SP5b): the caller's service-account
+    /// principal, decided against the catalog's folded `perm.grants` via
+    /// `perm-eval` ([`crate::unified_decide::covers`]), on the same `conn` the
+    /// switch was read on. A caller that names no service account, or a catalog
+    /// whose snapshot cannot be built, denies every ask (fail closed). Every ask
+    /// here names a table, so `covers` only ever takes the read/write table
+    /// path — never the namespace reach.
+    async fn client_may_unified(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        client: &CatalogClientIdentity,
+        catalog: Option<(uuid::Uuid, String)>,
+        asks: &[(Vec<String>, String, bool)],
+    ) -> Result<Vec<bool>, IsAllowedActionError> {
+        let unavailable = |e: crate::store::CatalogError| {
+            IsAllowedActionError::from(AuthorizationBackendUnavailable::new(e))
+        };
+        let user = crate::unified_decide::service_account_username(conn, &client.subject)
+            .await
+            .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
+        let (Some(user), Some((catalog_id, catalog_name))) = (user, catalog) else {
+            return Ok(vec![false; asks.len()]);
+        };
+        let snapshot = self
+            .snapshot_cache
+            .get(conn, catalog_id)
+            .await
+            .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
+        let Some(snapshot) = snapshot else {
+            return Ok(vec![false; asks.len()]);
+        };
+        Ok(asks
+            .iter()
+            .map(|(ns, table, write)| {
+                crate::unified_decide::covers(
+                    &snapshot,
+                    &user,
+                    &catalog_name,
+                    ns,
+                    Some(table.as_str()),
+                    *write,
+                )
             })
             .collect())
     }

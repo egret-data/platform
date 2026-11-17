@@ -1,0 +1,26 @@
+-- 0236_catalog_role_id_nullable.sql
+--
+-- SP5b Task 6 (catalog merge / one grant store): make a catalog client's bound
+-- role OPTIONAL so the equivalence-gated finalize can drop a warehouse's RBAC.
+--
+-- `catalog.catalog_clients.catalog_role_id` was `NOT NULL REFERENCES
+-- catalog_roles(id)` (migration 0053) with NO cascade, so a role a client
+-- references cannot be dropped while the client exists. Task 6's finalize —
+-- reached only after a catalog's switch is `unified` and its equivalence is
+-- proved clean — drops the warehouse's `catalog.catalog_grants` +
+-- `catalog.catalog_roles`, the now-dead legacy store. To keep the clients and
+-- their credentials, finalize first NULLs `catalog_role_id` for the warehouse's
+-- clients, THEN drops the roles.
+--
+-- Under `unified` a client's role is dead: enforcement resolves the caller's
+-- service-account principal from `catalog_clients.client_id`
+-- (`unified_decide::service_account_username`), never the token's role claim. The
+-- mint path (`CatalogStore::client_row` / `verified_row`) LEFT-JOINs
+-- `catalog_roles` and emits `roles: []` when the role is NULL, so a finalized
+-- client still authenticates on its own credential. A `catalog_rbac` client
+-- always still has a role, so legacy minting is unchanged.
+--
+-- Changing no data: only the column's nullability. Shipping this enables
+-- nothing on its own.
+
+ALTER TABLE catalog.catalog_clients ALTER COLUMN catalog_role_id DROP NOT NULL;

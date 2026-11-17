@@ -4046,6 +4046,13 @@ async fn create_engine(
     let role_id = ensure_engine_role(&st, wh.id).await?;
     let service_account_id =
         ensure_client_owner(&st, wh.workspace_id, &format!("engine-{}", b.name)).await?;
+    crate::engine_catalog_grant::ensure_engine_catalog_grant(
+        st.engine_mgmt.pool(),
+        wh_catalog.id,
+        service_account_id,
+    )
+    .await
+    .map_err(CpError::from)?;
     let client = st
         .catalog
         .create_client(NewClient {
@@ -5081,6 +5088,13 @@ async fn create_starrocks_engine(
     let role_id = ensure_engine_role(&st, wh.id).await?;
     let service_account_id =
         ensure_client_owner(&st, wh.workspace_id, &format!("engine-{}", b.name)).await?;
+    crate::engine_catalog_grant::ensure_engine_catalog_grant(
+        st.engine_mgmt.pool(),
+        wh_catalog.id,
+        service_account_id,
+    )
+    .await
+    .map_err(CpError::from)?;
     let client = st
         .catalog
         .create_client(NewClient {

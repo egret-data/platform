@@ -707,6 +707,50 @@ fn gap_text(kind: EpKind, version: Option<&str>, p: Privilege) -> String {
     )
 }
 
+/// SP5b: the embedded catalog as a privilege-enforcing target. It is not an
+/// `EpKind` (no engine, no mechanism), so it has its own small table instead
+/// of rows in [`ENTRIES`]; the Ranger/OPA matrix is untouched.
+pub const EMBEDDED_CATALOG: &str = "embedded-catalog";
+
+/// What the embedded catalog's `grant_match` decides: browse, read and write.
+/// Create and manage are stored in `perm.grants` but the catalog cannot
+/// enforce them as distinct privileges, so they lower to not-enforced.
+const EMBEDDED_CATALOG_PRIVILEGES: &[(Privilege, Answer)] = &[
+    (Privilege::Browse, Answer::Native),
+    (Privilege::Read, Answer::Native),
+    (Privilege::Write, Answer::Native),
+    (
+        Privilege::Create,
+        Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+    ),
+    (
+        Privilege::Manage,
+        Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+    ),
+];
+
+/// The embedded catalog's answer for `p`; a privilege with no row is missing,
+/// reason "not measured" (spec D7).
+pub fn embedded_catalog_support(p: Privilege) -> Support {
+    match EMBEDDED_CATALOG_PRIVILEGES.iter().find(|(q, _)| *q == p) {
+        Some((_, Answer::Native)) => Support::Native,
+        Some((_, Answer::Missing(r))) => Support::Missing(*r),
+        _ => Support::Missing(ReasonCode::NotMeasured),
+    }
+}
+
+/// Why the embedded catalog does not enforce `p`
+/// (`"<privilege> not enforceable by embedded-catalog"`), or `None` when it does.
+pub fn embedded_catalog_privilege_gap(p: Privilege) -> Option<String> {
+    match embedded_catalog_support(p) {
+        Support::Native | Support::Lowered(_) => None,
+        Support::Missing(_) => Some(format!(
+            "{} not enforceable by {EMBEDDED_CATALOG}",
+            privilege_name(p)
+        )),
+    }
+}
+
 fn privilege_name(p: Privilege) -> &'static str {
     match p {
         Privilege::Read => "read",
@@ -1048,5 +1092,23 @@ mod tests {
             Some("manage not enforceable by opa@2.8.0")
         );
         assert!(privilege_gap(opa, None, Privilege::Create).is_some());
+    }
+
+    #[test]
+    fn the_embedded_catalog_enforces_browse_read_write_only() {
+        for p in [Privilege::Browse, Privilege::Read, Privilege::Write] {
+            assert_eq!(embedded_catalog_support(p), Support::Native, "{p:?}");
+            assert_eq!(embedded_catalog_privilege_gap(p), None, "{p:?}");
+        }
+        for (p, name) in [(Privilege::Create, "create"), (Privilege::Manage, "manage")] {
+            assert_eq!(
+                embedded_catalog_support(p),
+                Support::Missing(ReasonCode::PrivilegeNotEnforceable)
+            );
+            assert_eq!(
+                embedded_catalog_privilege_gap(p),
+                Some(format!("{name} not enforceable by embedded-catalog"))
+            );
+        }
     }
 }
