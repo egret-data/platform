@@ -9,10 +9,11 @@
 //! It also pins the switch reader's default (`catalog_rbac` with no row) and the
 //! `unified` value, and the service-account principal resolution.
 
-use egret_catalog_engine::grant_match::catalog_grant_covers_by;
+use egret_catalog_engine::grant_match::{catalog_grant_covers_by, grant_sees_namespace};
 use egret_catalog_engine::store::CatalogStore;
 use egret_catalog_engine::unified_decide::{
-    catalog_grant_source, covers, service_account_username, Source,
+    catalog_grant_source, covers, service_account_username, unified_listing_grants,
+    unified_name_matching_is_exact, Source,
 };
 use egret_perm_compile::catalog_rbac_migrate::fold_catalog;
 use egret_perm_compile::opa::build::build_catalog_snapshot_via;
@@ -318,4 +319,141 @@ async fn covers_matches_catalog_grant_covers_by_on_a_corpus() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn unified_listing_grants_reproduce_legacy_grant_sees_namespace() {
+    let Some(f) = fixture().await else { return };
+    let store = CatalogStore::new(egret_metastore::Db {
+        pool: f.pool.clone(),
+    });
+    let mut c = f.pool.acquire().await.unwrap();
+    // nsmanager holds a namespace grant on sales.eu. grant_sees_namespace must
+    // see it on/above/under and NOT a sibling — identically on the reconstructed
+    // unified grants and the legacy grants_for_role.
+    let r = f.roles.iter().find(|r| r.name == "nsmanager").unwrap();
+    let legacy = store
+        .grants_for_role(&f.warehouse_name, "nsmanager")
+        .await
+        .unwrap();
+    let unified = unified_listing_grants(&mut c, f.catalog_id, &r.username)
+        .await
+        .unwrap();
+    let probes: [(&[&str], bool); 4] = [
+        (&["sales"], true),               // above
+        (&["sales", "eu"], true),         // on
+        (&["sales", "eu", "deep"], true), // under
+        (&["hr"], false),                 // sibling
+    ];
+    for (levels, expected) in probes {
+        let nsv = ns(levels);
+        let legacy_sees = legacy
+            .iter()
+            .any(|g| grant_sees_namespace(g, &nsv, &|a, b| a == b));
+        let unified_sees = unified
+            .iter()
+            .any(|g| grant_sees_namespace(g, &nsv, &|a, b| a == b));
+        assert_eq!(legacy_sees, expected, "legacy oracle for {levels:?}");
+        assert_eq!(
+            unified_sees, legacy_sees,
+            "unified listing visibility != legacy for {levels:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn name_matching_exactness_flags_non_ascii_grant_names() {
+    let Some(f) = fixture().await else { return };
+    let mut c = f.pool.acquire().await.unwrap();
+    assert!(
+        unified_name_matching_is_exact(&mut c, f.catalog_id)
+            .await
+            .unwrap(),
+        "ascii folded names: unified matches lakekeeper's collation exactly"
+    );
+    sqlx::query(
+        "INSERT INTO perm.grants (effect, actions, catalog_id, schema_name) \
+         VALUES ('allow', ARRAY['read'], $1, $2)",
+    )
+    .bind(f.catalog_id)
+    .bind("caf\u{e9}")
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    assert!(
+        !unified_name_matching_is_exact(&mut c, f.catalog_id)
+            .await
+            .unwrap(),
+        "a non-ASCII folded name is NOT exact (Task 6 finalize must refuse it)"
+    );
+}
+
+/// Important 2: the unified path is NO BROADER than the legacy name match.
+/// lakekeeper's collation (`lakekeeper.case_insensitive`, ICU `und-u-ks-level2`)
+/// is case-/width-/compatibility-/canonical-insensitive but accent-SENSITIVE, and
+/// is never case-sensitive — so the hypothesised "grant sales, request Sales"
+/// over-grant cannot happen (both fold case). perm-eval matches via
+/// `str::to_lowercase`, which identifies only case variants — a subset of the
+/// collation's folds — so `to_lowercase`-equal ⟹ collation-equal, i.e. unified
+/// NEVER over-grants. This pins both halves: a case variant is allowed (folds, as
+/// the collation does), and an accent variant is NOT allowed (stays distinct, as
+/// the collation does). (The legacy `CatalogNameEq` path needs the `lakekeeper`
+/// schema, which the egret test DB does not create, so this exercises the unified
+/// side directly against those invariants.)
+#[tokio::test]
+async fn unified_name_matching_is_no_broader_than_the_collation() {
+    let Some(f) = fixture().await else { return };
+    let mut c = f.pool.acquire().await.unwrap();
+    let snapshot = build_catalog_snapshot_via(&mut c, f.catalog_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let catalog_name: String =
+        sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+            .bind(f.catalog_id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    // tablewriter: write on hr.salaries.
+    let t = f.roles.iter().find(|r| r.name == "tablewriter").unwrap();
+    // Exact spelling, and a case variant: both allowed (to_lowercase folds case,
+    // as the case-insensitive collation does — no under-grant).
+    assert!(covers(
+        &snapshot,
+        &t.username,
+        &catalog_name,
+        &ns(&["hr"]),
+        Some("salaries"),
+        false
+    ));
+    assert!(covers(
+        &snapshot,
+        &t.username,
+        &catalog_name,
+        &ns(&["HR"]),
+        Some("SALARIES"),
+        false
+    ));
+    // An accent variant is NOT allowed: to_lowercase keeps accents distinct, as
+    // the accent-sensitive collation does — so unified cannot over-fold accents.
+    assert!(!covers(
+        &snapshot,
+        &t.username,
+        &catalog_name,
+        &ns(&["hr"]),
+        Some("salarie\u{df}"),
+        false
+    ));
+    assert!(!covers(
+        &snapshot,
+        &t.username,
+        &catalog_name,
+        &ns(&["h\u{e4}"]),
+        Some("salaries"),
+        false
+    ));
+    // The invariant that makes this hold: to_lowercase identifies only case
+    // variants (a subset of the level-2 collation's folds).
+    assert_eq!("SALARIES".to_lowercase(), "salaries");
+    assert_ne!("cafe", "caf\u{e9}".to_lowercase());
 }

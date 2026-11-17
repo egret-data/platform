@@ -43,6 +43,8 @@ use egret_perm_eval::trino_ops::DataPrivilege;
 use egret_perm_eval::{Decision, ObjectPath, Resource, Snapshot};
 use uuid::Uuid;
 
+use crate::store::CatalogGrant;
+
 /// Which store the embedded-catalog enforcement reads for one catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -152,6 +154,139 @@ pub async fn service_account_username(
         // unified grant can match it — deny (the caller treats `None` as deny).
         Err(_) => Ok(None),
     }
+}
+
+/// Resolve, in ONE indexed query, the registry catalog for `warehouse_id` and
+/// which store decides it. `None` catalog ⇒ the warehouse has no registry
+/// catalog; the source is then [`Source::CatalogRbac`]. Folding the switch read
+/// into the catalog lookup keeps the legacy hot path at ONE query, not two.
+pub async fn resolve_catalog_switch(
+    conn: &mut sqlx::PgConnection,
+    warehouse_id: Uuid,
+) -> Result<(Option<(Uuid, String)>, Source), sqlx::Error> {
+    let row: Option<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT c.id, c.name, COALESCE(s.source, 'catalog_rbac') \
+           FROM registry.catalogs c \
+           LEFT JOIN perm.catalog_grant_switch s ON s.catalog_id = c.id \
+          WHERE c.warehouse_id = $1",
+    )
+    .bind(warehouse_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(match row {
+        Some((id, name, source)) => {
+            let source = if source == "unified" {
+                Source::Unified
+            } else {
+                Source::CatalogRbac
+            };
+            (Some((id, name)), source)
+        }
+        None => (None, Source::CatalogRbac),
+    })
+}
+
+/// Reconstruct, from `perm.grants`, the catalog-shaped grants of the service
+/// account `username` on `catalog_id` — the SAME shape
+/// [`crate::store::CatalogStore::grants_for_role`] returns, so `filter_listing`
+/// can run the EXACT legacy visibility rules
+/// ([`crate::grant_match::grant_sees_namespace`] /
+/// [`crate::grant_match::catalog_grant_covers_by`]) on a unified catalog whose
+/// `catalog.catalog_grants` may already be dropped (Task 6 finalize). The
+/// flattened `perm-eval` snapshot cannot reproduce `grant_sees_namespace`'s
+/// above/under navigation (the dot-join erases the level hierarchy), so the
+/// reconstruction is what keeps listings exact.
+///
+/// Only folded ALLOW grants naming this user (`user` principal, `include`, not
+/// `exclude`) are returned — the fold writes only `user` principals, so this is
+/// exact. `perm.securable_owners` is NOT reconstructed: legacy `grants_for_role`
+/// has no owner concept, and a service account is never a securable owner.
+pub async fn unified_listing_grants(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+    username: &str,
+) -> Result<Vec<CatalogGrant>, sqlx::Error> {
+    // (grant id, schema_name, table_name, actions).
+    type GrantRow = (Uuid, Option<String>, Option<String>, Vec<String>);
+    let rows: Vec<GrantRow> = sqlx::query_as(
+        "SELECT g.id, g.schema_name, g.table_name, g.actions \
+           FROM perm.grants g \
+          WHERE g.catalog_id = $1 AND g.effect = 'allow' \
+            AND EXISTS (SELECT 1 FROM perm.grant_principals p \
+                         WHERE p.grant_id = g.id AND p.kind = 'user' \
+                           AND p.mode = 'include' AND p.ref = $2) \
+            AND NOT EXISTS (SELECT 1 FROM perm.grant_principals p \
+                             WHERE p.grant_id = g.id AND p.kind = 'user' \
+                               AND p.mode = 'exclude' AND p.ref = $2)",
+    )
+    .bind(catalog_id)
+    .bind(username)
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, schema, table, actions)| {
+            let securable_type = match (&schema, &table) {
+                (None, _) => "catalog",
+                (Some(_), None) => "namespace",
+                (Some(_), Some(_)) => "table",
+            };
+            // grant_sees_namespace ignores privilege; catalog_grant_covers_by
+            // only asks grants_write (write|manage). "write" captures both.
+            let privilege = if actions.iter().any(|a| a == "write" || a == "manage") {
+                "write"
+            } else {
+                "read"
+            };
+            CatalogGrant {
+                id,
+                catalog_role_id: Uuid::nil(),
+                securable_type: securable_type.to_string(),
+                namespace: schema.map(|s| s.split('.').map(str::to_string).collect()),
+                table_name: table,
+                privilege: privilege.to_string(),
+            }
+        })
+        .collect())
+}
+
+/// Whether the unified path matches names IDENTICALLY to legacy for `catalog_id`:
+/// true iff every folded name is ASCII, where `str::to_lowercase` (perm-eval's
+/// name matching) reproduces lakekeeper's `case_insensitive` collation EXACTLY.
+///
+/// lakekeeper's collation is the FIXED ICU `und-u-ks-level2`: case-, width-,
+/// compatibility- and canonical-insensitive, accent-SENSITIVE — never
+/// case-sensitive, so the hypothesised "grant `sales`, request `Sales`" never
+/// over-grants (both fold case). The unified path NEVER over-grants in general:
+/// simple lowercase identifies only case variants, a subset of what the level-2
+/// collation folds, so `to_lowercase`-equal ⟹ collation-equal. The ONE residual
+/// divergence is a NON-ASCII name where the collation folds a width/compatibility/
+/// canonical form that `to_lowercase` leaves distinct — there the unified path
+/// UNDER-grants (fail-closed). This helper lets Task 6's finalize gate refuse to
+/// drop `catalog.catalog_grants` for a catalog with any non-ASCII folded name, so
+/// a finalized unified catalog is EXACTLY equivalent to legacy.
+pub async fn unified_name_matching_is_exact(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let all_ascii: Option<bool> = sqlx::query_scalar(
+        "SELECT bool_and(ascii_ok) FROM ( \
+           SELECT (schema_name IS NULL OR schema_name ~ '^[[:ascii:]]*$') \
+              AND (table_name  IS NULL OR table_name  ~ '^[[:ascii:]]*$') \
+              AND (column_name IS NULL OR column_name ~ '^[[:ascii:]]*$') AS ascii_ok \
+             FROM perm.grants WHERE catalog_id = $1 \
+           UNION ALL \
+           SELECT (schema_name IS NULL OR schema_name ~ '^[[:ascii:]]*$') \
+              AND (table_name  IS NULL OR table_name  ~ '^[[:ascii:]]*$') \
+              AND (column_name IS NULL OR column_name ~ '^[[:ascii:]]*$') \
+             FROM perm.securable_owners WHERE catalog_id = $1 \
+         ) q",
+    )
+    .bind(catalog_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    // No rows ⇒ nothing to match ⇒ trivially exact.
+    Ok(all_ascii.unwrap_or(true))
 }
 
 /// A per-catalog freshness signal over the store the fold wrote: any add bumps a

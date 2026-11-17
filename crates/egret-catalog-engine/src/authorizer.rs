@@ -222,18 +222,10 @@ impl EgretAuthorizer {
             .acquire()
             .await
             .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
-        let catalog: Option<(uuid::Uuid, String)> =
-            sqlx::query_as("SELECT id, name FROM registry.catalogs WHERE warehouse_id = $1")
-                .bind(warehouse.id)
-                .fetch_optional(&mut *conn)
+        let (catalog, source) =
+            crate::unified_decide::resolve_catalog_switch(&mut conn, warehouse.id)
                 .await
                 .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
-        let source = match &catalog {
-            Some((cid, _)) => crate::unified_decide::catalog_grant_source(&mut conn, *cid)
-                .await
-                .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?,
-            None => crate::unified_decide::Source::CatalogRbac,
-        };
         if source == crate::unified_decide::Source::Unified {
             return self
                 .client_may_unified(&mut conn, client, catalog, asks)

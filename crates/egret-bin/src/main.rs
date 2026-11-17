@@ -824,18 +824,9 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                 .acquire()
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
-            let catalog_row: Option<(uuid::Uuid, String)> =
-                sqlx::query_as("SELECT id, name FROM registry.catalogs WHERE warehouse_id = $1")
-                    .bind(wh.id)
-                    .fetch_optional(&mut *conn)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("catalog: {e}")))?;
-            let source = match &catalog_row {
-                Some((cid, _)) => unified_decide::catalog_grant_source(&mut conn, *cid)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("switch: {e}")))?,
-                None => Source::CatalogRbac,
-            };
+            let (catalog_row, source) = unified_decide::resolve_catalog_switch(&mut conn, wh.id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("switch: {e}")))?;
 
             // Legacy inputs (the role's grants) load only on the legacy path; the
             // unified snapshot + principal only on the unified path.
@@ -1092,11 +1083,50 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                 format!("the catalog's listing could not be read: {m}"),
             )
         };
-        let grants = self
+        // SP5b: a `unified` catalog's listings are filtered by the SAME rules
+        // (`grant_sees_namespace` / `catalog_grant_covers_by`) on the SAME grant
+        // shape — but reconstructed from `perm.grants` for the caller's service
+        // account, because Task 6's finalize drops `catalog.catalog_grants` and
+        // the legacy `grants_for_role` would then return empty (hiding every
+        // namespace). A `catalog_rbac` catalog keeps the legacy read unchanged.
+        use egret_catalog_engine::unified_decide::{self, Source};
+        let mut conn = self
             .catalog
-            .grants_for_role(&caller.warehouse, &caller.role)
+            .pool()
+            .acquire()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?;
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+        let wh_id = self
+            .catalog
+            .get_warehouse_by_name(&caller.warehouse)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("warehouse: {e}")))?
+            .map(|w| w.id);
+        let (catalog_row, source) = match wh_id {
+            Some(id) => unified_decide::resolve_catalog_switch(&mut conn, id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("switch: {e}")))?,
+            None => (None, Source::CatalogRbac),
+        };
+        let grants = match source {
+            Source::CatalogRbac => self
+                .catalog
+                .grants_for_role(&caller.warehouse, &caller.role)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?,
+            Source::Unified => {
+                let user = unified_decide::service_account_username(&mut conn, &caller.subject)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("principal: {e}")))?
+                    .unwrap_or_default();
+                match catalog_row {
+                    Some((cid, _)) => unified_decide::unified_listing_grants(&mut conn, cid, &user)
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?,
+                    None => Vec::new(),
+                }
+            }
+        };
         if grants.iter().any(|g| g.securable_type == "catalog") {
             return Ok(None);
         }
