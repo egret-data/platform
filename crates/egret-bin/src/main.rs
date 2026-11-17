@@ -1036,6 +1036,27 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                         // answer is then cut to what the role may see
                         // (`filter_listing`).
                         None => {
+                            // Catalog-root WRITES do not reach this arm in the
+                            // Iceberg REST surface: namespace-create and
+                            // recursive-drop decide via `has_catalog_write`
+                            // (identical legacy/unified) upstream, and no write
+                            // endpoint routes here with an empty namespace path.
+                            // The legacy↔unified equivalence gate therefore does
+                            // not probe catalog-root writes, and
+                            // `covers_catalog_root` deliberately diverges there
+                            // (legacy: any write-bearing grant; unified: a
+                            // catalog-root grant — a fail-closed under-grant).
+                            // Trip loudly in debug if a future endpoint ever
+                            // reaches this arm with a write, so the un-gated
+                            // divergence is revisited rather than silently
+                            // under-granting.
+                            debug_assert!(
+                                !is_write,
+                                "catalog-root write reached the guard root arm: \
+                                 covers_catalog_root's legacy↔unified divergence is \
+                                 un-gated — revisit SP5b equivalence before enabling \
+                                 this path"
+                            );
                             if !decider.covers_catalog_root(is_write) {
                                 return forbid(refusal);
                             }
