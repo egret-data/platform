@@ -691,6 +691,45 @@ impl Snapshot {
         None
     }
 
+    /// SP5c: whether an active mask, row filter or withhold hits the table
+    /// (`catalog`.`schema`.`table`) for `user` — by path, or by a
+    /// classification on the table or any of its columns. `user` must be in
+    /// the statement's audience (in scope, not exempt). Generalises
+    /// [`Self::metadata_refusal`] (same class gathering, same target match,
+    /// same `restricts`), the whole-table control the iceberg-rest EP applies:
+    /// a masked column restricts the table.
+    pub fn table_read_restricted(
+        &self,
+        user: &str,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> bool {
+        let mut classes = BTreeSet::new();
+        if let Some(tc) = self.index.classes.get(&(
+            catalog.to_lowercase(),
+            schema.to_lowercase(),
+            table.to_lowercase(),
+        )) {
+            classes.extend(tc.table.iter().cloned());
+            for c in tc.columns.values() {
+                classes.extend(c.iter().cloned());
+            }
+        }
+        self.candidates(catalog, Some(schema), Some(table), &classes)
+            .into_iter()
+            .any(|i| {
+                let s = &self.statements[i];
+                applies(&s.audience, user)
+                    && restricts(&s.effect)
+                    && match &s.target {
+                        Target::Path(p) => path_on_table(p, catalog, schema, table),
+                        Target::Classification { name } => classes.contains(&name.to_lowercase()),
+                        Target::EngineObject { .. } | Target::Infra(_) => false,
+                    }
+            })
+    }
+
     /// D2: a column carries its own classifications and its table's; a table
     /// only its own; a schema or catalog none.
     fn classes_of(&self, o: &Obj) -> BTreeSet<String> {

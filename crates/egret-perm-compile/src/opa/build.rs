@@ -235,6 +235,122 @@ pub async fn build_catalog_snapshot_via(
     .map_err(|e| CompileError::Db(format!("catalog snapshot: {e}")))
 }
 
+/// Every classification on a column or whole table of ONE catalog — the
+/// catalog-scoped twin of [`load_classified_columns_via`], which reaches the
+/// catalog by service; the embedded catalog is bound to none.
+pub async fn load_classified_columns_for_catalog_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<Vec<ClassifiedColumn>, CompileError> {
+    let rows = egret_policy::tag_assignments_for_catalogs_via(conn, &[catalog_id])
+        .await
+        .map_err(crate::db_error::from_store)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ClassifiedColumn {
+            catalog: r.catalog,
+            schema: r.schema_name,
+            table: r.table_name,
+            column: (!r.column_name.is_empty()).then_some(r.column_name),
+            classification: r.tag_name,
+        })
+        .collect())
+}
+
+/// SP5c Task 1: the ENFORCEMENT snapshot of ONE embedded catalog — its rule
+/// (mask, row filter) and withhold statements plus its classified objects,
+/// the input of `Snapshot::table_read_restricted`. NO grants or owners:
+/// those are decided by [`build_catalog_snapshot_via`], unchanged, so this
+/// snapshot cannot move a grant decision.
+///
+/// Lowered exactly as a Trino/Ranger profile reaching this catalog lowers
+/// them (`lower_rules`, `lower_withholds`, then `strip_unenforced`), on the
+/// same synthetic EP as the grant snapshot, except
+/// `classification_channel: true`: the iceberg-rest EP IS the classification
+/// channel, so a classification-selected rule must lower to its native
+/// `Target::Classification` statement rather than be skipped for want of a
+/// channel. Rules are common (D9): the path rules read are this catalog's
+/// (`list_rules_for_catalogs_via`), tag rules are every tag rule, and the
+/// catalog's `classified` index limits which of this catalog's objects a
+/// classification statement hits. A withhold is installation-wide on Trino.
+///
+/// Reads with [`MissingUsername::Omit`]: nothing here may write.
+/// `None` when `catalog_id` names no registry catalog.
+pub async fn build_catalog_enforcement_snapshot(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<Option<Snapshot>, CompileError> {
+    use egret_perm_ir::ep::{EpInput, EpKind, Mechanism};
+
+    let name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+            .bind(catalog_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(CompileError::from_db)?;
+    let Some(catalog_name) = name else {
+        return Ok(None);
+    };
+    let missing = MissingUsername::Omit;
+
+    let rules = egret_perm::list_rules_for_catalogs_via(conn, &[catalog_id])
+        .await
+        .map_err(CompileError::from_perm)?;
+    let directory =
+        crate::members::expand_enumerated_principals(conn, &[], &rules, &[], missing).await?;
+    let leaving = crate::table_columns::leaving_via(conn).await?;
+
+    let ep = EpInput {
+        profile_id: 0,
+        profile_name: catalog_name.clone(),
+        kind: EpKind {
+            engine: egret_perm::EngineType::Trino,
+            mechanism: Mechanism::Ranger,
+        },
+        engines: Vec::new(),
+        default_version: Err(NOT_READ_VERSION.to_string()),
+        default_image_level: None,
+        classification_channel: true,
+        catalogs: [(catalog_id, catalog_name)].into_iter().collect(),
+    };
+
+    let (rule_inputs, read_skips) = crate::ir_load::load_rule_inputs(conn, &ep, &rules).await?;
+    let ruled = egret_perm_ir::lower::rules::lower_rules(
+        &ep,
+        &rules,
+        &directory,
+        &rule_inputs,
+        read_skips,
+        crate::trigger::DEFAULT_EXPANSION_CEILING,
+        &leaving,
+    )?;
+    let gates = crate::ir_load::load_withhold_inputs(conn, &ep, 0, missing).await?;
+    let withheld = egret_perm_ir::lower::withhold::lower_withholds(
+        &ep,
+        &gates,
+        egret_ranger_eval::resource::fold_identifier,
+        crate::trigger::DEFAULT_EXPANSION_CEILING,
+        &leaving,
+    )?;
+
+    let statements: Vec<Statement> = ruled
+        .statements
+        .iter()
+        .chain(withheld.lowered.statements.iter())
+        .filter_map(|s| egret_perm_ir::lower::grants::strip_unenforced(&ep, s))
+        .collect();
+
+    Snapshot::build(SnapshotInput {
+        service_id: 0,
+        key: (0, 0),
+        statements,
+        classified: load_classified_columns_for_catalog_via(conn, catalog_id).await?,
+        lineage_principal: lineage_principal(),
+    })
+    .map(Some)
+    .map_err(|e| CompileError::Db(format!("catalog enforcement snapshot: {e}")))
+}
+
 /// The `default_version` a catalog snapshot's EP carries: unread, exactly as the
 /// grant-lowering unit tests pass it. `read`/`write` are never consulted and
 /// Ranger keeps `create`/`manage` without a version, so no gate reads it.
