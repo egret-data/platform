@@ -201,6 +201,80 @@ impl From<egret_core::Error> for CatalogHttpError {
     }
 }
 
+/// SP5b Task 6: the reversible fold's error, as the catalog-migrate endpoints
+/// surface it. A changed-since-the-fold source (which `finalize` makes permanent
+/// by dropping the source) is a 409; a malformed/unmappable grant is a 400; a
+/// missing warehouse a 404; database/perm failures a logged 500.
+impl From<egret_perm_compile::catalog_rbac_migrate::FoldError> for CatalogHttpError {
+    fn from(e: egret_perm_compile::catalog_rbac_migrate::FoldError) -> Self {
+        use egret_perm_compile::catalog_rbac_migrate::FoldError as F;
+        match e {
+            F::SourceChanged => CatalogHttpError::Conflict(
+                "the catalog RBAC changed since the fold (or was finalized); cannot undo"
+                    .to_string(),
+            ),
+            F::NotFolded(id) => {
+                CatalogHttpError::Conflict(format!("catalog {id} has not been folded"))
+            }
+            F::NoWarehouse(_) => CatalogHttpError::NotFound,
+            ref malformed @ (F::Malformed(_) | F::Map { .. }) => {
+                CatalogHttpError::BadRequest(malformed.to_string())
+            }
+            F::Db(err) => {
+                tracing::error!(error = %err, "catalog-migrate fold database error");
+                CatalogHttpError::Internal
+            }
+            F::Perm(err) => {
+                tracing::error!(error = %err, "catalog-migrate fold perm error");
+                CatalogHttpError::Internal
+            }
+            F::Username(id, msg) => {
+                tracing::error!(service_account = %id, error = %msg, "catalog-migrate fold could not resolve a username");
+                CatalogHttpError::Internal
+            }
+        }
+    }
+}
+
+/// SP5b Task 6: the equivalence gate / migrate-operation error. A gate refusal
+/// (not folded, not equivalent, not switched, non-ASCII names) is a 409 — the
+/// request was well-formed but the catalog's state forbids the step; a missing
+/// registry catalog a 404.
+impl From<crate::catalog_migrate_gate::GateError> for CatalogHttpError {
+    fn from(e: crate::catalog_migrate_gate::GateError) -> Self {
+        use crate::catalog_migrate_gate::GateError as G;
+        match e {
+            G::Db(err) => {
+                tracing::error!(error = %err, "catalog-migrate database error");
+                CatalogHttpError::Internal
+            }
+            G::Store(s) => s.into(),
+            G::Compile(err) => {
+                tracing::error!(error = %err, "catalog-migrate snapshot build error");
+                CatalogHttpError::Internal
+            }
+            G::Fold(f) => f.into(),
+            G::NoRegistryCatalog(_) => CatalogHttpError::NotFound,
+            G::NotFolded(id) => CatalogHttpError::Conflict(format!(
+                "catalog {id} has not been folded; run plan first"
+            )),
+            G::NotEquivalent(report) => CatalogHttpError::Conflict(format!(
+                "catalog {} is not equivalent under the unified store ({} divergence(s)); \
+                 run plan to see them",
+                report.catalog_id,
+                report.divergences.len()
+            )),
+            G::NotUnified(id) => CatalogHttpError::Conflict(format!(
+                "catalog {id} is not switched to the unified store"
+            )),
+            G::NonAsciiNames(id) => CatalogHttpError::Conflict(format!(
+                "catalog {id} has a non-ASCII folded name; unified would under-grant, \
+                 so legacy is not dropped"
+            )),
+        }
+    }
+}
+
 impl IntoResponse for CatalogHttpError {
     fn into_response(self) -> Response {
         let (status, msg) = match &self {

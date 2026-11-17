@@ -585,15 +585,23 @@ impl CatalogStore {
     /// account (the INNER JOIN drops a NULL `service_account_id`: fail-closed), a
     /// disabled owner, a revoked or an expired credential all read as `None` —
     /// the same answer as an unknown client, so a refusal is no probing oracle.
+    ///
+    /// The role is OPTIONAL (SP5b Task 6): `catalog_role_id` is NULLable and is
+    /// NULL for a client whose warehouse has been finalized onto the unified
+    /// store (its `catalog_roles` dropped), so the role JOIN is a LEFT JOIN. A
+    /// `catalog_rbac` client always still has a role, so its row is unchanged.
+    /// Under `unified` the role is dead — enforcement resolves the caller from
+    /// `client_id`, not the role claim — so a role-less client still mints a
+    /// token, with an empty `roles` claim.
     async fn client_row(
         &self,
         client_id: &str,
-    ) -> Result<Option<(Uuid, String, String, String)>, CatalogError> {
+    ) -> Result<Option<(Uuid, String, String, Option<String>)>, CatalogError> {
         type Raw = (
             Uuid,
             String,
             String,
-            String,
+            Option<String>,
             String,
             Option<DateTime<Utc>>,
             Option<DateTime<Utc>>,
@@ -604,7 +612,7 @@ impl CatalogStore {
                     u.status, c.revoked_at, c.expires_at, ws.status \
              FROM catalog.catalog_clients c \
              JOIN catalog.warehouses w ON w.id = c.warehouse_id \
-             JOIN catalog.catalog_roles r ON r.id = c.catalog_role_id \
+             LEFT JOIN catalog.catalog_roles r ON r.id = c.catalog_role_id \
              JOIN service_accounts sa ON sa.user_id = c.service_account_id \
              JOIN users u ON u.id = sa.user_id \
              JOIN workspaces ws ON ws.id = c.workspace_id \
@@ -628,7 +636,8 @@ impl CatalogStore {
     }
 
     /// Verify a client's secret; on success return its warehouse name + role name
-    /// (for the JWT claims), and touch `last_used_at`.
+    /// (for the JWT claims), and touch `last_used_at`. A finalized unified client
+    /// has no role (SP5b Task 6); its role reads as the empty string here.
     pub async fn verify_client(
         &self,
         client_id: &str,
@@ -637,7 +646,7 @@ impl CatalogStore {
         Ok(self
             .verified_row(client_id, client_secret)
             .await?
-            .map(|(_, warehouse, role)| (warehouse, role)))
+            .map(|(_, warehouse, role)| (warehouse, role.unwrap_or_default())))
     }
 
     /// The client's row — `(secret hash, warehouse name, role name)` — if the
@@ -652,7 +661,7 @@ impl CatalogStore {
         &self,
         client_id: &str,
         client_secret: &str,
-    ) -> Result<Option<(String, String, String)>, CatalogError> {
+    ) -> Result<Option<(String, String, Option<String>)>, CatalogError> {
         let Some((id, hash, warehouse, role)) = self.client_row(client_id).await? else {
             return Ok(None);
         };
@@ -920,17 +929,24 @@ impl egret_machine_idp::ClientVerifier for CatalogStore {
 /// The token shape a Catalog Client gets: `aud: catalog`, its warehouse + role,
 /// and a 1h TTL. A published contract with every deployed Iceberg client — kept
 /// as a pure function so it can be pinned by a unit test without a database.
+///
+/// `catalog_role` is `None` for a client whose warehouse has been finalized onto
+/// the unified store (SP5b Task 6): the `roles` claim is then the empty array,
+/// keeping the claim shape stable. The role is dead under `unified` — enforcement
+/// resolves the caller from `client_id`, not this claim — so an empty `roles` is
+/// correct, not a downgrade.
 fn catalog_verified_client(
     client_id: &str,
     warehouse: String,
-    catalog_role: String,
+    catalog_role: Option<String>,
 ) -> egret_machine_idp::VerifiedClient {
+    let roles: Vec<String> = catalog_role.into_iter().collect();
     egret_machine_idp::VerifiedClient {
         client_id: client_id.to_string(),
         audience: "catalog".into(),
         extra_claims: serde_json::json!({
             "warehouse": warehouse,
-            "roles": [catalog_role],
+            "roles": roles,
         })
         .as_object()
         .cloned()
@@ -948,11 +964,21 @@ mod tests {
     /// deployed Iceberg client's token.
     #[test]
     fn catalog_client_token_shape_is_fixed() {
-        let vc = catalog_verified_client("cat1", "wh1".into(), "role1".into());
+        let vc = catalog_verified_client("cat1", "wh1".into(), Some("role1".into()));
         assert_eq!(vc.client_id, "cat1");
         assert_eq!(vc.audience, "catalog");
         assert_eq!(vc.ttl_secs, 3600, "catalog TTL must stay 3600");
         assert_eq!(vc.extra_claims["warehouse"], "wh1");
         assert_eq!(vc.extra_claims["roles"], serde_json::json!(["role1"]));
+    }
+
+    /// SP5b Task 6: a finalized unified client has no role; its `roles` claim is
+    /// the empty array (shape kept stable), warehouse and TTL unchanged.
+    #[test]
+    fn a_roleless_client_gets_an_empty_roles_claim() {
+        let vc = catalog_verified_client("cat1", "wh1".into(), None);
+        assert_eq!(vc.extra_claims["warehouse"], "wh1");
+        assert_eq!(vc.extra_claims["roles"], serde_json::json!([]));
+        assert_eq!(vc.ttl_secs, 3600);
     }
 }
