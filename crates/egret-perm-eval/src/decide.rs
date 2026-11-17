@@ -391,6 +391,21 @@ impl Snapshot {
         }
     }
 
+    /// Reach (Ranger `_any`) visibility: is some privilege granted to `user` on
+    /// `resource` or below it, with nothing hiding it above? The browse/listing
+    /// question (`AccessCatalog`, `FilterSchemas`, …) answered WITHOUT an
+    /// operation string — the embedded catalog's namespace-listing visibility
+    /// (SP5b) goes through here rather than mapping a catalog op to a Trino op.
+    /// The lineage gate is not applied: a catalog client is never the reserved
+    /// lineage principal, and that principal is already refused by
+    /// [`Snapshot::decide`]'s own gate on the OPA surface.
+    pub fn reaches(&self, user: &str, resource: &Resource) -> bool {
+        matches!(
+            self.decide_reach(user, "reach", resource),
+            Decision::Allow { .. }
+        )
+    }
+
     /// The indices `i` for which `decide(user, operation, &resources[i])` allows, ascending.
     pub fn filter(&self, user: &str, operation: &str, resources: &[Resource]) -> Vec<usize> {
         resources

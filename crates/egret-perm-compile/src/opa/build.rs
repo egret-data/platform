@@ -35,6 +35,7 @@
 use egret_perm::CompileError;
 use egret_perm_eval::{ClassifiedColumn, Snapshot, SnapshotInput};
 use egret_perm_ir::statement::Statement;
+use uuid::Uuid;
 
 pub use crate::members::MissingUsername;
 
@@ -147,6 +148,97 @@ pub async fn snapshot_parts_via(
         classified,
     }))
 }
+
+/// SP5b Task 5: a [`Snapshot`] of ONE embedded catalog's folded grants, for the
+/// unified enforcement path (`egret_catalog_engine::unified_decide`).
+///
+/// This is NOT keyed by an authz service. The embedded catalog is a registry
+/// catalog, not a `policy.authz_services` row, so there is no service whose
+/// `build_snapshot_via` would read exactly this catalog's grants and nothing
+/// else. Instead it builds a catalog-scoped [`SnapshotInput`] directly from the
+/// store the fold wrote into: `perm.grants` + `perm.securable_owners` for this
+/// `catalog_id`, the SAME rows `egret_perm::catalog_rbac_migrate::fold_catalog`
+/// created, lowered by the SAME grant lowering a Ranger/OPA compile uses
+/// ([`egret_perm_ir::lower::grants::lower_grants`]) and stripped of what a
+/// target cannot enforce ([`strip_unenforced`]), so the decision matches a real
+/// compile of these grants.
+///
+/// The enforcement point is Trino/Ranger: the catalog decision only ever asks
+/// `read`/`write` (never stripped) and reach (any privilege), and `manage`
+/// always implies `read`, so the engine/mechanism choice does not move a
+/// catalog-client decision — Ranger merely keeps `create`/`manage` rather than
+/// dropping them, which costs nothing here. No rules, no classified columns and
+/// no infrastructure enter: the fold wrote grants and owners only, and the
+/// catalog guard enforces grants alone (no masks). The directory is empty: the
+/// fold's principals are resolved `users.username` values (`user` kind), which
+/// need no expansion; a `role`-principal owner (the platform-admin fallback)
+/// lowers to a skipped [`egret_perm_ir::statement::Lowering`], never an error,
+/// and never matches a catalog client anyway.
+///
+/// `None` when `catalog_id` names no registry catalog.
+pub async fn build_catalog_snapshot_via(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<Option<Snapshot>, CompileError> {
+    use egret_perm_ir::audience::Directory;
+    use egret_perm_ir::ep::{EpInput, EpKind, Mechanism};
+
+    let name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM registry.catalogs WHERE id = $1")
+            .bind(catalog_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(CompileError::from_db)?;
+    let Some(catalog_name) = name else {
+        return Ok(None);
+    };
+
+    let mut grants = egret_perm::list_grants_for_catalogs_via(conn, &[catalog_id])
+        .await
+        .map_err(CompileError::from_perm)?;
+    grants.extend(
+        egret_perm::list_owners_for_catalogs_via(conn, &[catalog_id])
+            .await
+            .map_err(CompileError::from_perm)?
+            .iter()
+            .map(egret_perm::owner_grant),
+    );
+
+    let ep = EpInput {
+        profile_id: 0,
+        profile_name: catalog_name.clone(),
+        kind: EpKind {
+            engine: egret_perm::EngineType::Trino,
+            mechanism: Mechanism::Ranger,
+        },
+        engines: Vec::new(),
+        default_version: Err(NOT_READ_VERSION.to_string()),
+        default_image_level: None,
+        classification_channel: false,
+        catalogs: [(catalog_id, catalog_name)].into_iter().collect(),
+    };
+    let lowered = egret_perm_ir::lower::grants::lower_grants(&ep, &grants, &Directory::default())?;
+    let statements: Vec<Statement> = lowered
+        .statements
+        .iter()
+        .filter_map(|s| egret_perm_ir::lower::grants::strip_unenforced(&ep, s))
+        .collect();
+
+    Snapshot::build(SnapshotInput {
+        service_id: 0,
+        key: (0, 0),
+        statements,
+        classified: Vec::new(),
+        lineage_principal: lineage_principal(),
+    })
+    .map(Some)
+    .map_err(|e| CompileError::Db(format!("catalog snapshot: {e}")))
+}
+
+/// The `default_version` a catalog snapshot's EP carries: unread, exactly as the
+/// grant-lowering unit tests pass it. `read`/`write` are never consulted and
+/// Ranger keeps `create`/`manage` without a version, so no gate reads it.
+const NOT_READ_VERSION: &str = "not read";
 
 /// `snapshot_parts_via` then `Snapshot::build` over data ++ infra. The same
 /// `REPEATABLE READ` requirement as [`snapshot_parts_via`].

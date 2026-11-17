@@ -32,6 +32,7 @@ pub mod store;
 // D2: recompile StarRocks profiles when a table classified as a whole changes
 // schema.
 pub mod table_hook;
+pub mod unified_decide;
 /// The view-governance DEFINER audit's reader (spec B5): every view in
 /// egret's catalogs and its stored `trino.run-as-owner`.
 pub mod view_audit;

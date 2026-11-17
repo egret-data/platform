@@ -35,6 +35,9 @@ egret-storage.workspace = true
 egret-policy.workspace = true
 egret-perm.workspace = true
 egret-perm-compile.workspace = true
+# SP5b Task 5: the `perm-eval` `Snapshot` type the catalog guard's unified
+# decider borrows (`egret_catalog_engine::unified_decide`).
+egret-perm-eval.workspace = true
 egret-secrets.workspace = true
 egret-query.workspace = true
 # `catalog_listing::CatalogLevel`, the shape both Governance catalog listers answer in.

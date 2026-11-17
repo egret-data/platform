@@ -588,6 +588,9 @@ const CATALOG_AUDIENCE: &str = "catalog";
 struct EgretCatalogGuard {
     keys: egret_machine_idp::PgSigningKeyStore,
     catalog: egret_catalog_engine::CatalogStore,
+    /// SP5b: per-catalog unified `perm` snapshots, used only for catalogs whose
+    /// switch is `unified` (`egret_catalog_engine::unified_decide`).
+    snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache,
 }
 
 impl EgretCatalogGuard {
@@ -626,6 +629,93 @@ impl EgretCatalogGuard {
             return Err((StatusCode::UNAUTHORIZED, "wrong audience".to_string()));
         }
         Ok(claims)
+    }
+}
+
+/// SP5b: the decision primitive behind the per-catalog switch
+/// (`perm.catalog_grant_switch`). `Rbac` is the legacy rule on
+/// `catalog.catalog_grants` — the exact expressions the pre-SP5b guard used, so
+/// a `catalog_rbac` catalog decides byte-for-byte as before. `Unified`
+/// evaluates the caller's service-account principal against the catalog's folded
+/// `perm.grants` via `perm-eval` (`egret_catalog_engine::unified_decide`). Each
+/// method answers one decision point in [`EgretCatalogGuard::check`].
+enum CatalogDecider<'a> {
+    Rbac {
+        grants: &'a [egret_catalog_engine::CatalogGrant],
+    },
+    Unified {
+        /// `None` when the catalog has no registry row or the caller names no
+        /// service-account principal: every decision then denies (fail closed).
+        snapshot: Option<&'a egret_perm_eval::Snapshot>,
+        user: &'a str,
+        catalog: &'a str,
+    },
+}
+
+impl CatalogDecider<'_> {
+    /// No usable grant at all — the "role has no grants" refusal. Under unified,
+    /// the principal reaches nothing on the catalog.
+    fn has_no_grant(&self) -> bool {
+        match self {
+            Self::Rbac { grants } => grants.is_empty(),
+            Self::Unified {
+                snapshot,
+                user,
+                catalog,
+            } => !snapshot.is_some_and(|s| {
+                egret_catalog_engine::unified_decide::covers(s, user, catalog, &[], None, false)
+            }),
+        }
+    }
+
+    /// A catalog-level write/manage grant (KI-312: a top-level namespace create
+    /// or a recursive namespace drop needs one).
+    fn has_catalog_write(&self) -> bool {
+        match self {
+            Self::Rbac { grants } => grants
+                .iter()
+                .any(|g| g.securable_type == "catalog" && grants_write(g)),
+            Self::Unified {
+                snapshot,
+                user,
+                catalog,
+            } => snapshot.is_some_and(|s| {
+                egret_catalog_engine::unified_decide::covers(s, user, catalog, &[], None, true)
+            }),
+        }
+    }
+
+    /// A catalog-root op (no namespace in the path): any grant for a read, a
+    /// write/manage grant for a write.
+    fn covers_catalog_root(&self, is_write: bool) -> bool {
+        match self {
+            Self::Rbac { grants } => grants.iter().any(|g| !is_write || grants_write(g)),
+            Self::Unified { .. } => {
+                if is_write {
+                    self.has_catalog_write()
+                } else {
+                    !self.has_no_grant()
+                }
+            }
+        }
+    }
+
+    /// One `Need`: does a grant cover `(ns, table)` at the required privilege?
+    /// `eq` is lakekeeper's collation, consulted only by the legacy rule (the
+    /// unified rule compares names case-insensitively inside `perm-eval`).
+    fn covers(&self, ns: &[String], table: Option<&str>, write: bool, eq: &CatalogNameEq) -> bool {
+        match self {
+            Self::Rbac { grants } => grants
+                .iter()
+                .any(|g| catalog_grant_covers_by(g, Some(ns), table, write, &|a, b| eq.eq(a, b))),
+            Self::Unified {
+                snapshot,
+                user,
+                catalog,
+            } => snapshot.is_some_and(|s| {
+                egret_catalog_engine::unified_decide::covers(s, user, catalog, ns, table, write)
+            }),
+        }
     }
 }
 
@@ -722,12 +812,77 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             if wh.lakekeeper_warehouse_id.as_deref() != Some(prefix) {
                 return forbid("token is not scoped to this warehouse".to_string());
             }
-            let grants = self
+            // SP5b: which store decides this catalog. The default — and every
+            // catalog with no `perm.catalog_grant_switch` row — is `catalog_rbac`,
+            // the legacy rule below, unchanged. `unified` instead evaluates the
+            // caller's service-account principal against the catalog's folded
+            // `perm.grants` (`egret_catalog_engine::unified_decide`).
+            use egret_catalog_engine::unified_decide::{self, Source};
+            let mut conn = self
                 .catalog
-                .grants_for_role(token_warehouse, token_role)
+                .pool()
+                .acquire()
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?;
-            if grants.is_empty() {
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+            let catalog_row: Option<(uuid::Uuid, String)> =
+                sqlx::query_as("SELECT id, name FROM registry.catalogs WHERE warehouse_id = $1")
+                    .bind(wh.id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("catalog: {e}")))?;
+            let source = match &catalog_row {
+                Some((cid, _)) => unified_decide::catalog_grant_source(&mut conn, *cid)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("switch: {e}")))?,
+                None => Source::CatalogRbac,
+            };
+
+            // Legacy inputs (the role's grants) load only on the legacy path; the
+            // unified snapshot + principal only on the unified path.
+            let grants = match source {
+                Source::CatalogRbac => self
+                    .catalog
+                    .grants_for_role(token_warehouse, token_role)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("grants: {e}")))?,
+                Source::Unified => Vec::new(),
+            };
+            let (unified_snapshot, unified_user, unified_catalog) = match source {
+                Source::Unified => {
+                    let user = unified_decide::service_account_username(&mut conn, &caller.subject)
+                        .await
+                        .map_err(|e| {
+                            (StatusCode::INTERNAL_SERVER_ERROR, format!("principal: {e}"))
+                        })?
+                        .unwrap_or_default();
+                    let snapshot = match &catalog_row {
+                        Some((cid, _)) => {
+                            self.snapshot_cache
+                                .get(&mut conn, *cid)
+                                .await
+                                .map_err(|e| {
+                                    (StatusCode::INTERNAL_SERVER_ERROR, format!("snapshot: {e}"))
+                                })?
+                        }
+                        None => None,
+                    };
+                    let name = catalog_row
+                        .as_ref()
+                        .map(|(_, n)| n.clone())
+                        .unwrap_or_default();
+                    (snapshot, user, name)
+                }
+                Source::CatalogRbac => (None, String::new(), String::new()),
+            };
+            let decider = match source {
+                Source::CatalogRbac => CatalogDecider::Rbac { grants: &grants },
+                Source::Unified => CatalogDecider::Unified {
+                    snapshot: unified_snapshot.as_deref(),
+                    user: &unified_user,
+                    catalog: &unified_catalog,
+                },
+            };
+            if decider.has_no_grant() {
                 return forbid(format!(
                     "role '{token_role}' has no grants on warehouse '{token_warehouse}'"
                 ));
@@ -827,10 +982,7 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                     let name = ns.join(".");
                     let parent = ns[..ns.len() - 1].to_vec();
                     if parent.is_empty() {
-                        if !grants
-                            .iter()
-                            .any(|g| g.securable_type == "catalog" && grants_write(g))
-                        {
+                        if !decider.has_catalog_write() {
                             return forbid(format!(
                                 "role '{token_role}' may not create namespace {name}: a \
                                  top-level namespace needs a catalog-level write or manage grant"
@@ -878,9 +1030,7 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                         && target_table.is_none()
                         && segs.len() == 3
                         && is_recursive(query)
-                        && !grants
-                            .iter()
-                            .any(|g| g.securable_type == "catalog" && grants_write(g))
+                        && !decider.has_catalog_write()
                     {
                         return forbid(format!(
                             "role '{token_role}' may not drop namespace {} recursively: a \
@@ -895,7 +1045,7 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                         // answer is then cut to what the role may see
                         // (`filter_listing`).
                         None => {
-                            if !grants.iter().any(|g| !is_write || grants_write(g)) {
+                            if !decider.covers_catalog_root(is_write) {
                                 return forbid(refusal);
                             }
                         }
@@ -914,19 +1064,14 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
                 .iter()
                 .flat_map(|n| n.ns.iter().map(String::as_str).chain(n.table.as_deref()))
                 .collect();
+            // The legacy rule needs lakekeeper's collation; the unified rule
+            // compares case-insensitively inside `perm-eval`, and `grants` is
+            // empty on that path so this load does no work.
             let eq = CatalogNameEq::load(&self.catalog, &grants, &requested)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("names: {e}")))?;
             for need in needs {
-                if !grants.iter().any(|g| {
-                    catalog_grant_covers_by(
-                        g,
-                        Some(&need.ns),
-                        need.table.as_deref(),
-                        need.write,
-                        &|a, b| eq.eq(a, b),
-                    )
-                }) {
+                if !decider.covers(&need.ns, need.table.as_deref(), need.write, &eq) {
                     return forbid(need.refusal);
                 }
             }
@@ -2722,6 +2867,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             std::sync::Arc::new(EgretCatalogGuard {
                 keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
                 catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
+                snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache::new(),
             });
         // View governance B2: a classified view's commit waits until every
         // Ranger plugin holds its tags. The lineage EXPLAIN runs as
@@ -3954,6 +4100,7 @@ mod catalog_guard_audience_tests {
         Some(EgretCatalogGuard {
             keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
             catalog: egret_catalog_engine::CatalogStore::new(db),
+            snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache::new(),
         })
     }
 
