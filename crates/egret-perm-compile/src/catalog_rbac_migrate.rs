@@ -27,11 +27,13 @@ use egret_perm::catalog_map::{map_privilege, map_securable, MapError};
 use egret_perm::model::{
     Effect, Grant, GrantOrigin, Principal, PrincipalKind, PrincipalSet, Scope,
 };
+use egret_perm::owners::{get_owner_via, set_owner_via};
 use egret_perm::store::{create_grant_in_tx, delete_grant_in_tx};
 use serde::Serialize;
 use sqlx::{Connection, PgConnection};
 use uuid::Uuid;
 
+use crate::engine_grants::PLATFORM_ADMIN_ROLE;
 use crate::migrate::canonical_json;
 
 #[derive(Debug, thiserror::Error)]
@@ -154,6 +156,53 @@ struct UndoRow {
     created_engine_grant_ids: Vec<Uuid>,
 }
 
+/// The principal that owns a folded catalog: the creator of the warehouse's
+/// workspace (as a `user` principal, matched on `users.username`), else the
+/// `platform_admin` role (`created_by` is `ON DELETE SET NULL`).
+async fn owner_principal(c: &mut PgConnection, warehouse_id: Uuid) -> Result<Principal, FoldError> {
+    let creator: Option<Uuid> = sqlx::query_scalar(
+        "SELECT ws.created_by FROM catalog.warehouses w \
+           JOIN workspaces ws ON ws.id = w.workspace_id WHERE w.id = $1",
+    )
+    .bind(warehouse_id)
+    .fetch_optional(&mut *c)
+    .await?
+    .flatten();
+    Ok(match creator {
+        Some(id) => Principal {
+            kind: PrincipalKind::User,
+            r#ref: egret_auth::users::ensure_username_via(c, egret_core::UserId(id))
+                .await
+                .map_err(|e| FoldError::Username(id, e.to_string()))?,
+        },
+        None => Principal {
+            kind: PrincipalKind::Role,
+            r#ref: PLATFORM_ADMIN_ROLE.to_owned(),
+        },
+    })
+}
+
+/// Seed one owner on the catalog-level securable if it has none. Returns the id
+/// of an owner CREATED here; an existing owner is left untouched and yields
+/// `None` so undo never removes it.
+async fn backfill_owner(
+    c: &mut PgConnection,
+    catalog_id: Uuid,
+    warehouse_id: Uuid,
+) -> Result<Option<Uuid>, FoldError> {
+    let scope = Scope {
+        catalog_id,
+        schema: None,
+        table: None,
+        column: None,
+    };
+    if get_owner_via(c, &scope).await?.is_some() {
+        return Ok(None);
+    }
+    let principal = owner_principal(c, warehouse_id).await?;
+    Ok(Some(set_owner_via(c, &scope, &principal).await?.id))
+}
+
 /// Fold `catalog_id`'s RBAC into `perm.grants` in ONE transaction. Idempotent:
 /// an already-folded catalog returns its stored report and writes nothing.
 pub async fn fold_catalog(
@@ -263,13 +312,17 @@ pub async fn fold_catalog(
         }
     }
 
+    let owners: Vec<Uuid> = backfill_owner(&mut tx, catalog_id, warehouse_id)
+        .await?
+        .into_iter()
+        .collect();
     let role_ids: Vec<Uuid> = src.roles.iter().map(|r| r.id).collect();
     let grant_ids: Vec<Uuid> = src.grants.iter().map(|g| g.id).collect();
     sqlx::query(
         "INSERT INTO perm.catalog_rbac_migrated \
            (catalog_id, warehouse_id, source_role_ids, source_grant_ids, source_hash, \
-            created_grant_ids, skipped_role_names, migrated_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            created_grant_ids, created_owner_ids, skipped_role_names, migrated_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(catalog_id)
     .bind(warehouse_id)
@@ -277,6 +330,7 @@ pub async fn fold_catalog(
     .bind(&grant_ids)
     .bind(&src.hash)
     .bind(&created)
+    .bind(&owners)
     .bind(&skipped)
     .bind(actor)
     .execute(&mut *tx)
@@ -318,9 +372,14 @@ pub async fn undo_fold(c: &mut PgConnection, catalog_id: Uuid) -> Result<(), Fol
     if load_source(&mut tx, warehouse_id).await?.hash != hash {
         return Err(FoldError::SourceChanged);
     }
-    for id in grants.iter().chain(&owners).chain(&engine) {
+    for id in grants.iter().chain(&engine) {
         delete_grant_in_tx(&mut tx, *id).await?;
     }
+    // Owners live in `perm.securable_owners`, not `perm.grants`.
+    sqlx::query("DELETE FROM perm.securable_owners WHERE id = ANY($1)")
+        .bind(&owners)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM perm.catalog_rbac_migrated WHERE catalog_id = $1")
         .bind(catalog_id)
         .execute(&mut *tx)
@@ -594,6 +653,107 @@ mod tests {
             undo_fold(&mut c, f.catalog_id).await,
             Err(FoldError::NotFolded(_))
         ));
+    }
+
+    async fn set_creator(f: &Fx, creator: Option<Uuid>) {
+        sqlx::query(
+            "UPDATE workspaces SET created_by = $1 \
+              WHERE id = (SELECT workspace_id FROM catalog.warehouses WHERE id = $2)",
+        )
+        .bind(creator)
+        .bind(f.wh)
+        .execute(&f.pool)
+        .await
+        .expect("creator");
+    }
+
+    async fn catalog_owners(f: &Fx) -> Vec<(String, String, Uuid)> {
+        sqlx::query_as(
+            "SELECT principal_kind::text, principal_ref, id FROM perm.securable_owners \
+              WHERE catalog_id = $1 AND schema_name IS NULL AND table_name IS NULL \
+                AND column_name IS NULL",
+        )
+        .bind(f.catalog_id)
+        .fetch_all(&f.pool)
+        .await
+        .expect("owners")
+    }
+
+    #[tokio::test]
+    async fn fold_seeds_the_workspace_creator_as_catalog_owner() {
+        let Some(f) = fixture().await else { return };
+        let creator = user(
+            &f.pool,
+            &format!("cr-{}", &Uuid::new_v4().simple().to_string()[..10]),
+        )
+        .await;
+        set_creator(&f, Some(creator)).await;
+        let username: String = sqlx::query_scalar("SELECT username::text FROM users WHERE id=$1")
+            .bind(creator)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        let mut c = f.pool.acquire().await.unwrap();
+        fold_catalog(&mut c, f.catalog_id, "t").await.unwrap();
+        let owners = catalog_owners(&f).await;
+        assert_eq!(owners.len(), 1);
+        assert_eq!(
+            (owners[0].0.as_str(), owners[0].1.as_str()),
+            ("user", username.as_str())
+        );
+        let rec: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT created_owner_ids FROM perm.catalog_rbac_migrated WHERE catalog_id=$1",
+        )
+        .bind(f.catalog_id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(rec, vec![owners[0].2]);
+        // undo removes the backfilled owner.
+        undo_fold(&mut c, f.catalog_id).await.expect("undo");
+        assert!(catalog_owners(&f).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fold_falls_back_to_platform_admins_when_creator_is_null() {
+        let Some(f) = fixture().await else { return };
+        set_creator(&f, None).await;
+        let mut c = f.pool.acquire().await.unwrap();
+        fold_catalog(&mut c, f.catalog_id, "t").await.unwrap();
+        let owners = catalog_owners(&f).await;
+        assert_eq!(owners.len(), 1);
+        assert_eq!(
+            (owners[0].0.as_str(), owners[0].1.as_str()),
+            ("role", "platform_admin")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_existing_owner_is_left_alone_and_survives_undo() {
+        let Some(f) = fixture().await else { return };
+        sqlx::query(
+            "INSERT INTO perm.securable_owners (catalog_id, principal_kind, principal_ref) \
+             VALUES ($1, 'user', 'someone-else')",
+        )
+        .bind(f.catalog_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        let mut c = f.pool.acquire().await.unwrap();
+        fold_catalog(&mut c, f.catalog_id, "t").await.unwrap();
+        let owners = catalog_owners(&f).await;
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].1, "someone-else");
+        let rec: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT created_owner_ids FROM perm.catalog_rbac_migrated WHERE catalog_id=$1",
+        )
+        .bind(f.catalog_id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert!(rec.is_empty());
+        undo_fold(&mut c, f.catalog_id).await.expect("undo");
+        assert_eq!(catalog_owners(&f).await.len(), 1);
     }
 
     #[tokio::test]
