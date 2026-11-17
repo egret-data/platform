@@ -12,8 +12,9 @@
 use egret_catalog_engine::grant_match::{catalog_grant_covers_by, grant_sees_namespace};
 use egret_catalog_engine::store::CatalogStore;
 use egret_catalog_engine::unified_decide::{
-    catalog_grant_source, covers, service_account_username, unified_listing_grants,
-    unified_name_matching_is_exact, Source,
+    catalog_enforces_rules, catalog_grant_source, covers, service_account_username,
+    unified_listing_grants, unified_name_matching_is_exact, CatalogEnforcementSnapshotCache,
+    Source,
 };
 use egret_perm_compile::catalog_rbac_migrate::fold_catalog;
 use egret_perm_compile::opa::build::build_catalog_snapshot_via;
@@ -216,6 +217,56 @@ async fn the_switch_defaults_to_catalog_rbac_and_reads_unified() {
         catalog_grant_source(&mut c, f.catalog_id).await.unwrap(),
         Source::Unified
     );
+}
+
+#[tokio::test]
+async fn the_rule_enforcement_switch_is_opt_in_and_independent() {
+    let Some(f) = fixture().await else { return };
+    let mut c = f.pool.acquire().await.unwrap();
+    assert!(
+        !catalog_enforces_rules(&mut c, f.catalog_id).await.unwrap(),
+        "no row means no rule enforcement"
+    );
+    for (enforce, want) in [(true, true), (false, false)] {
+        sqlx::query(
+            "INSERT INTO perm.catalog_rule_enforcement_switch (catalog_id, enforce, switched_at, switched_by) \
+             VALUES ($1, $2, now(), 'sp5c-test') \
+             ON CONFLICT (catalog_id) DO UPDATE SET enforce = EXCLUDED.enforce",
+        )
+        .bind(f.catalog_id)
+        .bind(enforce)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            catalog_enforces_rules(&mut c, f.catalog_id).await.unwrap(),
+            want
+        );
+    }
+    // Independent of the grant switch.
+    assert_eq!(
+        catalog_grant_source(&mut c, f.catalog_id).await.unwrap(),
+        Source::CatalogRbac
+    );
+}
+
+#[tokio::test]
+async fn the_enforcement_snapshot_cache_builds_and_reuses() {
+    let Some(f) = fixture().await else { return };
+    let mut c = f.pool.acquire().await.unwrap();
+    let cache = CatalogEnforcementSnapshotCache::new();
+    let a = cache
+        .get(&mut c, f.catalog_id)
+        .await
+        .unwrap()
+        .expect("snapshot");
+    let b = cache
+        .get(&mut c, f.catalog_id)
+        .await
+        .unwrap()
+        .expect("snapshot");
+    assert!(std::sync::Arc::ptr_eq(&a, &b), "unchanged version is a hit");
+    assert!(cache.get(&mut c, Uuid::new_v4()).await.unwrap().is_none());
 }
 
 #[tokio::test]

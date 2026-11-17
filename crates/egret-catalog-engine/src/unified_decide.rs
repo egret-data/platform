@@ -74,6 +74,22 @@ pub async fn catalog_grant_source(
     })
 }
 
+/// True when `catalog_id` has opted into iceberg-rest rule enforcement
+/// (`perm.catalog_rule_enforcement_switch`, migration 0237). A catalog with no
+/// row returns false: opt-in, so shipping the migration enables nothing.
+pub async fn catalog_enforces_rules(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let on: Option<bool> = sqlx::query_scalar(
+        "SELECT enforce FROM perm.catalog_rule_enforcement_switch WHERE catalog_id = $1",
+    )
+    .bind(catalog_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(on.unwrap_or(false))
+}
+
 /// Does `principal_user` (a `users.username`) cover the requested
 /// `(namespace, table, is_write)` on `catalog_name`, under `snapshot`? The same
 /// boolean [`crate::grant_match::catalog_grant_covers_by`] returns for the
@@ -324,8 +340,7 @@ async fn version_of(
                (SELECT max(created_at) FROM perm.grants WHERE catalog_id = $1), \
                (SELECT count(*) FROM perm.grant_principals gp \
                   JOIN perm.grants g ON g.id = gp.grant_id WHERE g.catalog_id = $1), \
-               (SELECT max(gp.created_at) FROM perm.grant_principals gp \
-                  JOIN perm.grants g ON g.id = gp.grant_id WHERE g.catalog_id = $1), \
+               NULL::timestamptz, \
                (SELECT count(*) FROM perm.securable_owners WHERE catalog_id = $1), \
                (SELECT max(updated_at) FROM perm.securable_owners WHERE catalog_id = $1)",
     )
@@ -396,6 +411,69 @@ impl CatalogSnapshotCache {
         let snapshot = egret_perm_compile::opa::build::build_catalog_snapshot_via(conn, catalog_id)
             .await?
             .map(Arc::new);
+        self.entries.lock().expect("cache mutex").insert(
+            catalog_id,
+            Cached {
+                version,
+                snapshot: snapshot.clone(),
+            },
+        );
+        Ok(snapshot)
+    }
+}
+
+/// Like [`CatalogSnapshotCache`] but caches the ENFORCEMENT snapshot
+/// (`build_catalog_enforcement_snapshot`: rules + withhold + classified, no
+/// grants), keyed by `catalog_id` and
+/// invalidated by [`Version`]. The build (grant load + IR lowering) runs only on
+/// a miss or a version change; a hit is one cheap indexed [`version_of`] query,
+/// comparable in cost to the legacy `grants_for_role` read.
+///
+/// A built snapshot can be `None` — the catalog has no registry row — which is
+/// cached too, so a deleted catalog does not rebuild on every request; it is a
+/// deny (nothing covers).
+#[derive(Clone, Default)]
+pub struct CatalogEnforcementSnapshotCache {
+    entries: Arc<Mutex<HashMap<Uuid, Cached>>>,
+}
+
+impl std::fmt::Debug for CatalogEnforcementSnapshotCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CatalogEnforcementSnapshotCache")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CatalogEnforcementSnapshotCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn get_fresh(&self, catalog_id: Uuid, version: &Version) -> Option<Option<Arc<Snapshot>>> {
+        let map = self.entries.lock().expect("cache mutex");
+        map.get(&catalog_id)
+            .filter(|c| &c.version == version)
+            .map(|c| c.snapshot.clone())
+    }
+
+    /// The current enforcement snapshot for `catalog_id`, rebuilt only when the
+    /// catalog's grants/owners have changed since the cached one. `Err` (a restricting
+    /// rule was skipped) is propagated, never read as `None`. `Ok(None)` means the catalog has no registry row.
+    pub async fn get(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        catalog_id: Uuid,
+    ) -> Result<Option<Arc<Snapshot>>, egret_perm::CompileError> {
+        let version = version_of(conn, catalog_id)
+            .await
+            .map_err(egret_perm::CompileError::from_db)?;
+        if let Some(hit) = self.get_fresh(catalog_id, &version) {
+            return Ok(hit);
+        }
+        let snapshot =
+            egret_perm_compile::opa::build::build_catalog_enforcement_snapshot(conn, catalog_id)
+                .await?
+                .map(Arc::new);
         self.entries.lock().expect("cache mutex").insert(
             catalog_id,
             Cached {
