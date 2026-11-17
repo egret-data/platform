@@ -1160,6 +1160,16 @@ async fn attach_to_engine_inner(
             &format!("engine-{}-{}", engine.name, catalog.name),
         )
         .await?;
+        // SP5b: the per-engine catalog grant, IN ADDITION to the shared-role
+        // binding below (which stays: `catalog_role_id` is NOT NULL and
+        // legacy-mode catalogs still enforce through it).
+        crate::engine_catalog_grant::ensure_engine_catalog_grant(
+            st.engine_mgmt.pool(),
+            catalog.id,
+            service_account_id,
+        )
+        .await
+        .map_err(CpError::from)?;
         let client = st
             .catalog
             .create_client(NewClient {

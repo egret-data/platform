@@ -6967,6 +6967,111 @@ async fn attaching_an_egret_warehouse_to_a_starrocks_engine_mints_a_client_and_c
     );
 }
 
+/// Per-engine catalog-level grants (`{read,write,create,manage}`, no schema,
+/// table or column) held by `service_account_id`'s username on `catalog_id`.
+async fn engine_catalog_grants(
+    f: &Fixture,
+    catalog_id: Uuid,
+    service_account_id: Uuid,
+) -> Vec<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT g.actions FROM perm.grants g \
+           JOIN perm.grant_principals p ON p.grant_id = g.id \
+           JOIN users u ON u.username = p.ref \
+          WHERE g.catalog_id = $1 AND g.schema_name IS NULL AND g.table_name IS NULL \
+            AND g.column_name IS NULL AND g.effect = 'allow'::perm.effect \
+            AND p.kind = 'user'::perm.principal_kind AND u.id = $2",
+    )
+    .bind(catalog_id)
+    .bind(service_account_id)
+    .fetch_all(&f.db.pool)
+    .await
+    .unwrap()
+}
+
+fn full_engine_actions(a: &[String]) -> bool {
+    let mut v = a.to_vec();
+    v.sort();
+    v == ["create", "manage", "read", "write"]
+}
+
+/// SP5b Task 4: an attach mints a per-engine service-account grant on the
+/// catalog IN ADDITION to the shared-role binding (provisioning unchanged),
+/// two engines get two distinct grants, and ensuring twice is a no-op.
+#[tokio::test]
+async fn attaching_engines_gives_each_service_account_its_own_catalog_grant() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        panic!("DATABASE_URL not set: this DB-gated test must run, not skip");
+    };
+    let token = session_for(&f, "engine_catgrant_admin", true).await;
+    let (engine_a, _) = create_starrocks_via_api(&f, &token).await;
+    let (engine_b, _) = create_starrocks_via_api(&f, &token).await;
+    let other = seed_provisioned_warehouse(&f).await;
+    let store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let before: Vec<Uuid> = store
+        .list_clients(other)
+        .await
+        .unwrap()
+        .iter()
+        .map(|c| c.id)
+        .collect();
+
+    let (st_a, ja, cat) = attach_warehouse_via_api(&f, &token, &engine_a, other).await;
+    assert_eq!(st_a, StatusCode::CREATED, "body={ja}");
+    let (st_b, jb, _) = attach_warehouse_via_api(&f, &token, &engine_b, other).await;
+    assert_eq!(st_b, StatusCode::CREATED, "body={jb}");
+
+    let minted: Vec<_> = store
+        .list_clients(other)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|c| !before.contains(&c.id))
+        .collect();
+    assert_eq!(minted.len(), 2);
+    let mut sas = Vec::new();
+    for c in &minted {
+        let sa: Uuid = sqlx::query_scalar(
+            "SELECT service_account_id FROM catalog.catalog_clients WHERE id = $1",
+        )
+        .bind(c.id)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+        sas.push(sa);
+    }
+    assert_ne!(sas[0], sas[1]);
+    let mut grant_ids = Vec::new();
+    for (c, sa) in minted.iter().zip(sas.iter().copied()) {
+        // Provisioning intact: still bound to a (shared) catalog role.
+        let role_name: String =
+            sqlx::query_scalar("SELECT name FROM catalog.catalog_roles WHERE id = $1")
+                .bind(c.catalog_role_id)
+                .fetch_one(&f.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(role_name, "engine");
+        let gs = engine_catalog_grants(&f, cat.id, sa).await;
+        assert_eq!(gs.len(), 1, "exactly one per-engine grant: {gs:?}");
+        assert!(full_engine_actions(&gs[0]), "{gs:?}");
+        grant_ids.push(
+            egret_engine_mgmt::engine_catalog_grant::ensure_engine_catalog_grant(
+                &f.db.pool, cat.id, sa,
+            )
+            .await
+            .unwrap(),
+        );
+        // Idempotent: the second ensure wrote nothing.
+        assert_eq!(engine_catalog_grants(&f, cat.id, sa).await.len(), 1);
+    }
+    assert_ne!(grant_ids[0], grant_ids[1], "distinct per-engine grants");
+}
+
 /// D3 + `is_reserved_starrocks_name`: the refusal that replaced the
 /// not-supported-yet gate holds the SAME pre-mint position — a catalog whose
 /// name StarRocks reserves is 400, and no Catalog Client is minted for it.
