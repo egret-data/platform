@@ -90,6 +90,64 @@ pub async fn catalog_enforces_rules(
     Ok(on.unwrap_or(false))
 }
 
+/// SP5c: what the iceberg-rest switch means for data asks (read and write) on one catalog.
+/// Loaded once per request/ask-batch; fail closed throughout.
+pub enum ReadEnforcement {
+    /// The switch is off: reads are decided by grants alone (opt-in).
+    Off,
+    /// The switch is on but the rules cannot be enforced (the switch or the
+    /// snapshot failed to load, or the catalog has no registry row): every ask
+    /// is denied. A skipped restricting rule is never read as "nothing restricts".
+    DenyAll,
+    /// The switch is on: a read is denied when the table is restricted.
+    Check(Arc<Snapshot>),
+}
+
+impl ReadEnforcement {
+    pub async fn load(
+        cache: &CatalogEnforcementSnapshotCache,
+        conn: &mut sqlx::PgConnection,
+        catalog_id: Uuid,
+    ) -> Self {
+        match catalog_enforces_rules(conn, catalog_id).await {
+            Ok(false) => return Self::Off,
+            Ok(true) => {}
+            Err(e) => {
+                tracing::error!(%catalog_id, error = %e, "iceberg-rest enforcement switch unreadable: denying reads");
+                return Self::DenyAll;
+            }
+        }
+        match cache.get(conn, catalog_id).await {
+            Ok(Some(snap)) => Self::Check(snap),
+            Ok(None) => Self::DenyAll,
+            Err(e) => {
+                tracing::error!(%catalog_id, error = %e, "iceberg-rest enforcement snapshot unavailable: denying reads");
+                Self::DenyAll
+            }
+        }
+    }
+
+    /// True when ANY access (read or write) to `(namespace, table)` by `user`
+    /// must be denied: a restricted table vends no credential at all, since a
+    /// write credential can read the raw files. `namespace` is dot-joined
+    /// exactly as [`covers`] joins it.
+    pub fn denies_access(
+        &self,
+        user: &str,
+        catalog: &str,
+        namespace: &[String],
+        table: &str,
+    ) -> bool {
+        match self {
+            Self::Off => false,
+            Self::DenyAll => true,
+            Self::Check(snap) => {
+                snap.table_read_restricted(user, catalog, &namespace.join("."), table)
+            }
+        }
+    }
+}
+
 /// Does `principal_user` (a `users.username`) cover the requested
 /// `(namespace, table, is_write)` on `catalog_name`, under `snapshot`? The same
 /// boolean [`crate::grant_match::catalog_grant_covers_by`] returns for the
