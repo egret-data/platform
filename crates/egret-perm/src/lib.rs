@@ -16,6 +16,7 @@
 //! consumer of `egret-policy`.
 pub mod actions;
 pub mod assignment;
+pub mod catalog_map;
 pub mod engine_grants;
 pub mod engine_images;
 pub mod error;
