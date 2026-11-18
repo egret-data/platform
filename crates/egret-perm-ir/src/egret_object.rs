@@ -267,6 +267,15 @@ mod tests {
             object_grants, OBJECT_GRANT_KEYS,
             "object-grant key count drifted"
         );
+        // Chokepoint: any addition to the rbac catalog trips this total until
+        // the author classifies the new key in `classify` — as an object-data
+        // grant (which also bumps OBJECT_GRANT_KEYS above) or by accepting the
+        // typed-EP default here and bumping this total deliberately.
+        assert_eq!(
+            rbac::PERMISSIONS.len(),
+            65,
+            "rbac::PERMISSIONS changed — classify() must be reviewed"
+        );
     }
 
     #[test]
