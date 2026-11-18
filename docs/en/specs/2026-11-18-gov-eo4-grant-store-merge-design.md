@@ -40,7 +40,7 @@ The data-plane `perm.grants` table is **privilege-on-catalog shaped** (`catalog_
 | # | Decision |
 |---|---|
 | EO4-D1 | **Mirror, don't expand.** The unified store keeps the role-assignment shape: a new table `perm.cedar_grants` saves `(principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect, expires_at)` — a faithful copy of `access_grants`'s decision-relevant columns. `link_grants` is unchanged, so equivalence is tight and the Cedar engine path is untouched. (The alternative — expanding each assignment into per-object `READ/WRITE/MANAGE` privilege grants — loses the role fact, must re-express deny/expiry/cascade, and would fork the link machinery. Rejected.) The capstone's job is one **store**, not one row **shape**; SP5b likewise kept catalog grants as their own rows under `perm.*`. |
-| EO4-D2 | **Sibling table, not `perm.grants`.** `perm.cedar_grants` lives in the `perm.*` namespace and shares the one-store machinery (`perm.migrated_from` provenance, a switch table, the equivalence gate), but does not touch the catalog-shaped `perm.grants`. |
+| EO4-D2 | **Sibling table, not `perm.grants`.** `perm.cedar_grants` lives in the `perm.*` namespace and shares the one-store machinery (a switch table and the equivalence gate), but does not touch the catalog-shaped `perm.grants`. It is a **trigger-synced replica**: a trigger on `access_grants` mirrors every write, so the `unified` read never goes stale, and `access_grants` stays the write target through the reversible phase (writes redirect here only at the deferred finalize). |
 | EO4-D3 | **Per-EP reversible switch**, mirroring EO3 and SP5b. A singleton/per-EP row `perm.cedar_grant_source` with states `legacy` (default) / `unified`, re-read on every PDP reload. `grants_for` reads `access_grants` under `legacy`, `perm.cedar_grants` under `unified`. Default `legacy` ⇒ **zero behaviour change**. |
 | EO4-D4 | **Equivalence-gated flip.** The switch to `unified` is refused unless a fresh equivalence report over a sample of (principal × object/scope × action) proves the PDP returns the same allow/deny with grants read from `perm.cedar_grants` as from `access_grants`. The gate has **teeth**, proven by a seeded over-grant/omission it must catch. A non-empty report refuses the flip (409) and lists the divergences — the EO3/SP5b pattern. |
 | EO4-D5 | **Reversible; finalize deferred.** EO4 delivers the mirror store, the switch, the gate, and undo-while-open. It keeps the `access_grants` read path alive. Deleting the legacy read paths (`AccessGrantStore` over `access_grants`, the bespoke `templates.rs`/`load_inner` generation from EO3, and eventually `access_grants` itself and the session-building reads in `effective.rs`) is a single **post-soak finalize**, combined with EO3's deferred finalize, taken only after a long clean soak on `unified`. Not in EO4. |
@@ -50,7 +50,7 @@ The data-plane `perm.grants` table is **privilege-on-catalog shaped** (`catalog_
 
 ### The mirror store `perm.cedar_grants`
 
-A table holding the decision-relevant columns of `access_grants` under `perm.*`. While the switch is `legacy`, it is a maintained copy populated by the fold with `perm.migrated_from` provenance. While `unified`, it is the grant source: the grant-write API writes assignments here, and `grants_for` reads here. Undo restores `legacy` and the copy is discarded/rebuilt; the fold never mutates `access_grants`, so a reverted EP reads exactly what it read before (SP5b's "fold doesn't touch the RBAC source" rule).
+A table holding the decision-relevant columns of `access_grants` under `perm.*`, kept **live-consistent by a trigger** on `access_grants` (every INSERT/UPDATE/DELETE mirrors over). `fold` backfills the rows that predate the trigger. Because the replica always equals the source, `grants_for` reading `perm.cedar_grants` (`unified`) returns exactly what it returns from `access_grants` (`legacy`) — the switch is pure read-routing, never a stale snapshot. `access_grants` stays the write target throughout, so undo (back to `legacy`) is instant and the fold never mutates the source (SP5b's "fold doesn't touch the write source" rule). Provenance is the replica's own row lineage (each `cedar_grants.id` = its `access_grants.id`) plus the switch row's audit columns; no separate provenance table (`perm.migrated_from` is Ranger-policy-specific and does not fit).
 
 ### The grant-source switch `perm.cedar_grant_source`
 
@@ -71,7 +71,7 @@ For a sample of subjects × resources (platform, workspace, object + folder-casc
                                                                │    AuditingPdp)
 ```
 
-- **Store**: `perm.cedar_grants` + `perm.migrated_from` provenance + `perm.cedar_grant_source` switch (one migration).
+- **Store**: `perm.cedar_grants` (trigger-synced replica of `access_grants`) + `perm.cedar_grant_source` switch (two migrations).
 - **Read routing**: `AccessGrantStore::grants_for` reads the source the switch names. One call site feeds the PDP; the SQL is the same shape against either table.
 - **Fold / undo / report / switch**: control-plane endpoints under `/api/control-plane/perm/cedar-grants` (platform-admin), mirroring EO3's `pdp-source` and SP5b's `catalog` lifecycle: `GET` (state), `POST /report` (equivalence on live data), `POST /fold` (copy + provenance, still `legacy`), `POST /switch` (gated flip to `unified`), `POST /undo` (back to `legacy`). Every mutation publishes `RolesChanged`.
 
@@ -94,7 +94,7 @@ Fail closed, matching EO3 and SP5b:
 
 ## Verification
 
-1. **Store tests**: round-trip `perm.cedar_grants`; fold copies `access_grants` rows with `perm.migrated_from` provenance; undo restores `legacy`.
+1. **Store tests**: `fold` makes `perm.cedar_grants` a faithful replica; the trigger mirrors a later `access_grants` write/delete; undo restores `legacy`.
 2. **Per-state routing**: `grants_for` reads `access_grants` under `legacy` and `perm.cedar_grants` under `unified`; the absent/err fail-safe serves `legacy`.
 3. **Equivalence gate with teeth**: over the sample the report is empty when the mirror is faithful; a seeded over-grant (an extra `unified` row) or omission makes the report non-empty and the flip refuse.
 4. **e2e hot-flip**: `legacy → fold → unified → undo` leaves PDP decisions unchanged at every step and the live `arc_swap` serves the expected grant set (the EO3 `pdp_source_hot_flip` analogue).
