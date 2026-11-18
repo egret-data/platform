@@ -69,9 +69,18 @@ pub enum Parent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EgretSecurable {
     Platform,
-    Workspace { id: Uuid },
-    Folder { id: Uuid, parent: Parent },
-    Object { kind: ObjectKind, id: Uuid, parent: Parent },
+    Workspace {
+        id: Uuid,
+    },
+    Folder {
+        id: Uuid,
+        parent: Parent,
+    },
+    Object {
+        kind: ObjectKind,
+        id: Uuid,
+        parent: Parent,
+    },
 }
 
 impl EgretSecurable {
@@ -91,7 +100,10 @@ impl EgretSecurable {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMapping {
     /// An object-data grant on a securable of this kind.
-    ObjectGrant { kind: ObjectKind, privilege: Privilege },
+    ObjectGrant {
+        kind: ObjectKind,
+        privilege: Privilege,
+    },
     /// A typed privilege on the `egret-cedar` enforcement point (an
     /// entitlement, not a securable grant): engine/catalog/workspace/etc.
     /// capabilities and non-data object verbs (`certify`, `invoke`).
@@ -105,6 +117,21 @@ pub enum PermissionMapping {
 /// Classify an `egret_core::rbac` permission key (either a `PERMISSIONS` key or
 /// an `ADMIN_GRAPH_ACTIONS` key) into the one grant model. `None` for a string
 /// that is neither — callers treat an unknown key as un-mappable (fail closed).
+///
+/// ```
+/// use egret_perm_ir::egret_object::{classify, PermissionMapping, ObjectKind};
+/// use egret_perm_ir::statement::Privilege;
+///
+/// assert_eq!(
+///     classify("dashboard:read"),
+///     Some(PermissionMapping::ObjectGrant {
+///         kind: ObjectKind::Dashboard,
+///         privilege: Privilege::Read,
+///     }),
+/// );
+/// assert_eq!(classify("engine:read"), Some(PermissionMapping::TypedEpPrivilege));
+/// assert_eq!(classify("role:create"), Some(PermissionMapping::AdminGraphForbid));
+/// ```
 pub fn classify(key: &str) -> Option<PermissionMapping> {
     // Object-data grants: the only keys that become securable grants (EO-D3).
     let object_grant = |kind: ObjectKind, privilege: Privilege| {
@@ -170,7 +197,11 @@ mod tests {
         // A workspace's parent is the platform root, reported as None.
         assert_eq!(EgretSecurable::Workspace { id: ws }.parent(), None);
         assert_eq!(
-            EgretSecurable::Folder { id: folder, parent: Parent::Workspace(ws) }.parent(),
+            EgretSecurable::Folder {
+                id: folder,
+                parent: Parent::Workspace(ws)
+            }
+            .parent(),
             Some(Parent::Workspace(ws)),
         );
         assert_eq!(
@@ -207,7 +238,10 @@ mod tests {
         for (key, kind, priv_) in cases {
             assert_eq!(
                 classify(key),
-                Some(PermissionMapping::ObjectGrant { kind: *kind, privilege: *priv_ }),
+                Some(PermissionMapping::ObjectGrant {
+                    kind: *kind,
+                    privilege: *priv_
+                }),
                 "key {key}",
             );
         }
@@ -229,7 +263,10 @@ mod tests {
                 other => panic!("rbac key {} classified as {other:?}", p.key),
             }
         }
-        assert_eq!(object_grants, OBJECT_GRANT_KEYS, "object-grant key count drifted");
+        assert_eq!(
+            object_grants, OBJECT_GRANT_KEYS,
+            "object-grant key count drifted"
+        );
     }
 
     #[test]
@@ -245,8 +282,16 @@ mod tests {
 
     #[test]
     fn non_data_object_verbs_are_typed() {
-        for key in ["dashboard:certify", "dataset:certify", "data_api_endpoint:invoke"] {
-            assert_eq!(classify(key), Some(PermissionMapping::TypedEpPrivilege), "key {key}");
+        for key in [
+            "dashboard:certify",
+            "dataset:certify",
+            "data_api_endpoint:invoke",
+        ] {
+            assert_eq!(
+                classify(key),
+                Some(PermissionMapping::TypedEpPrivilege),
+                "key {key}"
+            );
         }
     }
 
