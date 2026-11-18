@@ -180,6 +180,10 @@ pub enum ReasonCode {
     /// SP5a: the target cannot enforce this privilege (capability matrix
     /// `Capability::EnforcePrivilege`).
     PrivilegeNotEnforceable,
+    /// EO2: the capability has no meaning for this EP (e.g. a column mask or
+    /// row filter on an egret object, which has no columns or rows). Distinct
+    /// from `NotMeasured`: it is not that we did not measure, it does not apply.
+    NotApplicable,
 }
 
 /// A source that lowered to nothing (or to something weaker), and why.

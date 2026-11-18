@@ -10,6 +10,7 @@ egret-metastore.workspace = true
 egret-config.workspace = true
 egret-secrets.workspace = true
 egret-events = { workspace = true }
+egret-cedar = { workspace = true }
 egret-audit = { workspace = true }
 axum.workspace = true
 axum-extra = { workspace = true }
@@ -63,3 +64,5 @@ reqwest.workspace = true
 egret-machine-idp.workspace = true
 # Reads the startup provenance pass's `warn!` lines back (`tests/provenance_log_escapes.rs`).
 tracing-subscriber.workspace = true
+# EO2 differential: bucket permission keys via `egret_object::classify`.
+egret-perm-ir.workspace = true

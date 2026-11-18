@@ -831,6 +831,70 @@ pub fn iceberg_rest_gap(cap: &Capability) -> Option<String> {
     }
 }
 
+/// EO2: the egret-cedar EP (egret's own control-plane PDP). Like
+/// [`ICEBERG_REST`] it is not an `EpKind` and has no rows in [`ENTRIES`]; egret
+/// has no engine or version axis. Cedar enforces every grant vocabulary
+/// privilege and the clearance withhold natively; column masks and row filters
+/// have no meaning on an egret object.
+pub const EGRET_CEDAR: &str = "egret-cedar";
+
+const EGRET_CEDAR_PRIVILEGES: &[(Privilege, Answer)] = &[
+    (Privilege::Browse, Answer::Native),
+    (Privilege::Read, Answer::Native),
+    (Privilege::Write, Answer::Native),
+    (Privilege::Create, Answer::Native),
+    (Privilege::Manage, Answer::Native),
+];
+
+const EGRET_CEDAR_EFFECTS: &[(RuleEffectKind, Answer)] = &[
+    (
+        RuleEffectKind::Mask,
+        Answer::Missing(ReasonCode::NotApplicable),
+    ),
+    (
+        RuleEffectKind::RowFilter,
+        Answer::Missing(ReasonCode::NotApplicable),
+    ),
+];
+
+/// The egret-cedar EP's answer for `cap`. Grant-vocabulary privileges and the
+/// classification withhold are native; mask/row-filter selectors are not
+/// applicable; anything else is missing, reason "not measured" (spec D7).
+pub fn egret_cedar_support(cap: &Capability) -> Support {
+    match cap {
+        Capability::EnforcePrivilege(p) => EGRET_CEDAR_PRIVILEGES
+            .iter()
+            .find(|(q, _)| q == p)
+            .map_or(Support::Missing(ReasonCode::NotMeasured), |(_, a)| {
+                answer_support(*a)
+            }),
+        Capability::ClassificationSelector(k) => EGRET_CEDAR_EFFECTS
+            .iter()
+            .find(|(q, _)| q == k)
+            .map_or(Support::Missing(ReasonCode::NotMeasured), |(_, a)| {
+                answer_support(*a)
+            }),
+        Capability::WithholdByClassification => Support::Native,
+        _ => Support::Missing(ReasonCode::NotMeasured),
+    }
+}
+
+/// Why egret-cedar does not enforce `cap` as asked; `None` when native.
+pub fn egret_cedar_gap(cap: &Capability) -> Option<String> {
+    match (egret_cedar_support(cap), cap) {
+        (Support::Native, _) => None,
+        (Support::Lowered(_), _) => None,
+        (Support::Missing(ReasonCode::NotApplicable), _) => Some(format!(
+            "masks/row filters are not applicable to egret objects ({EGRET_CEDAR})"
+        )),
+        (Support::Missing(_), Capability::EnforcePrivilege(p)) => Some(format!(
+            "{} not enforceable by {EGRET_CEDAR}",
+            privilege_name(*p)
+        )),
+        (Support::Missing(_), _) => Some(format!("not measured for {EGRET_CEDAR}")),
+    }
+}
+
 fn privilege_name(p: Privilege) -> &'static str {
     match p {
         Privilege::Read => "read",
@@ -1227,5 +1291,72 @@ mod tests {
             iceberg_rest_support(&Capability::WithholdByClassification),
             Support::Native
         );
+    }
+
+    #[test]
+    fn egret_cedar_enforces_every_privilege_natively() {
+        use Privilege::*;
+        for p in [Browse, Read, Write, Create, Manage] {
+            assert_eq!(
+                egret_cedar_support(&Capability::EnforcePrivilege(p)),
+                Support::Native,
+                "{p:?}"
+            );
+            assert_eq!(
+                egret_cedar_gap(&Capability::EnforcePrivilege(p)),
+                None,
+                "{p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn egret_cedar_withhold_is_native_mask_and_rowfilter_not_applicable() {
+        assert_eq!(
+            egret_cedar_support(&Capability::WithholdByClassification),
+            Support::Native
+        );
+        for k in [RuleEffectKind::Mask, RuleEffectKind::RowFilter] {
+            assert_eq!(
+                egret_cedar_support(&Capability::ClassificationSelector(k)),
+                Support::Missing(ReasonCode::NotApplicable),
+                "{k:?}"
+            );
+            let gap = egret_cedar_gap(&Capability::ClassificationSelector(k)).unwrap();
+            assert!(
+                gap.contains("not applicable"),
+                "gap should read not-applicable, got: {gap}"
+            );
+        }
+    }
+
+    #[test]
+    fn egret_cedar_unknown_capability_is_not_measured() {
+        let cap = Capability::MaskType("sha256".into());
+        assert_eq!(
+            egret_cedar_support(&cap),
+            Support::Missing(ReasonCode::NotMeasured)
+        );
+        assert!(egret_cedar_gap(&cap).unwrap().contains("not measured"));
+    }
+
+    #[test]
+    fn every_object_data_grant_maps_to_a_native_egret_cedar_privilege() {
+        // Tie EO1's classify to the matrix: each object-data key's privilege is
+        // Native on egret-cedar (object grants are enforced by Cedar directly).
+        use crate::egret_object::{classify, PermissionMapping};
+        let mut count = 0;
+        for p in egret_core::rbac::PERMISSIONS {
+            if let Some(PermissionMapping::ObjectGrant { privilege, .. }) = classify(p.key) {
+                count += 1;
+                assert_eq!(
+                    egret_cedar_support(&Capability::EnforcePrivilege(privilege)),
+                    Support::Native,
+                    "object-data key {} must be Native",
+                    p.key
+                );
+            }
+        }
+        assert!(count > 0, "no object-data grant keys were exercised");
     }
 }

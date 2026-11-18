@@ -19,7 +19,7 @@ use egret_metastore::Db;
 use tokio::sync::broadcast;
 
 use crate::events::RolesChanged;
-use crate::grants::AccessGrantStore;
+use crate::grants::{AccessGrantStore, Grant};
 
 /// The compiled policy state the PDP authorizes against. Held behind an
 /// `ArcSwap` so a background task can atomically swap in a freshly-loaded set
@@ -142,16 +142,7 @@ impl CedarPdp {
         // a role force-granted one of these actions cannot escalate — a non-admin
         // is always denied. Fail-safe: a missing `is_platform_admin` flag ⇒ the
         // `unless` is false ⇒ the forbid applies ⇒ deny.
-        let actions = egret_core::rbac::ADMIN_GRAPH_ACTIONS
-            .iter()
-            .map(|a| format!("Egret::Action::\"{a}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let forbid_src = format!(
-            "forbid(principal, action in [{actions}], resource) \
-             unless {{ context has is_platform_admin && context.is_platform_admin }};"
-        );
-        let forbid: cedar_policy::Policy = forbid_src
+        let forbid: cedar_policy::Policy = egret_cedar::text::admin_graph_forbid()
             .parse()
             .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("forbid policy: {e:?}")))?;
         templates
@@ -215,6 +206,47 @@ impl CedarPdp {
         })
     }
 
+    /// Test-only: the PDP's compiled template set + role-name map, for the EO2
+    /// decision-equivalence differential. Not for runtime use.
+    #[doc(hidden)]
+    pub async fn compiled_policy_set_for_test(
+        db: &Db,
+    ) -> Result<(PolicySet, HashMap<uuid::Uuid, String>)> {
+        let inner = Self::load_inner(db).await?;
+        Ok((inner.templates, inner.role_names))
+    }
+
+    /// Test-only: run the request path against an arbitrary template set (the
+    /// live PDP's, or the egret-cedar-compiled one), loading grants/tags from the
+    /// DB exactly as `authorize`. Isolates the compiled set in the differential.
+    #[doc(hidden)]
+    pub async fn decide_with_for_test(
+        &self,
+        templates: &PolicySet,
+        role_names: &HashMap<uuid::Uuid, String>,
+        subject: &Subject,
+        action: &str,
+        resource: &Resource,
+    ) -> Result<Decision> {
+        let (ws, object_ids) = match resource {
+            Resource::Platform => (None, Vec::new()),
+            Resource::Workspace(w) => (Some(*w), Vec::new()),
+            Resource::Object(o) => (
+                Some(o.workspace_id),
+                match o.folder_id {
+                    Some(f) => vec![o.id, f],
+                    None => vec![o.id],
+                },
+            ),
+        };
+        let grants = self
+            .grants
+            .grants_for(subject.user_id, ws, &object_ids)
+            .await?;
+        self.decide_with(templates, role_names, &grants, subject, action, resource)
+            .await
+    }
+
     fn spawn_reload(&self, mut rx: broadcast::Receiver<RolesChanged>) {
         let db = self.db.clone();
         let inner = self.inner.clone();
@@ -264,8 +296,32 @@ impl Pdp for CedarPdp {
             .grants_for(subject.user_id, ws, &object_ids)
             .await?;
         let inner = self.inner.load();
-        let policies =
-            entities::link_grants(inner.templates.clone(), subject, &grants, &inner.role_names);
+        self.decide_with(
+            &inner.templates,
+            &inner.role_names,
+            &grants,
+            subject,
+            action,
+            resource,
+        )
+        .await
+    }
+}
+
+impl CedarPdp {
+    /// The decision body: link `grants` into `templates`, build the entities and
+    /// context, and ask Cedar. Shared by `authorize` (the live template set) and
+    /// the EO2 differential (an arbitrary template set).
+    async fn decide_with(
+        &self,
+        templates: &PolicySet,
+        role_names: &HashMap<uuid::Uuid, String>,
+        grants: &[Grant],
+        subject: &Subject,
+        action: &str,
+        resource: &Resource,
+    ) -> Result<Decision> {
+        let policies = entities::link_grants(templates.clone(), subject, grants, role_names);
         // The object's classification tag keys, so a classification `forbid` can
         // gate on `resource.tags.contains("<key>")`. ONE extra query, and only for
         // an Object resource; platform/workspace decisions carry no tags.
@@ -286,7 +342,7 @@ impl Pdp for CedarPdp {
         // Feed the admin-graph `forbid` its exemption flag: true iff the subject
         // holds a platform-scoped ALLOW grant on the `platform_admin` role. Computed
         // from the grants already loaded above — no extra query.
-        let is_admin = entities::holds_platform_admin(&grants, &inner.role_names);
+        let is_admin = entities::holds_platform_admin(grants, role_names);
         // The distinct role NAMES the subject holds (from the grants already
         // loaded), fed to the classification `forbid`'s `unless` clearance check.
         // ALLOW-effect grants only: a `deny`-effect grant strips access, so its
@@ -295,7 +351,7 @@ impl Pdp for CedarPdp {
         let roles: std::collections::BTreeSet<String> = grants
             .iter()
             .filter(|g| g.effect == "allow")
-            .filter_map(|g| inner.role_names.get(&g.role_id).cloned())
+            .filter_map(|g| role_names.get(&g.role_id).cloned())
             .collect();
         // The subject's group ids as strings (Access P3.4 clearance-by-group): the
         // classification `forbid`'s `unless` checks `context.groups.containsAny(..)`

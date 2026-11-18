@@ -3077,11 +3077,13 @@ dependencies = [
  "cedar-policy",
  "chrono",
  "egret-audit",
+ "egret-cedar",
  "egret-config",
  "egret-core",
  "egret-events",
  "egret-machine-idp",
  "egret-metastore",
+ "egret-perm-ir",
  "egret-secrets",
  "egret-test-db",
  "hex",
@@ -3341,6 +3343,21 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "egret-cedar"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cedar-policy",
+ "egret-core",
+ "egret-metastore",
+ "egret-test-db",
+ "serde_json",
+ "sqlx",
+ "tokio",
  "uuid",
 ]
 

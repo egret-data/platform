@@ -14,6 +14,7 @@ egret-config = { path = "crates/egret-config" }
 egret-metastore = { path = "crates/egret-metastore" }
 egret-server = { path = "crates/egret-server" }
 egret-auth = { path = "crates/egret-auth" }
+egret-cedar = { path = "crates/egret-cedar" }
 egret-workspace = { path = "crates/egret-workspace" }
 egret-storage = { path = "crates/egret-storage" }
 egret-iceberg-ext = { path = "crates/egret-iceberg-ext" }
