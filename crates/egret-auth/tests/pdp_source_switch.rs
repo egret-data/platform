@@ -3,6 +3,9 @@ use egret_auth::pdp::source_switch::{read_source, read_state, write_source, Poli
 use egret_auth::pdp::CedarPdp;
 use egret_metastore::Db;
 
+/// Serialises the tests that mutate the global switch row.
+static SWITCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn db() -> Db {
     let url = egret_test_db::url().await.expect("DATABASE_URL");
     let db = Db::connect(&url, 5).await.expect("connect");
@@ -20,6 +23,7 @@ async fn reset(db: &Db) {
 // One test body: the switch is a global singleton, so parallel tests would race.
 #[tokio::test]
 async fn switch_store_default_roundtrip_and_singleton() {
+    let _guard = SWITCH_LOCK.lock().await;
     let db = db().await;
     reset(&db).await;
 
@@ -72,4 +76,54 @@ async fn report_is_empty_on_a_normal_db() {
         divergences.is_empty(),
         "expected equivalence, got {divergences:?}"
     );
+}
+
+// One body: the switch is a global singleton shared by every test in this file.
+#[tokio::test]
+async fn each_state_serves_the_expected_assembler_and_fails_safe() {
+    let _guard = SWITCH_LOCK.lock().await;
+    let db = db().await;
+    reset(&db).await;
+    let legacy_ids = CedarPdp::legacy_ids_for_test(&db).await.expect("legacy");
+    let compiled_ids = CedarPdp::compiled_ids_for_test(&db)
+        .await
+        .expect("compiled");
+
+    // Absent row => legacy.
+    assert_eq!(
+        CedarPdp::served_policy_ids_for_test(&db).await.unwrap(),
+        legacy_ids
+    );
+    write_source(&db, PolicySource::Legacy, "t").await.unwrap();
+    assert_eq!(
+        CedarPdp::served_policy_ids_for_test(&db).await.unwrap(),
+        legacy_ids
+    );
+    write_source(&db, PolicySource::Shadow, "t").await.unwrap();
+    assert_eq!(
+        CedarPdp::served_policy_ids_for_test(&db).await.unwrap(),
+        legacy_ids,
+        "shadow serves legacy"
+    );
+    write_source(&db, PolicySource::Compiled, "t")
+        .await
+        .unwrap();
+    assert_eq!(
+        CedarPdp::served_policy_ids_for_test(&db).await.unwrap(),
+        compiled_ids,
+        "compiled serves compiled"
+    );
+
+    // Fail-safe: compiled build errors => legacy served, no error.
+    // Shadow with a compiled error also serves legacy.
+    for src in [PolicySource::Compiled, PolicySource::Shadow] {
+        assert_eq!(
+            CedarPdp::select_served_for_test(&db, src, true)
+                .await
+                .expect("never errors"),
+            legacy_ids,
+            "{src:?}: compiled error must serve legacy"
+        );
+    }
+    reset(&db).await;
 }

@@ -54,9 +54,113 @@ impl CedarPdp {
         Ok(pdp)
     }
 
-    /// Temporary shim (replaced in EO3 Task 3): always the legacy assembler.
+    /// EO3: the reload orchestrator. Reads the switch (fail-safe to legacy) and
+    /// returns the PdpInner to serve. `shadow`/`compiled` also build the compiled
+    /// set and compare it (a production-data canary); `compiled` serves it, failing
+    /// safe to legacy if the compiled build errors. Same signature as pre-EO3, so
+    /// `build` and `spawn_reload` are unchanged and the default (`legacy`) path is
+    /// byte-identical to before.
     async fn load_inner(db: &Db) -> Result<PdpInner> {
-        Self::build_legacy(db).await
+        use crate::pdp::source_switch::{read_source, PolicySource};
+        match read_source(db).await {
+            PolicySource::Legacy => Self::build_legacy(db).await,
+            source => {
+                // Build legacy too, so we keep comparing (canary) AND have a fail-safe.
+                let legacy = Self::build_legacy(db).await?;
+                let compiled = Self::build_compiled(db).await;
+                Ok(Self::select_served(source, legacy, compiled))
+            }
+        }
+    }
+
+    /// EO3: choose what to serve for a non-legacy state. `shadow` always serves
+    /// legacy; `compiled` serves the compiled set, failing safe to legacy (EO3-D5)
+    /// when the compiled build errored. Never errors: authz must not break.
+    pub(crate) fn select_served(
+        source: source_switch::PolicySource,
+        legacy: PdpInner,
+        compiled: Result<PdpInner>,
+    ) -> PdpInner {
+        use source_switch::PolicySource;
+        match (source, compiled) {
+            (PolicySource::Compiled, Ok(compiled)) => {
+                Self::log_shadow(&legacy, &compiled);
+                compiled
+            }
+            (PolicySource::Compiled, Err(e)) => {
+                tracing::error!(error = ?e, "EO3 compiled: compiled build failed; FAIL-SAFE to legacy");
+                legacy
+            }
+            (_, Ok(compiled)) => {
+                Self::log_shadow(&legacy, &compiled);
+                legacy
+            }
+            (_, Err(e)) => {
+                tracing::error!(error = ?e, "EO3 shadow: compiled build failed; serving legacy");
+                legacy
+            }
+        }
+    }
+
+    /// EO3: emit the shadow comparison result. Empty means equivalent (info); any
+    /// divergence yields a warn per entry plus a count, the operator's cutover signal.
+    fn log_shadow(legacy: &PdpInner, compiled: &PdpInner) {
+        let d = diff(legacy, compiled);
+        if d.is_empty() {
+            tracing::info!("EO3 shadow: legacy and compiled policy sets are equivalent");
+        } else {
+            tracing::warn!(divergences = d.len(), "EO3 shadow: policy sets DIVERGE");
+            for x in &d {
+                tracing::warn!(kind = ?x.kind, id = %x.id, detail = %x.detail, "EO3 shadow divergence");
+            }
+        }
+    }
+
+    fn ids_of(inner: &PdpInner) -> Vec<String> {
+        let mut ids: Vec<String> = inner
+            .templates
+            .templates()
+            .map(|t| t.id().to_string())
+            .chain(inner.templates.policies().map(|p| p.id().to_string()))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Test-only: ids (templates + policies, sorted) the live reload currently serves.
+    #[doc(hidden)]
+    pub async fn served_policy_ids_for_test(db: &Db) -> Result<Vec<String>> {
+        Ok(Self::ids_of(&Self::load_inner(db).await?))
+    }
+
+    /// Test-only: ids the legacy assembler produces.
+    #[doc(hidden)]
+    pub async fn legacy_ids_for_test(db: &Db) -> Result<Vec<String>> {
+        Ok(Self::ids_of(&Self::build_legacy(db).await?))
+    }
+
+    /// Test-only: ids the compiled assembler produces.
+    #[doc(hidden)]
+    pub async fn compiled_ids_for_test(db: &Db) -> Result<Vec<String>> {
+        Ok(Self::ids_of(&Self::build_compiled(db).await?))
+    }
+
+    /// Test-only: run the state selector with an injected compiled-build result
+    /// (the fail-safe seam: a real `build_compiled` error is hard to force from DB
+    /// rows, since both assemblers read the same tables). Returns served ids.
+    #[doc(hidden)]
+    pub async fn select_served_for_test(
+        db: &Db,
+        source: source_switch::PolicySource,
+        compiled_err: bool,
+    ) -> Result<Vec<String>> {
+        let legacy = Self::build_legacy(db).await?;
+        let compiled = if compiled_err {
+            Err(egret_core::Error::Internal(anyhow::anyhow!("injected")))
+        } else {
+            Self::build_compiled(db).await
+        };
+        Ok(Self::ids_of(&Self::select_served(source, legacy, compiled)))
     }
 
     /// The B1a `build` body: load roles + role_permissions, compile one template
