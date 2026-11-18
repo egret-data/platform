@@ -110,7 +110,15 @@ fn action_universe() -> Vec<(String, &'static str)> {
 }
 
 /// Seed one random state and return its (subject, resource, action) questions.
-async fn draw_state(db: &Db, rng: &mut Rng, idx: usize) -> Vec<Case> {
+///
+/// `pool` is the run-level role pool (builtins selected deterministically, then
+/// every role this run seeds), so the corpus is a pure function of the seed.
+async fn draw_state(
+    db: &Db,
+    rng: &mut Rng,
+    idx: usize,
+    pool: &mut Vec<(Uuid, String)>,
+) -> Vec<Case> {
     let universe = action_universe();
     let perm_keys: Vec<&str> = PERMISSIONS.iter().map(|p| p.key).collect();
 
@@ -122,11 +130,7 @@ async fn draw_state(db: &Db, rng: &mut Rng, idx: usize) -> Vec<Case> {
     ];
 
     // Roles: fresh ones (some with a parent in the same scope) plus the builtins.
-    let mut roles: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, scope FROM roles ORDER BY name")
-            .fetch_all(&db.pool)
-            .await
-            .unwrap();
+    let roles = pool;
     for _ in 0..(2 + rng.below(4)) {
         let scope = if rng.chance(0.4) {
             "platform"
@@ -154,6 +158,17 @@ async fn draw_state(db: &Db, rng: &mut Rng, idx: usize) -> Vec<Case> {
         }
         roles.push((id, scope.to_string()));
     }
+    // Actions the pool's roles actually carry: questions drawn from these hit
+    // the allow/deny boundary instead of being trivial denies.
+    let pool_ids: Vec<Uuid> = roles.iter().map(|(i, _)| *i).collect();
+    let carried: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT permission FROM role_permissions \
+         WHERE role_id = ANY($1) ORDER BY permission",
+    )
+    .bind(&pool_ids)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
     let plat: Vec<Uuid> = roles
         .iter()
         .filter(|(_, s)| s == "platform")
@@ -247,14 +262,20 @@ async fn draw_state(db: &Db, rng: &mut Rng, idx: usize) -> Vec<Case> {
     for (ui, u) in users.iter().enumerate() {
         for (rname, res) in &resources {
             for _ in 0..14 {
-                let (action, bucket) = rng.pick(&universe);
+                let (action, bucket) = if rng.chance(0.6) && !carried.is_empty() {
+                    let a = rng.pick(&carried).clone();
+                    (a, "carried")
+                } else {
+                    let (a, b) = rng.pick(&universe);
+                    (a.clone(), *b)
+                };
                 cases.push(Case {
                     subject: Subject {
                         user_id: *u,
                         group_ids: vec![],
                     },
                     resource: res.clone(),
-                    action: action.clone(),
+                    action,
                     note: format!("state{idx} user{ui} {rname} [{bucket}]"),
                 });
             }
@@ -321,8 +342,29 @@ async fn anchors(db: &Db) -> Vec<Case> {
     out
 }
 
-/// Compare both template sets over `cases`; returns how many were compared.
-async fn compare(db: &Db, pdp: &CedarPdp, cases: &[Case], diffs: &mut Vec<String>) -> usize {
+type Tally = std::collections::BTreeMap<(&'static str, bool), usize>;
+
+/// The coverage bucket of an action, via the EO0 classifier.
+fn bucket_of(action: &str) -> &'static str {
+    if egret_core::rbac::is_admin_graph(action) {
+        return "admin-graph";
+    }
+    match classify(action) {
+        Some(PermissionMapping::ObjectGrant { .. }) => "object-data",
+        Some(PermissionMapping::AdminGraphForbid) => "admin-graph",
+        _ => "typed",
+    }
+}
+
+/// Compare both template sets over `cases`, tallying the oracle's decisions per
+/// bucket; returns how many were compared.
+async fn compare(
+    db: &Db,
+    pdp: &CedarPdp,
+    cases: &[Case],
+    diffs: &mut Vec<String>,
+    tally: &mut Tally,
+) -> usize {
     // Both sets are pure over the current DB: compute once per batch.
     let (a_set, a_names) = CedarPdp::compiled_policy_set_for_test(db).await.unwrap();
     let ir =
@@ -342,6 +384,9 @@ async fn compare(db: &Db, pdp: &CedarPdp, cases: &[Case], diffs: &mut Vec<String
             )
             .await
             .unwrap();
+        *tally
+            .entry((bucket_of(&c.action), today.allow))
+            .or_default() += 1;
         if today.allow != compiled.allow {
             diffs.push(format!(
                 "[{}] action={} pdp={} egret-cedar={}",
@@ -371,34 +416,35 @@ async fn egret_cedar_decisions_agree_with_the_pdp() {
 
     let mut diffs: Vec<String> = Vec::new();
     let mut total = 0;
-    let mut allows = 0usize;
+    let mut tally = Tally::new();
+    // Deterministic builtin pool (migration-seeded roles only), grown by each state.
+    let mut pool: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, scope FROM roles WHERE name NOT LIKE 'eo2\\_%' ORDER BY scope, name",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
     for s in 0..STATES {
-        let cases = draw_state(&db, &mut rng, s).await;
-        total += compare(&db, &pdp, &cases, &mut diffs).await;
+        let cases = draw_state(&db, &mut rng, s, &mut pool).await;
+        total += compare(&db, &pdp, &cases, &mut diffs, &mut tally).await;
     }
     let anchor_cases = anchors(&db).await;
-    total += compare(&db, &pdp, &anchor_cases, &mut diffs).await;
-    // Non-vacuity: the corpus must contain both outcomes.
-    let (set, names) = CedarPdp::compiled_policy_set_for_test(&db).await.unwrap();
-    for c in &anchor_cases {
-        if pdp
-            .decide_with_for_test(&set, &names, &c.subject, &c.action, &c.resource)
-            .await
-            .unwrap()
-            .allow
-        {
-            allows += 1;
-        }
+    total += compare(&db, &pdp, &anchor_cases, &mut diffs, &mut tally).await;
+
+    eprintln!("cedar_differential: {total} cases compared; oracle decisions per bucket:");
+    for b in ["object-data", "typed", "admin-graph"] {
+        eprintln!(
+            "  {b:12} allow={:5} deny={:5}",
+            tally.get(&(b, true)).copied().unwrap_or(0),
+            tally.get(&(b, false)).copied().unwrap_or(0)
+        );
     }
-    assert!(
-        allows > 0 && allows < anchor_cases.len(),
-        "anchors must mix allow and deny"
-    );
-    eprintln!(
-        "cedar_differential: {total} cases compared, {} anchors allowed of {}",
-        allows,
-        anchor_cases.len()
-    );
+    // Coverage: a bucket that is all-allow or all-deny proves little.
+    let n = |b: &'static str, d: bool| tally.get(&(b, d)).copied().unwrap_or(0);
+    for b in ["object-data", "typed", "admin-graph"] {
+        assert!(n(b, true) > 0, "bucket {b} saw no ALLOW decisions");
+        assert!(n(b, false) > 0, "bucket {b} saw no DENY decisions");
+    }
     assert!(
         diffs.is_empty(),
         "egret-cedar diverged from the PDP on {} case(s):\n{}\n(reproduce with EGRET_CEDAR_DIFF_SEED={seed})",
