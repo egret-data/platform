@@ -118,6 +118,7 @@ pub enum DivergenceKind {
 /// One point where the legacy and compiled assemblers disagree. Expected to be
 /// EMPTY (EO2-D1: both reuse the same text formatters), so any entry is a signal.
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[schema(as = PdpDivergence)]
 pub struct Divergence {
     pub kind: DivergenceKind,
     /// PolicyId (Policy) or role uuid (RoleName).

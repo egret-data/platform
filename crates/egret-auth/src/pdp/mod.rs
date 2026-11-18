@@ -591,6 +591,38 @@ mod eo3_diff_tests {
         ps
     }
 
+    fn tset(texts: &[(&str, &str)]) -> PolicySet {
+        let mut ps = PolicySet::new();
+        for (id, body) in texts {
+            let pid: PolicyId = id.parse().unwrap();
+            ps.add_template(cedar_policy::Template::parse(Some(pid), *body).unwrap())
+                .unwrap();
+        }
+        ps
+    }
+
+    #[test]
+    fn differing_and_missing_templates_diverge() {
+        let legacy = PdpInner {
+            templates: tset(&[
+                ("t1", "permit(principal == ?principal, action, resource);"),
+                ("t2", "permit(principal == ?principal, action, resource);"),
+            ]),
+            role_names: HashMap::new(),
+        };
+        let compiled = PdpInner {
+            templates: tset(&[("t1", "forbid(principal == ?principal, action, resource);")]),
+            role_names: HashMap::new(),
+        };
+        let d = diff(&legacy, &compiled);
+        assert_eq!(d.len(), 2);
+        assert!(d.iter().all(|x| matches!(x.kind, DivergenceKind::Policy)));
+        assert!(d.iter().any(|x| x.id == "t1" && x.detail == "text differs"));
+        assert!(d
+            .iter()
+            .any(|x| x.id == "t2" && x.detail == "only in legacy"));
+    }
+
     #[test]
     fn identical_sets_have_no_divergence() {
         let a = pset(&[("p1", "permit(principal, action, resource);")]);

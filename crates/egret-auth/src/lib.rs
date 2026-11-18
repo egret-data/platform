@@ -94,6 +94,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     use utoipa::OpenApi as _;
     let mut doc = routes::AuthApi::openapi();
     doc.merge(oidc_routes::OidcApi::openapi());
+    doc.merge(pdp_source_routes::PdpSourceApi::openapi());
     doc
 }
 

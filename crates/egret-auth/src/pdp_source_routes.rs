@@ -11,7 +11,9 @@ use egret_events::EventBus;
 use egret_metastore::Db;
 
 use crate::events::RolesChanged;
-use crate::pdp::source_switch::{read_state, write_source, Divergence, PolicySource, SourceState};
+use crate::pdp::source_switch::{
+    read_state, write_source, Divergence, DivergenceKind, PolicySource, SourceState,
+};
 use crate::pdp::CedarPdp;
 use crate::principal::PlatformAuth;
 use crate::session::SessionService;
@@ -37,6 +39,15 @@ pub fn pdp_source_router() -> Router<PdpSourceState> {
         .route("/perm/pdp-source/switch", post(post_switch))
         .route("/perm/pdp-source/undo", post(post_undo))
 }
+
+/// OpenAPI fragment for the EO3 PDP-source operator endpoints. Merged into
+/// `egret_auth::openapi()`.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    paths(get_source, post_report, post_shadow, post_switch, post_undo),
+    components(schemas(SourceState, Divergence, DivergenceKind, PolicySource))
+)]
+pub struct PdpSourceApi;
 
 #[utoipa::path(
     get, path = "/api/control-plane/perm/pdp-source", tag = "control-plane-perm",
