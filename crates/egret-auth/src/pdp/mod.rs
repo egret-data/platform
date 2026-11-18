@@ -1,6 +1,7 @@
 //! Cedar-based policy decision point.
 pub mod audit;
 pub mod entities;
+pub mod source_switch;
 pub mod templates;
 
 pub use audit::AuditingPdp;
