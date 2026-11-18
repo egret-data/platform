@@ -3887,6 +3887,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         bus: bus.clone(),
     });
 
+    let cedar_grant = Some(egret_auth::cedar_grant_routes::CedarGrantState {
+        db: db.clone(),
+        sessions: sessions.clone(),
+        bus: bus.clone(),
+    });
+
     let app_state = AppState {
         db: Some(db),
         auth: Some(auth),
@@ -3901,6 +3907,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         control_plane,
         catalog_admin,
         pdp_source,
+        cedar_grant,
         policy_admin,
         perm,
         engine_mgmt,

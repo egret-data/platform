@@ -103,6 +103,7 @@ pub struct AppState {
     pub apps_pod: Option<egret_apps::PodApiState>,
     /// EO3 PDP policy-source switch endpoints; `None` in unit tests.
     pub pdp_source: Option<egret_auth::pdp_source_routes::PdpSourceState>,
+    pub cedar_grant: Option<egret_auth::cedar_grant_routes::CedarGrantState>,
 }
 
 impl AppState {
@@ -137,6 +138,7 @@ impl AppState {
             apps_api: None,
             apps_pod: None,
             pdp_source: None,
+            cedar_grant: None,
         }
     }
 
@@ -446,6 +448,19 @@ pub fn build_router(state: AppState) -> Router {
             )
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(ps);
+        router = router.merge(group);
+    }
+
+    if let Some(cg) = state.cedar_grant.clone() {
+        // EO4: platform-admin grant-source switch. Same /api/control-plane
+        // prefix + CSRF layer as the other admin routers.
+        let group = Router::new()
+            .nest(
+                "/api/control-plane",
+                egret_auth::cedar_grant_routes::cedar_grant_router(),
+            )
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(cg);
         router = router.merge(group);
     }
 
