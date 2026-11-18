@@ -8,7 +8,7 @@
 use egret_auth::pdp::CedarPdp;
 use egret_core::authz::{ObjectRef, Resource, Subject};
 use egret_core::rbac::{ADMIN_GRAPH_ACTIONS, PERMISSIONS};
-use egret_core::{UserId, WorkspaceId};
+use egret_core::{GroupId, UserId, WorkspaceId};
 use egret_events::EventBus;
 use egret_metastore::Db;
 use egret_perm_ir::egret_object::{classify, PermissionMapping};
@@ -50,6 +50,8 @@ struct Case {
     resource: Resource,
     action: String,
     note: String,
+    /// Hard expectation on the oracle's decision (deterministic anchors only).
+    expect: Option<bool>,
 }
 
 async fn seed_user(db: &Db) -> UserId {
@@ -84,6 +86,73 @@ async fn seed_role(db: &Db, scope: &str, parent: Option<Uuid>) -> Uuid {
     .fetch_one(&db.pool)
     .await
     .unwrap()
+}
+
+async fn seed_tag(db: &Db, label: &str) -> Uuid {
+    let k = Uuid::new_v4().simple().to_string();
+    sqlx::query_scalar("INSERT INTO tags (key, name) VALUES ($1, $2) RETURNING id")
+        .bind(format!("eo2_{k}"))
+        .bind(format!("{label} {k}"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+async fn tag_object(db: &Db, tag: Uuid, o: &ObjectRef) {
+    sqlx::query(
+        "INSERT INTO tag_assignments (tag_id, object_type, object_id) VALUES ($1, $2, $3) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(tag)
+    .bind(&o.kind)
+    .bind(o.id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+async fn classify_tag(db: &Db, tag: Uuid, roles: Vec<String>, groups: Vec<Uuid>) {
+    sqlx::query(
+        "INSERT INTO classification_policies (tag_id, required_roles, required_groups) \
+         VALUES ($1, $2, $3)",
+    )
+    .bind(tag)
+    .bind(roles)
+    .bind(groups)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+async fn role_name(db: &Db, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT name FROM roles WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+async fn grant(db: &Db, u: UserId, role: Uuid, scope: &str, scope_id: Option<Uuid>) {
+    sqlx::query(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id) \
+         VALUES ('user', $1, $2, $3, $4) ON CONFLICT DO NOTHING",
+    )
+    .bind(u.0)
+    .bind(role)
+    .bind(scope)
+    .bind(scope_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+async fn builtin_role(db: &Db, scope: &str, name: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM roles WHERE scope = $1 AND name = $2")
+        .bind(scope)
+        .bind(name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
 }
 
 /// Every action a question may ask: the whole catalog (object-data + typed) plus
@@ -192,6 +261,24 @@ async fn draw_state(
         })
         .collect();
 
+    // Classification: a role-gated tag, a group-gated tag and a role-OR-group
+    // tag, attached to random objects. users[1] is in the state's group.
+    let group = Uuid::new_v4();
+    let gated_role = role_name(db, *rng.pick(&pool_ids)).await;
+    for (roles, groups) in [
+        (vec![gated_role.clone()], vec![]),
+        (vec![], vec![group]),
+        (vec![gated_role], vec![group]),
+    ] {
+        let tag = seed_tag(db, "Clr").await;
+        classify_tag(db, tag, roles, groups).await;
+        for o in &objects {
+            if rng.chance(0.5) {
+                tag_object(db, tag, o).await;
+            }
+        }
+    }
+
     // Grants.
     for u in &users {
         for _ in 0..rng.below(5) {
@@ -272,11 +359,16 @@ async fn draw_state(
                 cases.push(Case {
                     subject: Subject {
                         user_id: *u,
-                        group_ids: vec![],
+                        group_ids: if ui == 1 {
+                            vec![GroupId(group)]
+                        } else {
+                            vec![]
+                        },
                     },
                     resource: res.clone(),
                     action,
                     note: format!("state{idx} user{ui} {rname} [{bucket}]"),
+                    expect: None,
                 });
             }
         }
@@ -309,7 +401,7 @@ async fn anchors(db: &Db) -> Vec<Case> {
     .execute(&db.pool)
     .await
     .unwrap();
-    let mut out = Vec::new();
+    let mut out = clearance_anchors(db).await;
     for (who, u) in [("admin", admin), ("plain", plain)] {
         for a in ADMIN_GRAPH_ACTIONS {
             out.push(Case {
@@ -320,6 +412,7 @@ async fn anchors(db: &Db) -> Vec<Case> {
                 resource: Resource::Platform,
                 action: a.to_string(),
                 note: format!("anchor {who} admin-graph"),
+                expect: None,
             });
         }
         for (res, tag) in [
@@ -335,8 +428,74 @@ async fn anchors(db: &Db) -> Vec<Case> {
                     resource: res.clone(),
                     action: a.to_string(),
                     note: format!("anchor {who} {tag}"),
+                    expect: None,
                 });
             }
+        }
+    }
+    out
+}
+
+/// Clearance anchors (EO-D4): ws_editor permit-holders reading tagged
+/// dashboards, cleared by role / by group / by platform_admin / not at all.
+async fn clearance_anchors(db: &Db) -> Vec<Case> {
+    let w = seed_workspace(db).await;
+    let editor = builtin_role(db, "workspace", "ws_editor").await;
+    let admin_role = builtin_role(db, "platform", "platform_admin").await;
+    let cleared_role = seed_role(db, "platform", None).await;
+    let cleared_name = role_name(db, cleared_role).await;
+    let group = Uuid::new_v4();
+    let by_role = ObjectRef {
+        kind: "dashboard".into(),
+        id: Uuid::new_v4(),
+        folder_id: None,
+        workspace_id: w,
+    };
+    let by_group = ObjectRef {
+        id: Uuid::new_v4(),
+        ..by_role.clone()
+    };
+    let t_role = seed_tag(db, "AnchorRole").await;
+    classify_tag(db, t_role, vec![cleared_name], vec![]).await;
+    tag_object(db, t_role, &by_role).await;
+    let t_group = seed_tag(db, "AnchorGroup").await;
+    classify_tag(db, t_group, vec![], vec![group]).await;
+    tag_object(db, t_group, &by_group).await;
+
+    let mut out = Vec::new();
+    for (name, with_role, with_group, is_admin, ok_role_tag, ok_group_tag) in [
+        ("cleared-by-role", true, false, false, true, false),
+        ("uncleared", false, false, false, false, false),
+        ("platform_admin", false, false, true, true, true),
+        ("cleared-by-group", false, true, false, false, true),
+    ] {
+        let u = seed_user(db).await;
+        grant(db, u, editor, "workspace", Some(w.0)).await;
+        if with_role {
+            grant(db, u, cleared_role, "platform", None).await;
+        }
+        if is_admin {
+            grant(db, u, admin_role, "platform", None).await;
+        }
+        let groups = if with_group {
+            vec![GroupId(group)]
+        } else {
+            vec![]
+        };
+        for (obj, tag, ok) in [
+            (&by_role, "role-tag", ok_role_tag),
+            (&by_group, "group-tag", ok_group_tag),
+        ] {
+            out.push(Case {
+                subject: Subject {
+                    user_id: u,
+                    group_ids: groups.clone(),
+                },
+                resource: Resource::Object(obj.clone()),
+                action: "dashboard:read".into(),
+                note: format!("clearance anchor {name} reads {tag}"),
+                expect: Some(ok),
+            });
         }
     }
     out
@@ -387,6 +546,9 @@ async fn compare(
         *tally
             .entry((bucket_of(&c.action), today.allow))
             .or_default() += 1;
+        if let Some(want) = c.expect {
+            assert_eq!(today.allow, want, "[{}] oracle decision", c.note);
+        }
         if today.allow != compiled.allow {
             diffs.push(format!(
                 "[{}] action={} pdp={} egret-cedar={}",
@@ -450,5 +612,81 @@ async fn egret_cedar_decisions_agree_with_the_pdp() {
         "egret-cedar diverged from the PDP on {} case(s):\n{}\n(reproduce with EGRET_CEDAR_DIFF_SEED={seed})",
         diffs.len(),
         diffs.join("\n"),
+    );
+}
+
+/// Teeth: a deliberately broken compile (admin-graph forbid dropped) MUST make
+/// the differential detect a divergence on an admin-graph action by a non-admin
+/// -- proving the harness is not vacuous.
+#[tokio::test]
+async fn differential_catches_a_dropped_admin_forbid() {
+    let Some(db) = connect().await else {
+        if std::env::var("EGRET_ALLOW_DB_SKIP").is_ok() {
+            eprintln!("skip: no DB");
+            return;
+        }
+        panic!("no DB and EGRET_ALLOW_DB_SKIP unset");
+    };
+    let bus = EventBus::new();
+    let pdp = CedarPdp::build(db.clone(), &bus).await.expect("pdp");
+
+    // A non-admin user holding a role that carries an admin-graph action key.
+    let action = ADMIN_GRAPH_ACTIONS[0];
+    let u = seed_user(&db).await;
+    let w = seed_workspace(&db).await;
+    let role = seed_role(&db, "workspace", None).await;
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
+        .bind(role)
+        .bind(action)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    grant(&db, u, role, "workspace", Some(w.0)).await;
+    let subject = Subject {
+        user_id: u,
+        group_ids: vec![],
+    };
+    let resource = Resource::Workspace(w);
+
+    let (a_set, a_names) = CedarPdp::compiled_policy_set_for_test(&db).await.unwrap();
+    let mut mutated =
+        egret_cedar::compile::compile(&egret_cedar::load::load_inputs(&db).await.unwrap()).unwrap();
+    // The admin-graph forbid is the one static policy that is not a classification.
+    let doomed: Vec<_> = mutated
+        .policy_set
+        .policies()
+        .filter(|p| p.template_id().is_none() && !p.id().to_string().starts_with("classification:"))
+        .map(|p| p.id().clone())
+        .collect();
+    assert_eq!(
+        doomed.len(),
+        1,
+        "expected exactly one admin-graph forbid, got {doomed:?}"
+    );
+    for id in doomed {
+        mutated.policy_set.remove_static(id).expect("remove forbid");
+    }
+
+    let today = pdp
+        .decide_with_for_test(&a_set, &a_names, &subject, action, &resource)
+        .await
+        .unwrap();
+    let broken = pdp
+        .decide_with_for_test(
+            &mutated.policy_set,
+            &mutated.role_names,
+            &subject,
+            action,
+            &resource,
+        )
+        .await
+        .unwrap();
+    eprintln!(
+        "teeth: action={action} oracle.allow={} mutated.allow={}",
+        today.allow, broken.allow
+    );
+    assert!(
+        today.allow != broken.allow,
+        "dropping the admin-graph forbid must change the decision for a non-admin on {action}"
     );
 }
