@@ -16,6 +16,7 @@
 //! is `egret-perm-compile`'s `ranger` module; the reads are its `ir_load`.
 
 pub mod audience;
+pub mod egret_object;
 pub mod enforcement;
 pub mod ep;
 pub mod lineage;
