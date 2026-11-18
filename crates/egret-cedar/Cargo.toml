@@ -8,6 +8,11 @@ license.workspace = true
 cedar-policy.workspace = true
 egret-core = { workspace = true }
 uuid.workspace = true
+egret-metastore.workspace = true
+sqlx.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+egret-test-db.workspace = true
+tokio.workspace = true

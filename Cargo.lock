@@ -3349,9 +3349,14 @@ dependencies = [
 name = "egret-cedar"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cedar-policy",
  "egret-core",
+ "egret-metastore",
+ "egret-test-db",
  "serde_json",
+ "sqlx",
+ "tokio",
  "uuid",
 ]
 

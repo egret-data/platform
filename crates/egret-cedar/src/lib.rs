@@ -4,4 +4,5 @@
 //! the same template set `load_inner` builds; `load` reads the legacy
 //! control-plane tables into `CompileInputs`. Not wired to the runtime (EO3).
 pub mod compile;
+pub mod load;
 pub mod text;
