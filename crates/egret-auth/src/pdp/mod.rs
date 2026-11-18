@@ -26,7 +26,7 @@ use source_switch::{Divergence, DivergenceKind};
 /// The compiled policy state the PDP authorizes against. Held behind an
 /// `ArcSwap` so a background task can atomically swap in a freshly-loaded set
 /// when the role/permission catalog changes, without blocking readers.
-struct PdpInner {
+pub(crate) struct PdpInner {
     templates: PolicySet,
     role_names: HashMap<uuid::Uuid, String>,
 }
