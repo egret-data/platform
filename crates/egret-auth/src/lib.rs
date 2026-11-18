@@ -14,6 +14,7 @@ pub mod oidc_cookie;
 pub mod oidc_routes;
 pub mod password;
 pub mod pdp;
+pub mod pdp_source_routes;
 pub mod preregistration;
 pub mod principal;
 pub mod roles;
