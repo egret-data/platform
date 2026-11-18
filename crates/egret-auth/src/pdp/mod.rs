@@ -142,16 +142,7 @@ impl CedarPdp {
         // a role force-granted one of these actions cannot escalate — a non-admin
         // is always denied. Fail-safe: a missing `is_platform_admin` flag ⇒ the
         // `unless` is false ⇒ the forbid applies ⇒ deny.
-        let actions = egret_core::rbac::ADMIN_GRAPH_ACTIONS
-            .iter()
-            .map(|a| format!("Egret::Action::\"{a}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let forbid_src = format!(
-            "forbid(principal, action in [{actions}], resource) \
-             unless {{ context has is_platform_admin && context.is_platform_admin }};"
-        );
-        let forbid: cedar_policy::Policy = forbid_src
+        let forbid: cedar_policy::Policy = egret_cedar::text::admin_graph_forbid()
             .parse()
             .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!("forbid policy: {e:?}")))?;
         templates
