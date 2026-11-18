@@ -133,6 +133,13 @@ impl CedarPdp {
         Ok(Self::ids_of(&Self::load_inner(db).await?))
     }
 
+    /// Test-only: ids (templates + policies, sorted) the LIVE PDP currently holds in
+    /// its `ArcSwap` (what `authorize` reads), as opposed to a fresh `load_inner`.
+    #[doc(hidden)]
+    pub fn live_served_ids_for_test(&self) -> Vec<String> {
+        Self::ids_of(&self.inner.load())
+    }
+
     /// Test-only: ids the legacy assembler produces.
     #[doc(hidden)]
     pub async fn legacy_ids_for_test(db: &Db) -> Result<Vec<String>> {

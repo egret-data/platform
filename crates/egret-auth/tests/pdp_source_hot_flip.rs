@@ -149,6 +149,13 @@ async fn pdp_hot_flips_between_sources_and_rolls_back() {
         let got = decisions(&pdp, &subject, w, other).await;
         assert_eq!(stable(&got), want, "decisions changed under {src:?}");
         if src == PolicySource::Compiled {
+            let compiled = CedarPdp::compiled_ids_for_test(&db).await.unwrap();
+            assert!(!compiled.is_empty());
+            assert_eq!(
+                pdp.live_served_ids_for_test(),
+                compiled,
+                "live PDP must hold the compiled set"
+            );
             assert_eq!(
                 CedarPdp::served_policy_ids_for_test(&db).await.unwrap(),
                 CedarPdp::compiled_ids_for_test(&db).await.unwrap(),
@@ -156,6 +163,13 @@ async fn pdp_hot_flips_between_sources_and_rolls_back() {
             );
         }
         if src == PolicySource::Legacy {
+            let legacy = CedarPdp::legacy_ids_for_test(&db).await.unwrap();
+            assert!(!legacy.is_empty());
+            assert_eq!(
+                pdp.live_served_ids_for_test(),
+                legacy,
+                "live PDP must hold the legacy set after rollback"
+            );
             assert_eq!(
                 CedarPdp::served_policy_ids_for_test(&db).await.unwrap(),
                 CedarPdp::legacy_ids_for_test(&db).await.unwrap(),
