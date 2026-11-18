@@ -10,7 +10,7 @@ Teach the governance IR to **compile the Cedar policy the control-plane PDP runs
 
 In scope:
 
-- A new compile backend `egret-perm-compile/src/cedar/` that renders a `cedar_policy::PolicySet` from the perm model via the existing `ir_load` + `lower_*` seam.
+- A new `egret-cedar` crate that renders the `cedar_policy::PolicySet` the PDP compiles today from a neutral input loaded from the legacy control-plane tables (role-templated Cedar does not fit the data-plane `Statement`/`lower_*` IR, so it carries its own input + loader rather than being an `egret-perm-compile` backend).
 - The `egret-cedar` capability-matrix entry in `egret-perm-ir/src/matrix.rs` (standalone, like `iceberg-rest`/`embedded-catalog` — not an `EpKind` row; egret has no engine or version axis).
 - Folding `classification_policies` + object `tags` + the clearance `containsAny` check into `withhold` rules compiled for `egret-cedar` (EO-D4), kept **in EO2** (one differential covers grants + typed privileges + admin-graph forbids + clearance).
 - A differential test proving decision-equivalence against today's PDP.
@@ -21,37 +21,40 @@ Out of scope (later sub-projects): switching `CedarPdp::load_inner` to consume t
 
 | # | Decision |
 |---|---|
-| EO2-D1 | **Emitter reuse.** The compiler reuses the PDP's *pure Cedar text formatters* (`template_for_role`, `deny_template_for_role`, `classification_forbid`, and the entity/uid builders in `entities.rs`), relocated to a shared home both `egret-auth` and `egret-perm-compile` depend on. The compiler **selects and links** policies from the lowered IR, not from the bespoke DB queries. What EO3 replaces is therefore the *data source* (bespoke SQL → IR), not the Cedar text shape. DRY; the differential exercises the IR lowering/linking, not re-typed string templates. |
-| EO2-D2 | **Differential shape.** Cedar-vs-Cedar over a seeded test DB: each generated state is seeded into the DB; the "today" `PolicySet` is built through the PDP's own load path and the "IR" `PolicySet` through the new compiler, from the *same* state; `cedar_policy::Authorizer` answers both sides for every (principal, object, action) case; the test asserts identical `Decision.allow`. Corpus = seeded PRNG generator + deterministic regression anchors, mirroring `opa_differential.rs`. Both oracles are Cedar in-process, so there is no external engine and no `EGRET_TEST_*` JVM gate — only a test DB. |
-| EO2-D3 | **Matrix placement.** `egret-cedar` is a standalone matrix target (`EGRET_CEDAR` const + privilege table + effect table + `egret_cedar_support(cap)` + `egret_cedar_gap(cap)`), leaving the Ranger/OPA `ENTRIES` untouched — exactly the `iceberg_rest_*` pattern. Object grants and typed privileges are **Native**; `withhold` (clearance) is **Native** (Cedar `forbid`); `mask` and `row filter` are **not applicable** (no columns/rows at this layer); any unmeasured combination → `Missing(NotMeasured)` → deny "not measured" (EO-D7). |
+| EO2-D1 | **Emitter reuse, in a new `egret-cedar` crate.** The pure Cedar text formatters (`template_for_role`, `deny_template_for_role`, `classification_forbid`, and the admin-graph `forbid` builder currently inline in `load_inner`) move into a new `egret-cedar` crate; `egret-auth` depends on it and its PDP re-uses them, so behaviour is byte-identical. The new compiler (also in `egret-cedar`) **assembles the same template set** from a neutral input, using those formatters. What EO3 replaces is the *data source* (`load_inner`'s bespoke SQL → the compiler), not the Cedar text shape. Role-templated Cedar does **not** fit the data-plane `Statement`/`lower_*` IR (no `Path`), so `egret-cedar` carries its own small input + loader — it is not an `egret-perm-compile` backend beside ranger/opa. |
+| EO2-D2 | **Differential shape and home.** The *compiled artifact* is the template `PolicySet` (per-role permit/forbid templates + admin-graph `forbid` + classification `forbid`s) plus the `role_names` map — exactly `PdpInner`. Grant→resource **links** stay request-time (`entities.rs`) and are applied to *both* sides by the same machinery, so the differential isolates the compiled set. Cedar-vs-Cedar over a seeded test DB: each generated state is seeded; the "today" set is built through the PDP's own `load_inner`, the "IR" set through the new compiler, from the *same* DB; `cedar_policy::Authorizer` answers both for every (principal, object, action) case; the test asserts identical `Decision.allow`. Corpus = seeded PRNG generator + deterministic regression anchors, mirroring `opa_differential.rs`. The differential lives in **`egret-auth/tests`** — the only crate that sees both the live PDP (the oracle) and `egret-cedar` — not in `egret-perm-compile/tests`. Both sides are Cedar in-process, so there is no external engine and no `EGRET_TEST_*` JVM gate; it is a normal test-DB test CI runs. |
+| EO2-D3 | **Matrix placement.** `egret-cedar` is a standalone matrix target in `egret-perm-ir/src/matrix.rs` (`EGRET_CEDAR` const + privilege table + effect table + `egret_cedar_support(cap)` + `egret_cedar_gap(cap)`), leaving the Ranger/OPA `ENTRIES` untouched — exactly the `iceberg_rest_*` pattern. Object grants and typed privileges are **Native**; `withhold` (clearance) is **Native** (Cedar `forbid`); `mask` and `row filter` are **not applicable** (no columns/rows at this layer) → a new `ReasonCode::NotApplicable` so "not applicable" is distinguishable from "not measured"; any other combination → `Missing(NotMeasured)` → deny "not measured" (EO-D7). |
 | EO2-D4 | **Action set from one catalog.** The compiler drives its action set from `egret_core::rbac::PERMISSIONS` + `ADMIN_GRAPH_ACTIONS` through `egret_object::classify`, the same catalog the PDP and EO1 read — no second action list. |
 | EO2-D5 | **No new policy decisions.** EO2 reproduces today's policy *shape* only. Every allow/deny the compiled set produces must already be produced by the PDP; proving that is the differential's whole job. |
 
 ## Architecture
 
 ```text
- perm model + egret-object        Neutral IR (lower_*)        egret-cedar backend         Artifact
- securables, grants, rules,  ──►   Lowered{ statements,  ──►   select + link policies ──►  cedar_policy::
- classification, EP config         lowerings }                 via shared formatters       PolicySet (in memory)
-   (ir_load::load_ep + inputs)     capability matrix           (EO2-D1)                    + golden for tests
-                                        ▲
-                                  egret-cedar matrix entry
+ legacy control-plane tables       egret-cedar crate (new)              Artifact / proof
+ roles, role_permissions,     ──►  load_inputs(db) ─► CompileInputs ─►  cedar_policy::PolicySet
+ classification_policies, tags      compile(&inputs) via shared          (role templates + forbids)
+   (source migrates to perm.*        text formatters                     + role_names
+    at EO4, not here)                                            ──────► differential (in egret-auth):
+                                                                         compile() vs load_inner(),
+ egret-auth PDP ─ load_inner() ───────────────────────────────►         same decisions over a corpus
+   (unchanged at runtime; now calls the shared formatters)
 ```
 
-The shared formatters (EO2-D1) are the single source of Cedar policy text. Today the PDP feeds them from SQL (`load_inner`); EO2 adds a second feeder — the IR — and the differential proves the two feeders yield decision-equivalent policy. EO3 will delete the SQL feeder.
+The shared text formatters (EO2-D1) are the single source of Cedar policy text. Today the PDP feeds them from SQL in `load_inner`; EO2 adds a second feeder — `egret-cedar`'s `compile(load_inputs(db))` — and the differential proves the two feeders yield decision-equivalent policy. The grant **source** is still the legacy tables (it migrates to `perm.*` at EO4); the policy **generator** is what EO3 switches (`load_inner` → `compile`). EO2 wires neither — it only adds the compiler, the matrix entry, and the proof.
 
 ### What the compiler emits (equivalent to the PDP today)
 
 Mapped from the recon of `egret-auth/src/pdp/`:
 
-| PDP today | egret-cedar compiler input | Output policy |
+| PDP today (`load_inner`) | `egret-cedar` compiler | Output policy |
 |---|---|---|
-| per-role permit/forbid templates (`roles`+`role_permissions`, effective-perms) | role statements lowered from the IR; actions partitioned by `classify` (object-grant vs typed) | `template_for_role` / `deny_template_for_role`, PolicyId `role:{id}` / `role-deny:{id}` |
-| per-request grant links (`entities::link_grants`) | lowered grant statements (allow/deny, platform/workspace/object scope) | template links `grant-{i}`, slots principal=user, resource=scope uid |
-| `ADMIN_GRAPH_ACTIONS` → one static forbid | `classify` → `AdminGraphForbid` | the same `forbid(… action in [admin-graph] …) unless is_platform_admin` |
-| `classification_policies` + object `tags` + clearance `containsAny` | `withhold` rules lowered for `egret-cedar` (EO-D4) | `classification_forbid(tag_key, required_roles, required_groups)`, PolicyId `classification:{tag_id}` |
-| request context `{is_platform_admin, roles (allow-grants only), groups}` | assembled from the same subject/grants inputs | unchanged context JSON |
-| entity scheme `User/Group/Role/Platform/Workspace/Folder/Object"{kind}:{id}"` | `egret_object::EgretSecurable` ids already mesh with this scheme | same `Entities` |
+| per-role permit/forbid templates (`roles`+`role_permissions`, effective perms) | `RoleInput{id,name,scope,effective_perms}` from `load_inputs` → `compile` | `template_for_role` / `deny_template_for_role`, PolicyId `role:{id}` / `role-deny:{id}` (every effective perm listed, same as today) |
+| `ADMIN_GRAPH_ACTIONS` → one static forbid | `admin_graph_forbid()` (shared) | the same `forbid(… action in [admin-graph] …) unless is_platform_admin` |
+| `classification_policies` + `tags` + clearance `containsAny` | `ClassificationInput{tag_id,key,required_roles,required_groups}` → `compile` (both-empty skipped, malformed skipped, as today) | `classification_forbid(tag_key, required_roles, required_groups)`, PolicyId `classification:{tag_id}` |
+| per-request grant links (`entities::link_grants`) | **unchanged, request-time**; applied to both sides in the differential | template links `grant-{i}` |
+| request context `{is_platform_admin, roles (allow-grants only), groups}` | **unchanged, request-time**; assembled once, fed to both sides | unchanged context JSON |
+
+`egret_object` (EO1) is not needed to reproduce the templates — `template_for_role` already lists every effective perm as an action regardless of bucket. EO1's `classify`/`ObjectKind` instead drive **test coverage** here: the differential's action corpus and the matrix tests iterate `rbac::PERMISSIONS` through `classify` so object-data, typed, and admin-graph buckets are all exercised, and object ids use the `"{kind}:{uuid}"` scheme EO1's `EgretSecurable` already matches. The object-data-vs-typed grant **split** becomes load-bearing at EO4 (when the grant source moves to `perm.*`), not here.
 
 ### Capability matrix entry
 
@@ -82,11 +85,11 @@ EGRET_CEDAR = "egret-cedar"
 
 ## Files (indicative; the plan fixes exact paths)
 
-- Relocate the pure Cedar formatters out of `egret-auth/src/pdp/{templates,entities}.rs` into a shared module both crates use (EO2-D1); `egret-auth` keeps its SQL load path, now calling the shared formatters.
-- `egret-perm-ir/src/matrix.rs` — add the `EGRET_CEDAR` entry + `egret_cedar_support`/`gap` (+ tests).
-- `egret-perm-compile/src/cedar/` (new) — the backend: `mod.rs` (compile entry), policy selection + linking from the lowered IR, render to `PolicySet`; `Cargo.toml` gains the `cedar-policy` dep.
-- `egret-perm-compile/tests/cedar_differential.rs` (new) — the differential, mirroring `opa_differential.rs` (seeded state/question generator + anchors + the Cedar-vs-Cedar comparison).
-- Compiler golden fixtures under `egret-perm-compile/tests/` for test 2.
+- `crates/egret-cedar/` (new workspace member) — `src/text.rs` (the pure formatters moved from `egret-auth/src/pdp/templates.rs`, plus `admin_graph_forbid()` extracted from `load_inner`, plus the PolicyId helpers); `src/compile.rs` (`CompileInputs`/`RoleInput`/`ClassificationInput`, `compile(&CompileInputs) -> Compiled{policy_set, role_names}`); `src/load.rs` (`load_inputs(db) -> CompileInputs`, reading the legacy tables). `Cargo.toml` deps: `cedar-policy`, `egret-core`, `egret-metastore`, `uuid`.
+- `egret-auth` — depends on `egret-cedar`; `pdp/templates.rs` re-exports the moved formatters (so `entities.rs`'s call sites are unchanged) and `load_inner` calls `egret_cedar::text::admin_graph_forbid()`. Runtime behaviour byte-identical. A `#[doc(hidden)]` test accessor exposes `load_inner`'s `(PolicySet, RoleNames)` for the differential.
+- `egret-perm-ir/src/statement.rs` — add `ReasonCode::NotApplicable`. `egret-perm-ir/src/matrix.rs` — add the `EGRET_CEDAR` entry + `egret_cedar_support`/`gap` (+ tests). `ENTRIES` untouched.
+- `egret-auth/tests/cedar_differential.rs` (new) — the differential, mirroring `opa_differential.rs` (seeded state generator + anchors + the Cedar-vs-Cedar comparison), with a teeth test proving a seeded mutation is caught.
+- Compiler golden assertions live in `egret-cedar`'s own unit tests.
 
 ## Docs
 
