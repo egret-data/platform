@@ -33,6 +33,46 @@ pub struct AccessGrantStore {
 }
 
 impl AccessGrantStore {
+    /// EO4: backfill `perm.cedar_grants` from the rows that predate the mirror
+    /// trigger (0240). Idempotent: upsert on id. The trigger keeps future writes in
+    /// sync, so this is a one-time catch-up (re-runnable). Returns the row count.
+    pub async fn fold(&self) -> Result<u64> {
+        let r = sqlx::query(
+            "INSERT INTO perm.cedar_grants \
+               (id, principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect, expires_at) \
+             SELECT id, principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect, expires_at \
+             FROM access_grants \
+             ON CONFLICT (id) DO UPDATE SET \
+               principal_type = EXCLUDED.principal_type, principal_id = EXCLUDED.principal_id, \
+               role_id = EXCLUDED.role_id, scope_type = EXCLUDED.scope_type, scope_id = EXCLUDED.scope_id, \
+               object_type = EXCLUDED.object_type, effect = EXCLUDED.effect, expires_at = EXCLUDED.expires_at",
+        )
+        .execute(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        // Provenance (EO4-D5, refined): the mirror is a maintained replica, so each
+        // row's origin is carried as its own id (= access_grants.id); the fold/flip
+        // event is audited by the switch row (switched_at/switched_by) and the
+        // endpoint actor. No separate provenance table (perm.migrated_from is
+        // Ranger-policy-specific and does not fit).
+        tracing::info!(
+            rows = r.rows_affected(),
+            "EO4 fold: backfilled perm.cedar_grants from access_grants"
+        );
+        Ok(r.rows_affected())
+    }
+
+    /// EO4: empty the mirror (used by undo after the switch is back to legacy, and by
+    /// tests). The trigger refills it on the next access_grants write; `fold` refills
+    /// it fully. Never called while `unified`.
+    pub async fn clear_mirror(&self) -> Result<()> {
+        sqlx::query("DELETE FROM perm.cedar_grants")
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     pub fn new(db: Db) -> Self {
         Self { db }
     }
