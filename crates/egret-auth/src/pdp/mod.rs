@@ -636,4 +636,42 @@ mod eo3_diff_tests {
         assert_eq!(d.len(), 1);
         assert!(matches!(d[0].kind, DivergenceKind::RoleName));
     }
+
+    /// Routing guard: the two inputs are provably distinguishable (different
+    /// policy ids and role names), so serving the wrong side fails an assertion.
+    #[test]
+    fn select_served_routes_by_state() {
+        use source_switch::PolicySource;
+        let r = uuid::Uuid::from_u128(7);
+        let legacy = || PdpInner {
+            templates: pset(&[("legacyA", "permit(principal, action, resource);")]),
+            role_names: HashMap::from([(r, "legacy-role".to_string())]),
+        };
+        let compiled = || PdpInner {
+            templates: pset(&[("compiledB", "permit(principal, action, resource);")]),
+            role_names: HashMap::from([(r, "compiled-role".to_string())]),
+        };
+        let is_legacy = |i: &PdpInner| {
+            i.role_names[&r] == "legacy-role"
+                && i.templates
+                    .policies()
+                    .any(|p| p.id().to_string() == "legacyA")
+        };
+        let is_compiled = |i: &PdpInner| {
+            i.role_names[&r] == "compiled-role"
+                && i.templates
+                    .policies()
+                    .any(|p| p.id().to_string() == "compiledB")
+        };
+        let err = || Err(egret_core::Error::Internal(anyhow::anyhow!("boom")));
+
+        let out = CedarPdp::select_served(PolicySource::Compiled, legacy(), Ok(compiled()));
+        assert!(is_compiled(&out), "compiled+Ok must serve compiled");
+        let out = CedarPdp::select_served(PolicySource::Shadow, legacy(), Ok(compiled()));
+        assert!(is_legacy(&out), "shadow+Ok must serve legacy");
+        let out = CedarPdp::select_served(PolicySource::Compiled, legacy(), err());
+        assert!(is_legacy(&out), "compiled+Err must fail safe to legacy");
+        let out = CedarPdp::select_served(PolicySource::Shadow, legacy(), err());
+        assert!(is_legacy(&out), "shadow+Err must serve legacy");
+    }
 }
