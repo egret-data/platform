@@ -1345,8 +1345,10 @@ mod tests {
         // Tie EO1's classify to the matrix: each object-data key's privilege is
         // Native on egret-cedar (object grants are enforced by Cedar directly).
         use crate::egret_object::{classify, PermissionMapping};
+        let mut count = 0;
         for p in egret_core::rbac::PERMISSIONS {
             if let Some(PermissionMapping::ObjectGrant { privilege, .. }) = classify(p.key) {
+                count += 1;
                 assert_eq!(
                     egret_cedar_support(&Capability::EnforcePrivilege(privilege)),
                     Support::Native,
@@ -1355,5 +1357,6 @@ mod tests {
                 );
             }
         }
+        assert!(count > 0, "no object-data grant keys were exercised");
     }
 }

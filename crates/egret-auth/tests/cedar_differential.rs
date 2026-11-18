@@ -686,7 +686,9 @@ async fn differential_catches_a_dropped_admin_forbid() {
         today.allow, broken.allow
     );
     assert!(
-        today.allow != broken.allow,
-        "dropping the admin-graph forbid must change the decision for a non-admin on {action}"
+        !today.allow && broken.allow,
+        "dropping the admin-graph forbid must flip deny -> allow for a non-admin on {action} (oracle allow={}, mutated allow={})",
+        today.allow,
+        broken.allow
     );
 }

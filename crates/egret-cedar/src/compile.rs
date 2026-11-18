@@ -92,13 +92,10 @@ pub fn compile(inputs: &CompileInputs) -> Result<Compiled, CompileError> {
         if c.required_roles.is_empty() && c.required_groups.is_empty() {
             continue;
         }
-        let pid: PolicyId = match text::classification_id(c.tag_id).parse() {
-            Ok(p) => p,
-            Err(_) => {
-                skipped_classifications.push(c.tag_id);
-                continue;
-            }
-        };
+        // A bad PolicyId propagates (as load_inner's `?`), it is not skipped.
+        let pid: PolicyId = text::classification_id(c.tag_id)
+            .parse()
+            .map_err(|e| CompileError::Policy(format!("classification id: {e:?}")))?;
         match Policy::parse(
             Some(pid),
             text::classification_forbid(&c.key, &c.required_roles, &c.required_groups),
