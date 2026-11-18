@@ -4,6 +4,7 @@
 //! migration, no compiler or runtime wiring (that is EO2–EO4). See
 //! docs/en/specs/2026-11-18-gov-eo0-egret-objects-decomposition-design.md.
 
+use crate::statement::Privilege;
 use uuid::Uuid;
 
 /// An egret object kind that is a securable (EO-D6). The string spellings are
@@ -85,6 +86,53 @@ impl EgretSecurable {
     }
 }
 
+/// Where a permission key sits in the one grant model (EO-D3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMapping {
+    /// An object-data grant on a securable of this kind.
+    ObjectGrant { kind: ObjectKind, privilege: Privilege },
+    /// A typed privilege on the `egret-cedar` enforcement point (an
+    /// entitlement, not a securable grant): engine/catalog/workspace/etc.
+    /// capabilities and non-data object verbs (`certify`, `invoke`).
+    TypedEpPrivilege,
+    /// A non-delegatable admin-graph action the PDP `forbid`s for everyone but
+    /// `platform_admin`. Never a grant. These are `rbac::ADMIN_GRAPH_ACTIONS`,
+    /// which are not in `rbac::PERMISSIONS`.
+    AdminGraphForbid,
+}
+
+/// Classify an `egret_core::rbac` permission key (either a `PERMISSIONS` key or
+/// an `ADMIN_GRAPH_ACTIONS` key) into the one grant model. `None` for a string
+/// that is neither — callers treat an unknown key as un-mappable (fail closed).
+pub fn classify(key: &str) -> Option<PermissionMapping> {
+    // Object-data grants: the only keys that become securable grants (EO-D3).
+    let object_grant = |kind: ObjectKind, privilege: Privilege| {
+        Some(PermissionMapping::ObjectGrant { kind, privilege })
+    };
+    match key {
+        "dashboard:read" => return object_grant(ObjectKind::Dashboard, Privilege::Read),
+        "dashboard:manage" => return object_grant(ObjectKind::Dashboard, Privilege::Manage),
+        "chart:read" => return object_grant(ObjectKind::Chart, Privilege::Read),
+        "chart:manage" => return object_grant(ObjectKind::Chart, Privilege::Manage),
+        "dataset:read" => return object_grant(ObjectKind::Dataset, Privilege::Read),
+        "dataset:manage" => return object_grant(ObjectKind::Dataset, Privilege::Manage),
+        "saved_query:read" => return object_grant(ObjectKind::SavedQuery, Privilege::Read),
+        "saved_query:manage" => return object_grant(ObjectKind::SavedQuery, Privilege::Manage),
+        "app:read" => return object_grant(ObjectKind::App, Privilege::Read),
+        "app:write" => return object_grant(ObjectKind::App, Privilege::Write),
+        "app:manage" => return object_grant(ObjectKind::App, Privilege::Manage),
+        "data_api_endpoint:read" => {
+            return object_grant(ObjectKind::DataApiEndpoint, Privilege::Read)
+        }
+        "data_api_endpoint:manage" => {
+            return object_grant(ObjectKind::DataApiEndpoint, Privilege::Manage)
+        }
+        _ => {}
+    }
+    // Typed vs admin-graph handled in Task 4.
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +170,34 @@ mod tests {
             .parent(),
             Some(Parent::Folder(folder)),
         );
+    }
+
+    #[test]
+    fn classify_object_data_grants() {
+        use ObjectKind::*;
+        use Privilege::*;
+        let cases: &[(&str, ObjectKind, Privilege)] = &[
+            ("dashboard:read", Dashboard, Read),
+            ("dashboard:manage", Dashboard, Manage),
+            ("chart:read", Chart, Read),
+            ("chart:manage", Chart, Manage),
+            ("dataset:read", Dataset, Read),
+            ("dataset:manage", Dataset, Manage),
+            ("saved_query:read", SavedQuery, Read),
+            ("saved_query:manage", SavedQuery, Manage),
+            ("app:read", App, Read),
+            ("app:write", App, Write),
+            ("app:manage", App, Manage),
+            ("data_api_endpoint:read", DataApiEndpoint, Read),
+            ("data_api_endpoint:manage", DataApiEndpoint, Manage),
+        ];
+        assert_eq!(cases.len(), 13);
+        for (key, kind, priv_) in cases {
+            assert_eq!(
+                classify(key),
+                Some(PermissionMapping::ObjectGrant { kind: *kind, privilege: *priv_ }),
+                "key {key}",
+            );
+        }
     }
 }
