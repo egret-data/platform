@@ -5,6 +5,7 @@
 //! docs/en/specs/2026-11-18-gov-eo0-egret-objects-decomposition-design.md.
 
 use crate::statement::Privilege;
+use egret_core::rbac;
 use uuid::Uuid;
 
 /// An egret object kind that is a securable (EO-D6). The string spellings are
@@ -129,7 +130,18 @@ pub fn classify(key: &str) -> Option<PermissionMapping> {
         }
         _ => {}
     }
-    // Typed vs admin-graph handled in Task 4.
+    // Admin-graph actions are forbids, never grants. These are not in
+    // `PERMISSIONS`; check them explicitly.
+    if rbac::is_admin_graph(key) {
+        return Some(PermissionMapping::AdminGraphForbid);
+    }
+    // Every other known permission is a typed EP privilege (EO-D3): engine,
+    // catalog, storage, secret, policy, tag, workspace, user, group, role,
+    // service_account, workflow, alert, query, and the non-data object verbs
+    // (certify, invoke).
+    if rbac::is_known(key) {
+        return Some(PermissionMapping::TypedEpPrivilege);
+    }
     None
 }
 
@@ -199,5 +211,48 @@ mod tests {
                 "key {key}",
             );
         }
+    }
+
+    #[test]
+    fn every_permissions_key_is_classified() {
+        // Count guard (chokepoint): adding an rbac permission trips this until
+        // the author classifies the new key as an object grant or a typed EP
+        // privilege. If you add a key and this fails, update classify() and
+        // this count, deciding deliberately which bucket the key belongs in.
+        const OBJECT_GRANT_KEYS: usize = 13;
+
+        let mut object_grants = 0usize;
+        for p in rbac::PERMISSIONS {
+            match classify(p.key) {
+                Some(PermissionMapping::ObjectGrant { .. }) => object_grants += 1,
+                Some(PermissionMapping::TypedEpPrivilege) => {}
+                other => panic!("rbac key {} classified as {other:?}", p.key),
+            }
+        }
+        assert_eq!(object_grants, OBJECT_GRANT_KEYS, "object-grant key count drifted");
+    }
+
+    #[test]
+    fn admin_graph_actions_are_forbids() {
+        for key in rbac::ADMIN_GRAPH_ACTIONS {
+            assert_eq!(
+                classify(key),
+                Some(PermissionMapping::AdminGraphForbid),
+                "admin-graph key {key}",
+            );
+        }
+    }
+
+    #[test]
+    fn non_data_object_verbs_are_typed() {
+        for key in ["dashboard:certify", "dataset:certify", "data_api_endpoint:invoke"] {
+            assert_eq!(classify(key), Some(PermissionMapping::TypedEpPrivilege), "key {key}");
+        }
+    }
+
+    #[test]
+    fn unknown_key_is_none() {
+        assert_eq!(classify("nonsense:frobnicate"), None);
+        assert_eq!(classify(""), None);
     }
 }
