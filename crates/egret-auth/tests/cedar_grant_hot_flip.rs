@@ -5,7 +5,7 @@
 
 use egret_auth::events::RolesChanged;
 use egret_auth::grants::AccessGrantStore;
-use egret_auth::pdp::grant_source_switch::{write_source, GrantSource};
+use egret_auth::pdp::grant_source_switch::{read_source, write_source, GrantSource};
 use egret_auth::pdp::CedarPdp;
 use egret_auth::roles::RoleRepo;
 use egret_core::authz::{Pdp, Resource, Subject};
@@ -225,6 +225,7 @@ async fn grant_source_hot_flips_stays_live_and_rolls_back() {
         .await
         .unwrap();
     barrier().await;
+    assert_eq!(read_source(&db).await, GrantSource::Unified);
     assert_eq!(
         decisions(&pdp, &subject, w, other).await,
         baseline,
@@ -276,6 +277,54 @@ async fn grant_source_hot_flips_stays_live_and_rolls_back() {
     .await;
     assert!(denied, "removed grant must stop allowing under Unified");
     assert_eq!(decisions(&pdp, &subject, w, other).await, baseline);
+
+    // Phase 3b (DISCRIMINATING): a unified-store-ONLY row (absent from access_grants).
+    // Only passes if grants_for routes to perm.cedar_grants under Unified, and Legacy
+    // must not see it. Cleanup deletes perm.cedar_grants by principal_id = user.
+    let only_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO perm.cedar_grants (id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at) \
+         VALUES ($1,'user',$2,$3,'workspace',$4,NULL,'allow',NULL)",
+    )
+    .bind(only_id)
+    .bind(u.0)
+    .bind(manage_role)
+    .bind(other.0)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    bus.publish(RolesChanged);
+    let manage_other = || async {
+        pdp.authorize(&subject, "dashboard:manage", &Resource::Workspace(other))
+            .await
+            .unwrap()
+            .allow
+    };
+    assert!(
+        poll_until(manage_other, Duration::from_secs(5)).await,
+        "Unified must route to perm.cedar_grants (row exists only there)"
+    );
+    write_source(&db, GrantSource::Legacy, "e2e@egret.local")
+        .await
+        .unwrap();
+    bus.publish(RolesChanged);
+    assert!(
+        poll_until(|| async { !manage_other().await }, Duration::from_secs(5)).await,
+        "Legacy must NOT see the unified-only row"
+    );
+    sqlx::query("DELETE FROM perm.cedar_grants WHERE id = $1")
+        .bind(only_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    write_source(&db, GrantSource::Unified, "e2e@egret.local")
+        .await
+        .unwrap();
+    bus.publish(RolesChanged);
+    assert!(
+        poll_until(|| async { !manage_other().await }, Duration::from_secs(5)).await,
+        "unified-only row deleted"
+    );
 
     // Phase 4: rollback to Legacy.
     write_source(&db, GrantSource::Legacy, "e2e@egret.local")
