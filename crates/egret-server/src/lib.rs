@@ -101,6 +101,8 @@ pub struct AppState {
     /// Data Apps pod API (`/api/apps/pod/…`): a pod token, no cookie, so no CSRF
     /// layer; `None` in unit tests.
     pub apps_pod: Option<egret_apps::PodApiState>,
+    /// EO3 PDP policy-source switch endpoints; `None` in unit tests.
+    pub pdp_source: Option<egret_auth::pdp_source_routes::PdpSourceState>,
 }
 
 impl AppState {
@@ -134,6 +136,7 @@ impl AppState {
             apps: None,
             apps_api: None,
             apps_pod: None,
+            pdp_source: None,
         }
     }
 
@@ -430,6 +433,19 @@ pub fn build_router(state: AppState) -> Router {
             )
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
             .with_state(ca);
+        router = router.merge(group);
+    }
+
+    if let Some(ps) = state.pdp_source.clone() {
+        // EO3: platform-admin PDP policy-source switch. Same /api/control-plane
+        // prefix + CSRF layer as the other admin routers.
+        let group = Router::new()
+            .nest(
+                "/api/control-plane",
+                egret_auth::pdp_source_routes::pdp_source_router(),
+            )
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(ps);
         router = router.merge(group);
     }
 

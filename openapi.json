@@ -10574,6 +10574,189 @@
         }
       }
     },
+    "/api/control-plane/perm/pdp-source": {
+      "get": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "get_source",
+        "responses": {
+          "200": {
+            "description": "Current PDP policy source + audit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/pdp-source/report": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "post_report",
+        "responses": {
+          "200": {
+            "description": "Live equivalence report (empty ⇒ safe to switch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PdpDivergence"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/pdp-source/shadow": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "post_shadow",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceState"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/pdp-source/switch": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "post_switch",
+        "responses": {
+          "200": {
+            "description": "Switched to compiled (report was clean)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceState"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not in shadow, or the report is not clean",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/pdp-source/undo": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "post_undo",
+        "responses": {
+          "200": {
+            "description": "Stepped back one state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceState"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/people": {
       "get": {
         "tags": [
@@ -48949,6 +49132,13 @@
           }
         }
       },
+      "DivergenceKind": {
+        "type": "string",
+        "enum": [
+          "policy",
+          "role_name"
+        ]
+      },
       "DuplicateDataset": {
         "type": "object",
         "description": "Body of `POST /datasets/{id}/duplicate`.",
@@ -55926,6 +56116,28 @@
           }
         }
       },
+      "PdpDivergence": {
+        "type": "object",
+        "description": "One point where the legacy and compiled assemblers disagree. Expected to be\nEMPTY (EO2-D1: both reuse the same text formatters), so any entry is a signal.",
+        "required": [
+          "kind",
+          "id",
+          "detail"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/DivergenceKind"
+          },
+          "id": {
+            "type": "string",
+            "description": "PolicyId (Policy) or role uuid (RoleName)."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Human-readable: \"only in legacy\" | \"only in compiled\" | \"text differs\" | the two names."
+          }
+        }
+      },
       "PeoplePage": {
         "type": "object",
         "description": "A page of the People index and how many rows match in all.",
@@ -56310,6 +56522,15 @@
             "format": "int64"
           }
         }
+      },
+      "PolicySource": {
+        "type": "string",
+        "description": "Which assembler the live PDP serves. Stored as text in the DB.",
+        "enum": [
+          "legacy",
+          "shadow",
+          "compiled"
+        ]
       },
       "PolicySummary": {
         "type": "object",
@@ -60985,6 +61206,31 @@
           },
           "nullOrder": {
             "type": "string"
+          }
+        }
+      },
+      "SourceState": {
+        "type": "object",
+        "description": "The switch row with its audit columns, for the GET endpoint.",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/PolicySource"
+          },
+          "switched_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "switched_by": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

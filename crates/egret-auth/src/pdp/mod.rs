@@ -1,6 +1,7 @@
 //! Cedar-based policy decision point.
 pub mod audit;
 pub mod entities;
+pub mod source_switch;
 pub mod templates;
 
 pub use audit::AuditingPdp;
@@ -20,11 +21,12 @@ use tokio::sync::broadcast;
 
 use crate::events::RolesChanged;
 use crate::grants::{AccessGrantStore, Grant};
+use source_switch::{Divergence, DivergenceKind};
 
 /// The compiled policy state the PDP authorizes against. Held behind an
 /// `ArcSwap` so a background task can atomically swap in a freshly-loaded set
 /// when the role/permission catalog changes, without blocking readers.
-struct PdpInner {
+pub(crate) struct PdpInner {
     templates: PolicySet,
     role_names: HashMap<uuid::Uuid, String>,
 }
@@ -52,9 +54,125 @@ impl CedarPdp {
         Ok(pdp)
     }
 
+    /// EO3: the reload orchestrator. Reads the switch (fail-safe to legacy) and
+    /// returns the PdpInner to serve. `shadow`/`compiled` also build the compiled
+    /// set and compare it (a production-data canary); `compiled` serves it, failing
+    /// safe to legacy if the compiled build errors. Same signature as pre-EO3, so
+    /// `build` and `spawn_reload` are unchanged and the default (`legacy`) path is
+    /// byte-identical to before.
+    async fn load_inner(db: &Db) -> Result<PdpInner> {
+        use crate::pdp::source_switch::{read_source, PolicySource};
+        match read_source(db).await {
+            PolicySource::Legacy => Self::build_legacy(db).await,
+            source => {
+                // Build legacy too, so we keep comparing (canary) AND have a fail-safe.
+                let legacy = Self::build_legacy(db).await?;
+                let compiled = Self::build_compiled(db).await;
+                Ok(Self::select_served(source, legacy, compiled))
+            }
+        }
+    }
+
+    /// EO3: choose what to serve for a non-legacy state. `shadow` always serves
+    /// legacy; `compiled` serves the compiled set, failing safe to legacy (EO3-D5)
+    /// when the compiled build errored. Never errors: authz must not break.
+    pub(crate) fn select_served(
+        source: source_switch::PolicySource,
+        legacy: PdpInner,
+        compiled: Result<PdpInner>,
+    ) -> PdpInner {
+        use source_switch::PolicySource;
+        match (source, compiled) {
+            (PolicySource::Compiled, Ok(compiled)) => {
+                Self::log_shadow(&legacy, &compiled);
+                compiled
+            }
+            (PolicySource::Compiled, Err(e)) => {
+                tracing::error!(error = ?e, "EO3 compiled: compiled build failed; FAIL-SAFE to legacy");
+                legacy
+            }
+            (_, Ok(compiled)) => {
+                Self::log_shadow(&legacy, &compiled);
+                legacy
+            }
+            (_, Err(e)) => {
+                tracing::error!(error = ?e, "EO3 shadow: compiled build failed; serving legacy");
+                legacy
+            }
+        }
+    }
+
+    /// EO3: emit the shadow comparison result. Empty means equivalent (info); any
+    /// divergence yields a warn per entry plus a count, the operator's cutover signal.
+    fn log_shadow(legacy: &PdpInner, compiled: &PdpInner) {
+        let d = diff(legacy, compiled);
+        if d.is_empty() {
+            tracing::info!("EO3 shadow: legacy and compiled policy sets are equivalent");
+        } else {
+            tracing::warn!(divergences = d.len(), "EO3 shadow: policy sets DIVERGE");
+            for x in &d {
+                tracing::warn!(kind = ?x.kind, id = %x.id, detail = %x.detail, "EO3 shadow divergence");
+            }
+        }
+    }
+
+    fn ids_of(inner: &PdpInner) -> Vec<String> {
+        let mut ids: Vec<String> = inner
+            .templates
+            .templates()
+            .map(|t| t.id().to_string())
+            .chain(inner.templates.policies().map(|p| p.id().to_string()))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Test-only: ids (templates + policies, sorted) the live reload currently serves.
+    #[doc(hidden)]
+    pub async fn served_policy_ids_for_test(db: &Db) -> Result<Vec<String>> {
+        Ok(Self::ids_of(&Self::load_inner(db).await?))
+    }
+
+    /// Test-only: ids (templates + policies, sorted) the LIVE PDP currently holds in
+    /// its `ArcSwap` (what `authorize` reads), as opposed to a fresh `load_inner`.
+    #[doc(hidden)]
+    pub fn live_served_ids_for_test(&self) -> Vec<String> {
+        Self::ids_of(&self.inner.load())
+    }
+
+    /// Test-only: ids the legacy assembler produces.
+    #[doc(hidden)]
+    pub async fn legacy_ids_for_test(db: &Db) -> Result<Vec<String>> {
+        Ok(Self::ids_of(&Self::build_legacy(db).await?))
+    }
+
+    /// Test-only: ids the compiled assembler produces.
+    #[doc(hidden)]
+    pub async fn compiled_ids_for_test(db: &Db) -> Result<Vec<String>> {
+        Ok(Self::ids_of(&Self::build_compiled(db).await?))
+    }
+
+    /// Test-only: run the state selector with an injected compiled-build result
+    /// (the fail-safe seam: a real `build_compiled` error is hard to force from DB
+    /// rows, since both assemblers read the same tables). Returns served ids.
+    #[doc(hidden)]
+    pub async fn select_served_for_test(
+        db: &Db,
+        source: source_switch::PolicySource,
+        compiled_err: bool,
+    ) -> Result<Vec<String>> {
+        let legacy = Self::build_legacy(db).await?;
+        let compiled = if compiled_err {
+            Err(egret_core::Error::Internal(anyhow::anyhow!("injected")))
+        } else {
+            Self::build_compiled(db).await
+        };
+        Ok(Self::ids_of(&Self::select_served(source, legacy, compiled)))
+    }
+
     /// The B1a `build` body: load roles + role_permissions, compile one template
     /// per role keyed by `role:{id}`, gate the admin body on scope+name.
-    async fn load_inner(db: &Db) -> Result<PdpInner> {
+    pub(crate) async fn build_legacy(db: &Db) -> Result<PdpInner> {
         // Key templates by role_id (UUID), not name: `roles` is UNIQUE(scope,
         // name), so a workspace role can share a name with a platform role. Keying
         // by name collided across scopes → duplicate `add_template` id → `build()`
@@ -212,8 +330,32 @@ impl CedarPdp {
     pub async fn compiled_policy_set_for_test(
         db: &Db,
     ) -> Result<(PolicySet, HashMap<uuid::Uuid, String>)> {
-        let inner = Self::load_inner(db).await?;
+        let inner = Self::build_legacy(db).await?;
         Ok((inner.templates, inner.role_names))
+    }
+
+    /// EO3: assemble the PDP policy via the egret-cedar compiler (the path EO3
+    /// switches to). Reads the SAME legacy tables `build_legacy` reads, through
+    /// `egret_cedar::load::load_inputs`, then `egret_cedar::compile::compile`.
+    pub(crate) async fn build_compiled(db: &Db) -> Result<PdpInner> {
+        let inputs = egret_cedar::load::load_inputs(db)
+            .await
+            .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!(e)))?;
+        let compiled = egret_cedar::compile::compile(&inputs).map_err(|e| {
+            egret_core::Error::Internal(anyhow::anyhow!("egret-cedar compile: {e:?}"))
+        })?;
+        Ok(PdpInner {
+            templates: compiled.policy_set,
+            role_names: compiled.role_names,
+        })
+    }
+
+    /// EO3: a one-shot live equivalence report: build BOTH assemblers from the
+    /// current DB and diff them. Empty means safe to switch to `compiled`. Read-only.
+    pub async fn report(db: &Db) -> Result<Vec<Divergence>> {
+        let legacy = Self::build_legacy(db).await?;
+        let compiled = Self::build_compiled(db).await?;
+        Ok(diff(&legacy, &compiled))
     }
 
     /// Test-only: run the request path against an arbitrary template set (the
@@ -374,5 +516,201 @@ impl CedarPdp {
                 .map(|id| id.to_string())
                 .collect(),
         })
+    }
+}
+
+/// EO3: set-equality comparison of the two assemblers' output. Compares every
+/// policy and template by `PolicyId -> text` (byte equality; both sides share
+/// the EO2-D1 formatters), plus the `role_names` maps. Pure; no DB.
+pub(crate) fn diff(legacy: &PdpInner, compiled: &PdpInner) -> Vec<Divergence> {
+    fn text_map(ps: &PolicySet) -> std::collections::BTreeMap<String, String> {
+        let mut m = std::collections::BTreeMap::new();
+        for t in ps.templates() {
+            m.insert(t.id().to_string(), t.to_string());
+        }
+        for p in ps.policies() {
+            m.insert(p.id().to_string(), p.to_string());
+        }
+        m
+    }
+    let l = text_map(&legacy.templates);
+    let c = text_map(&compiled.templates);
+    let mut out = Vec::new();
+    for (id, lt) in &l {
+        match c.get(id) {
+            None => out.push(Divergence {
+                kind: DivergenceKind::Policy,
+                id: id.clone(),
+                detail: "only in legacy".into(),
+            }),
+            Some(ct) if ct != lt => out.push(Divergence {
+                kind: DivergenceKind::Policy,
+                id: id.clone(),
+                detail: "text differs".into(),
+            }),
+            Some(_) => {}
+        }
+    }
+    for id in c.keys() {
+        if !l.contains_key(id) {
+            out.push(Divergence {
+                kind: DivergenceKind::Policy,
+                id: id.clone(),
+                detail: "only in compiled".into(),
+            });
+        }
+    }
+    let mut role_ids: std::collections::BTreeSet<&uuid::Uuid> = Default::default();
+    role_ids.extend(legacy.role_names.keys());
+    role_ids.extend(compiled.role_names.keys());
+    for id in role_ids {
+        let ln = legacy.role_names.get(id);
+        let cn = compiled.role_names.get(id);
+        if ln != cn {
+            out.push(Divergence {
+                kind: DivergenceKind::RoleName,
+                id: id.to_string(),
+                detail: format!("legacy={ln:?} compiled={cn:?}"),
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod eo3_diff_tests {
+    use super::*;
+    use cedar_policy::Policy;
+
+    fn pset(texts: &[(&str, &str)]) -> PolicySet {
+        let mut ps = PolicySet::new();
+        for (id, body) in texts {
+            let pid: PolicyId = id.parse().unwrap();
+            ps.add(Policy::parse(Some(pid), *body).unwrap()).unwrap();
+        }
+        ps
+    }
+
+    fn tset(texts: &[(&str, &str)]) -> PolicySet {
+        let mut ps = PolicySet::new();
+        for (id, body) in texts {
+            let pid: PolicyId = id.parse().unwrap();
+            ps.add_template(cedar_policy::Template::parse(Some(pid), *body).unwrap())
+                .unwrap();
+        }
+        ps
+    }
+
+    #[test]
+    fn differing_and_missing_templates_diverge() {
+        let legacy = PdpInner {
+            templates: tset(&[
+                ("t1", "permit(principal == ?principal, action, resource);"),
+                ("t2", "permit(principal == ?principal, action, resource);"),
+            ]),
+            role_names: HashMap::new(),
+        };
+        let compiled = PdpInner {
+            templates: tset(&[("t1", "forbid(principal == ?principal, action, resource);")]),
+            role_names: HashMap::new(),
+        };
+        let d = diff(&legacy, &compiled);
+        assert_eq!(d.len(), 2);
+        assert!(d.iter().all(|x| matches!(x.kind, DivergenceKind::Policy)));
+        assert!(d.iter().any(|x| x.id == "t1" && x.detail == "text differs"));
+        assert!(d
+            .iter()
+            .any(|x| x.id == "t2" && x.detail == "only in legacy"));
+    }
+
+    #[test]
+    fn identical_sets_have_no_divergence() {
+        let a = pset(&[("p1", "permit(principal, action, resource);")]);
+        let b = pset(&[("p1", "permit(principal, action, resource);")]);
+        let legacy = PdpInner {
+            templates: a,
+            role_names: HashMap::new(),
+        };
+        let compiled = PdpInner {
+            templates: b,
+            role_names: HashMap::new(),
+        };
+        assert!(diff(&legacy, &compiled).is_empty());
+    }
+
+    #[test]
+    fn missing_and_differing_policies_diverge() {
+        let legacy = PdpInner {
+            templates: pset(&[
+                ("p1", "permit(principal, action, resource);"),
+                ("p2", "forbid(principal, action, resource);"),
+            ]),
+            role_names: HashMap::new(),
+        };
+        let compiled = PdpInner {
+            templates: pset(&[
+                ("p1", "forbid(principal, action, resource);"),
+                ("p3", "permit(principal, action, resource);"),
+            ]),
+            role_names: HashMap::new(),
+        };
+        let d = diff(&legacy, &compiled);
+        assert_eq!(d.len(), 3);
+        assert!(d.iter().all(|x| matches!(x.kind, DivergenceKind::Policy)));
+    }
+
+    #[test]
+    fn differing_role_names_diverge() {
+        let r = uuid::Uuid::from_u128(1);
+        let ps = pset(&[("p1", "permit(principal, action, resource);")]);
+        let legacy = PdpInner {
+            templates: ps.clone(),
+            role_names: HashMap::from([(r, "admin".to_string())]),
+        };
+        let compiled = PdpInner {
+            templates: ps,
+            role_names: HashMap::from([(r, "ADMIN".to_string())]),
+        };
+        let d = diff(&legacy, &compiled);
+        assert_eq!(d.len(), 1);
+        assert!(matches!(d[0].kind, DivergenceKind::RoleName));
+    }
+
+    /// Routing guard: the two inputs are provably distinguishable (different
+    /// policy ids and role names), so serving the wrong side fails an assertion.
+    #[test]
+    fn select_served_routes_by_state() {
+        use source_switch::PolicySource;
+        let r = uuid::Uuid::from_u128(7);
+        let legacy = || PdpInner {
+            templates: pset(&[("legacyA", "permit(principal, action, resource);")]),
+            role_names: HashMap::from([(r, "legacy-role".to_string())]),
+        };
+        let compiled = || PdpInner {
+            templates: pset(&[("compiledB", "permit(principal, action, resource);")]),
+            role_names: HashMap::from([(r, "compiled-role".to_string())]),
+        };
+        let is_legacy = |i: &PdpInner| {
+            i.role_names[&r] == "legacy-role"
+                && i.templates
+                    .policies()
+                    .any(|p| p.id().to_string() == "legacyA")
+        };
+        let is_compiled = |i: &PdpInner| {
+            i.role_names[&r] == "compiled-role"
+                && i.templates
+                    .policies()
+                    .any(|p| p.id().to_string() == "compiledB")
+        };
+        let err = || Err(egret_core::Error::Internal(anyhow::anyhow!("boom")));
+
+        let out = CedarPdp::select_served(PolicySource::Compiled, legacy(), Ok(compiled()));
+        assert!(is_compiled(&out), "compiled+Ok must serve compiled");
+        let out = CedarPdp::select_served(PolicySource::Shadow, legacy(), Ok(compiled()));
+        assert!(is_legacy(&out), "shadow+Ok must serve legacy");
+        let out = CedarPdp::select_served(PolicySource::Compiled, legacy(), err());
+        assert!(is_legacy(&out), "compiled+Err must fail safe to legacy");
+        let out = CedarPdp::select_served(PolicySource::Shadow, legacy(), err());
+        assert!(is_legacy(&out), "shadow+Err must serve legacy");
     }
 }

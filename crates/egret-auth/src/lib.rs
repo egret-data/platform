@@ -14,6 +14,7 @@ pub mod oidc_cookie;
 pub mod oidc_routes;
 pub mod password;
 pub mod pdp;
+pub mod pdp_source_routes;
 pub mod preregistration;
 pub mod principal;
 pub mod roles;
@@ -93,6 +94,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     use utoipa::OpenApi as _;
     let mut doc = routes::AuthApi::openapi();
     doc.merge(oidc_routes::OidcApi::openapi());
+    doc.merge(pdp_source_routes::PdpSourceApi::openapi());
     doc
 }
 

@@ -3881,6 +3881,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         )))
     };
 
+    let pdp_source = Some(egret_auth::pdp_source_routes::PdpSourceState {
+        db: db.clone(),
+        sessions: sessions.clone(),
+        bus: bus.clone(),
+    });
+
     let app_state = AppState {
         db: Some(db),
         auth: Some(auth),
@@ -3894,6 +3900,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         automation,
         control_plane,
         catalog_admin,
+        pdp_source,
         policy_admin,
         perm,
         engine_mgmt,
