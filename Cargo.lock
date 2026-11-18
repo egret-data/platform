@@ -3083,6 +3083,7 @@ dependencies = [
  "egret-events",
  "egret-machine-idp",
  "egret-metastore",
+ "egret-perm-ir",
  "egret-secrets",
  "egret-test-db",
  "hex",
