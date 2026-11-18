@@ -105,3 +105,23 @@ pub async fn write_source(db: &Db, source: PolicySource, actor: &str) -> egret_c
     .map_err(|e| egret_core::Error::Internal(anyhow::anyhow!(e)))?;
     Ok(())
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DivergenceKind {
+    /// A policy id present on one side only, or whose text differs.
+    Policy,
+    /// A role id whose compiled name differs from the legacy name.
+    RoleName,
+}
+
+/// One point where the legacy and compiled assemblers disagree. Expected to be
+/// EMPTY (EO2-D1: both reuse the same text formatters), so any entry is a signal.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct Divergence {
+    pub kind: DivergenceKind,
+    /// PolicyId (Policy) or role uuid (RoleName).
+    pub id: String,
+    /// Human-readable: "only in legacy" | "only in compiled" | "text differs" | the two names.
+    pub detail: String,
+}

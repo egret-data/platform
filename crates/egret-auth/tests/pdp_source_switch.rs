@@ -1,5 +1,6 @@
 //! EO3 switch-store tests. DB-gated via egret_test_db; requires DATABASE_URL.
 use egret_auth::pdp::source_switch::{read_source, read_state, write_source, PolicySource};
+use egret_auth::pdp::CedarPdp;
 use egret_metastore::Db;
 
 async fn db() -> Db {
@@ -61,4 +62,14 @@ fn db_text_roundtrip() {
         assert_eq!(PolicySource::from_db(s.as_db()), Some(s));
     }
     assert_eq!(PolicySource::from_db("bogus"), None);
+}
+
+#[tokio::test]
+async fn report_is_empty_on_a_normal_db() {
+    let db = db().await;
+    let divergences = CedarPdp::report(&db).await.expect("report");
+    assert!(
+        divergences.is_empty(),
+        "expected equivalence, got {divergences:?}"
+    );
 }
