@@ -52,6 +52,9 @@ pub enum LoweringKind {
     DenyCreateMaterializedView,
     DenyHiddenColumns,
     DenyMetadataTables,
+    /// SP5c: the target cannot run a mask or row filter, so the whole
+    /// table's READ is withheld instead.
+    WithholdWholeTable,
 }
 
 /// The matrix's answer for one EP and one capability.
@@ -751,6 +754,83 @@ pub fn embedded_catalog_privilege_gap(p: Privilege) -> Option<String> {
     }
 }
 
+/// SP5c: the iceberg-rest EP (the catalog's vended-credential data path). Like
+/// [`EMBEDDED_CATALOG`] it is not an `EpKind` and has no rows in [`ENTRIES`].
+pub const ICEBERG_REST: &str = "iceberg-rest";
+
+const ICEBERG_REST_PRIVILEGES: &[(Privilege, Answer)] = &[
+    (Privilege::Browse, Answer::Native),
+    (Privilege::Read, Answer::Native),
+    (Privilege::Write, Answer::Native),
+    (
+        Privilege::Create,
+        Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+    ),
+    (
+        Privilege::Manage,
+        Answer::Missing(ReasonCode::PrivilegeNotEnforceable),
+    ),
+];
+
+/// Rule effects: masks and row filters cannot run at the storage layer, so the
+/// table's READ is withheld; a clearance withhold is a direct catalog denial.
+const ICEBERG_REST_EFFECTS: &[(RuleEffectKind, Answer)] = &[
+    (
+        RuleEffectKind::Mask,
+        Answer::Lowered(LoweringKind::WithholdWholeTable),
+    ),
+    (
+        RuleEffectKind::RowFilter,
+        Answer::Lowered(LoweringKind::WithholdWholeTable),
+    ),
+];
+
+fn answer_support(a: Answer) -> Support {
+    match a {
+        Answer::Native | Answer::NativeWithChannel => Support::Native,
+        Answer::Lowered(k) => Support::Lowered(k),
+        Answer::Missing(r) => Support::Missing(r),
+    }
+}
+
+/// The iceberg-rest EP's answer for `cap`. Capabilities outside privileges,
+/// classification mask/row-filter selectors and classification withhold are
+/// missing, reason "not measured" (spec D7).
+pub fn iceberg_rest_support(cap: &Capability) -> Support {
+    match cap {
+        Capability::EnforcePrivilege(p) => ICEBERG_REST_PRIVILEGES
+            .iter()
+            .find(|(q, _)| q == p)
+            .map_or(Support::Missing(ReasonCode::NotMeasured), |(_, a)| {
+                answer_support(*a)
+            }),
+        Capability::ClassificationSelector(k) => ICEBERG_REST_EFFECTS
+            .iter()
+            .find(|(q, _)| q == k)
+            .map_or(Support::Missing(ReasonCode::NotMeasured), |(_, a)| {
+                answer_support(*a)
+            }),
+        Capability::WithholdByClassification => Support::Native,
+        _ => Support::Missing(ReasonCode::NotMeasured),
+    }
+}
+
+/// Why iceberg-rest does not enforce `cap` as asked: the not-enforceable
+/// privilege text, or the mask/row-filter lowering reason; `None` when native.
+pub fn iceberg_rest_gap(cap: &Capability) -> Option<String> {
+    match (iceberg_rest_support(cap), cap) {
+        (Support::Native, _) => None,
+        (Support::Lowered(_), _) => Some(format!(
+            "masks/row filters can't run at the storage layer; the whole table's READ is withheld ({ICEBERG_REST})"
+        )),
+        (Support::Missing(_), Capability::EnforcePrivilege(p)) => Some(format!(
+            "{} not enforceable by {ICEBERG_REST}",
+            privilege_name(*p)
+        )),
+        (Support::Missing(_), _) => Some(format!("not measured for {ICEBERG_REST}")),
+    }
+}
+
 fn privilege_name(p: Privilege) -> &'static str {
     match p {
         Privilege::Read => "read",
@@ -1110,5 +1190,42 @@ mod tests {
                 Some(format!("{name} not enforceable by embedded-catalog"))
             );
         }
+    }
+
+    #[test]
+    fn iceberg_rest_privileges_mirror_the_embedded_catalog() {
+        for p in [Privilege::Browse, Privilege::Read, Privilege::Write] {
+            let c = Capability::EnforcePrivilege(p);
+            assert_eq!(iceberg_rest_support(&c), Support::Native, "{p:?}");
+            assert_eq!(iceberg_rest_gap(&c), None);
+        }
+        for p in [Privilege::Create, Privilege::Manage] {
+            let c = Capability::EnforcePrivilege(p);
+            assert_eq!(
+                iceberg_rest_support(&c),
+                Support::Missing(ReasonCode::PrivilegeNotEnforceable)
+            );
+            assert!(iceberg_rest_gap(&c).unwrap().contains("not enforceable"));
+        }
+    }
+
+    #[test]
+    fn iceberg_rest_lowers_mask_and_row_filter_to_a_whole_table_withhold() {
+        for k in [RuleEffectKind::Mask, RuleEffectKind::RowFilter] {
+            let c = Capability::ClassificationSelector(k);
+            assert_eq!(
+                iceberg_rest_support(&c),
+                Support::Lowered(LoweringKind::WithholdWholeTable)
+            );
+            let gap = iceberg_rest_gap(&c).unwrap();
+            assert!(
+                gap.contains("storage layer") && gap.contains("withheld"),
+                "{gap}"
+            );
+        }
+        assert_eq!(
+            iceberg_rest_support(&Capability::WithholdByClassification),
+            Support::Native
+        );
     }
 }

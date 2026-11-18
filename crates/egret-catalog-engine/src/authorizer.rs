@@ -165,6 +165,8 @@ pub struct EgretAuthorizer {
     /// SP5b: per-catalog unified `perm` snapshots, used only for catalogs whose
     /// switch is `unified` (`crate::unified_decide`).
     snapshot_cache: crate::unified_decide::CatalogSnapshotCache,
+    /// SP5c: enforcement snapshots for catalogs with the iceberg-rest switch on.
+    enforcement_cache: crate::unified_decide::CatalogEnforcementSnapshotCache,
 }
 
 impl std::fmt::Debug for EgretAuthorizer {
@@ -183,6 +185,7 @@ impl EgretAuthorizer {
             system,
             grants,
             snapshot_cache: crate::unified_decide::CatalogSnapshotCache::new(),
+            enforcement_cache: crate::unified_decide::CatalogEnforcementSnapshotCache::new(),
         }
     }
 
@@ -263,7 +266,7 @@ impl EgretAuthorizer {
     /// path — never the namespace reach.
     async fn client_may_unified(
         &self,
-        conn: &mut sqlx::PgConnection,
+        pooled: &mut sqlx::PgConnection,
         client: &CatalogClientIdentity,
         catalog: Option<(uuid::Uuid, String)>,
         asks: &[(Vec<String>, String, bool)],
@@ -271,6 +274,22 @@ impl EgretAuthorizer {
         let unavailable = |e: crate::store::CatalogError| {
             IsAllowedActionError::from(AuthorizationBackendUnavailable::new(e))
         };
+        // This pool pins `search_path = lakekeeper, public` (lakekeeper's DDL is
+        // unqualified), and lakekeeper has its own `users` table: egret's
+        // unqualified `users` lookup (username resolution) would hit it, find no
+        // service account, and deny every unified ask. Pin `public` for this
+        // transaction only (`SET LOCAL` reverts on commit/rollback/drop, so the
+        // pooled connection is never left changed).
+        use sqlx::Connection as _;
+        let mut tx = pooled
+            .begin()
+            .await
+            .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
+        sqlx::query("SET LOCAL search_path = public")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
+        let conn: &mut sqlx::PgConnection = &mut tx;
         let user = crate::unified_decide::service_account_username(conn, &client.subject)
             .await
             .map_err(|e| unavailable(crate::store::CatalogError::from(e)))?;
@@ -285,6 +304,17 @@ impl EgretAuthorizer {
         let Some(snapshot) = snapshot else {
             return Ok(vec![false; asks.len()]);
         };
+        // SP5c: with the iceberg-rest switch on, a restricted table (mask, row
+        // filter, withhold) is denied for read AND write even when a grant
+        // covers it, so lakekeeper vends no storage credential for it (a write
+        // credential can read the raw files). An unenforceable catalog denies
+        // every ask.
+        let enforcement = if !asks.is_empty() {
+            crate::unified_decide::ReadEnforcement::load(&self.enforcement_cache, conn, catalog_id)
+                .await
+        } else {
+            crate::unified_decide::ReadEnforcement::Off
+        };
         Ok(asks
             .iter()
             .map(|(ns, table, write)| {
@@ -295,7 +325,7 @@ impl EgretAuthorizer {
                     ns,
                     Some(table.as_str()),
                     *write,
-                )
+                ) && !enforcement.denies_access(&user, &catalog_name, ns, table)
             })
             .collect())
     }

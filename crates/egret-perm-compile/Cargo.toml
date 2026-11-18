@@ -114,6 +114,11 @@ required-features = ["harness"]
 name = "opa_snapshot"
 required-features = ["harness"]
 
+# Governance SP5c Task 1: the embedded catalog's enforcement snapshot.
+[[test]]
+name = "catalog_enforcement_snapshot"
+required-features = ["harness"]
+
 # Governance SP2b Task 7: the snapshot cache and its refresher.
 [[test]]
 name = "opa_cache"

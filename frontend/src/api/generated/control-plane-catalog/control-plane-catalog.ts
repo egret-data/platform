@@ -44,6 +44,7 @@ import type {
   FinalizeSummary,
   FormatPolicyBody,
   GrantDto,
+  IcebergRestPlan,
   NamespaceDto,
   ProtectionBody,
   ProtectionDto,
@@ -722,6 +723,324 @@ export const useControlPlaneCatalogCatalogMigrateUndo = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getControlPlaneCatalogCatalogMigrateUndoMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogIcebergRestPlanResponse200 = {
+  data: IcebergRestPlan
+  status: 200
+}
+
+export type controlPlaneCatalogIcebergRestPlanResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogIcebergRestPlanResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogIcebergRestPlanResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogIcebergRestPlanResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogIcebergRestPlanResponseSuccess = (controlPlaneCatalogIcebergRestPlanResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogIcebergRestPlanResponseError = (controlPlaneCatalogIcebergRestPlanResponse401 | controlPlaneCatalogIcebergRestPlanResponse403 | controlPlaneCatalogIcebergRestPlanResponse404 | controlPlaneCatalogIcebergRestPlanResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogIcebergRestPlanResponse = (controlPlaneCatalogIcebergRestPlanResponseSuccess | controlPlaneCatalogIcebergRestPlanResponseError)
+
+export const getControlPlaneCatalogIcebergRestPlanUrl = (catalog: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/iceberg-rest/${encodeURIComponent(catalog)}/plan`
+}
+
+/**
+ * @summary **plan**: preview rule enforcement on a catalog — the `(principal, table)`
+reads that would flip allow→deny, and whether the grant decision is provably
+unchanged. Changes nothing.
+ */
+export const controlPlaneCatalogIcebergRestPlan = async (catalog: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogIcebergRestPlanResponse> => {
+
+  return customInstance<controlPlaneCatalogIcebergRestPlanResponse>(getControlPlaneCatalogIcebergRestPlanUrl(catalog),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogIcebergRestPlanMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestPlan>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestPlan>>, TError,{catalog: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogIcebergRestPlan'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestPlan>>, {catalog: string}> = (props) => {
+          const {catalog} = props ?? {};
+
+          return  controlPlaneCatalogIcebergRestPlan(catalog,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogIcebergRestPlanMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestPlan>>>
+
+    export type ControlPlaneCatalogIcebergRestPlanMutationError = ErrorBody
+
+    /**
+ * @summary **plan**: preview rule enforcement on a catalog — the `(principal, table)`
+reads that would flip allow→deny, and whether the grant decision is provably
+unchanged. Changes nothing.
+ */
+export const useControlPlaneCatalogIcebergRestPlan = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestPlan>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestPlan>>,
+        TError,
+        {catalog: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogIcebergRestPlanMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogIcebergRestSwitchResponse200 = {
+  data: IcebergRestPlan
+  status: 200
+}
+
+export type controlPlaneCatalogIcebergRestSwitchResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogIcebergRestSwitchResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogIcebergRestSwitchResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type controlPlaneCatalogIcebergRestSwitchResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlaneCatalogIcebergRestSwitchResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogIcebergRestSwitchResponseSuccess = (controlPlaneCatalogIcebergRestSwitchResponse200) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogIcebergRestSwitchResponseError = (controlPlaneCatalogIcebergRestSwitchResponse401 | controlPlaneCatalogIcebergRestSwitchResponse403 | controlPlaneCatalogIcebergRestSwitchResponse404 | controlPlaneCatalogIcebergRestSwitchResponse409 | controlPlaneCatalogIcebergRestSwitchResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogIcebergRestSwitchResponse = (controlPlaneCatalogIcebergRestSwitchResponseSuccess | controlPlaneCatalogIcebergRestSwitchResponseError)
+
+export const getControlPlaneCatalogIcebergRestSwitchUrl = (catalog: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/iceberg-rest/${encodeURIComponent(catalog)}/switch`
+}
+
+/**
+ * @summary **switch**: enable rule enforcement — refused (409, unchanged) unless the
+catalog's grants are on the unified store and the grant check is clean.
+ */
+export const controlPlaneCatalogIcebergRestSwitch = async (catalog: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogIcebergRestSwitchResponse> => {
+
+  return customInstance<controlPlaneCatalogIcebergRestSwitchResponse>(getControlPlaneCatalogIcebergRestSwitchUrl(catalog),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogIcebergRestSwitchMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestSwitch>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestSwitch>>, TError,{catalog: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogIcebergRestSwitch'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestSwitch>>, {catalog: string}> = (props) => {
+          const {catalog} = props ?? {};
+
+          return  controlPlaneCatalogIcebergRestSwitch(catalog,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogIcebergRestSwitchMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestSwitch>>>
+
+    export type ControlPlaneCatalogIcebergRestSwitchMutationError = ErrorBody
+
+    /**
+ * @summary **switch**: enable rule enforcement — refused (409, unchanged) unless the
+catalog's grants are on the unified store and the grant check is clean.
+ */
+export const useControlPlaneCatalogIcebergRestSwitch = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestSwitch>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestSwitch>>,
+        TError,
+        {catalog: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogIcebergRestSwitchMutationOptions(options), queryClient);
+    }
+    export type controlPlaneCatalogIcebergRestUndoResponse204 = {
+  data: void
+  status: 204
+}
+
+export type controlPlaneCatalogIcebergRestUndoResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlaneCatalogIcebergRestUndoResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlaneCatalogIcebergRestUndoResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlaneCatalogIcebergRestUndoResponseSuccess = (controlPlaneCatalogIcebergRestUndoResponse204) & {
+  headers: Headers;
+};
+export type controlPlaneCatalogIcebergRestUndoResponseError = (controlPlaneCatalogIcebergRestUndoResponse401 | controlPlaneCatalogIcebergRestUndoResponse403 | controlPlaneCatalogIcebergRestUndoResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlaneCatalogIcebergRestUndoResponse = (controlPlaneCatalogIcebergRestUndoResponseSuccess | controlPlaneCatalogIcebergRestUndoResponseError)
+
+export const getControlPlaneCatalogIcebergRestUndoUrl = (catalog: string,) => {
+
+
+
+
+  return `/api/control-plane/perm/iceberg-rest/${encodeURIComponent(catalog)}/undo`
+}
+
+/**
+ * @summary **undo**: disable rule enforcement. Reversible; drops nothing.
+ */
+export const controlPlaneCatalogIcebergRestUndo = async (catalog: string, options?: Parameters<typeof customInstance>[1]): Promise<controlPlaneCatalogIcebergRestUndoResponse> => {
+
+  return customInstance<controlPlaneCatalogIcebergRestUndoResponse>(getControlPlaneCatalogIcebergRestUndoUrl(catalog),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlaneCatalogIcebergRestUndoMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestUndo>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestUndo>>, TError,{catalog: string}, TContext> => {
+
+const mutationKey = ['controlPlaneCatalogIcebergRestUndo'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestUndo>>, {catalog: string}> = (props) => {
+          const {catalog} = props ?? {};
+
+          return  controlPlaneCatalogIcebergRestUndo(catalog,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlaneCatalogIcebergRestUndoMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestUndo>>>
+
+    export type ControlPlaneCatalogIcebergRestUndoMutationError = ErrorBody
+
+    /**
+ * @summary **undo**: disable rule enforcement. Reversible; drops nothing.
+ */
+export const useControlPlaneCatalogIcebergRestUndo = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestUndo>>, TError,{catalog: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlaneCatalogIcebergRestUndo>>,
+        TError,
+        {catalog: string},
+        TContext
+      > => {
+      return useMutation(getControlPlaneCatalogIcebergRestUndoMutationOptions(options), queryClient);
     }
     export type controlPlaneCatalogDeleteRoleResponse204 = {
   data: void

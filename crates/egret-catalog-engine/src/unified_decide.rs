@@ -74,6 +74,80 @@ pub async fn catalog_grant_source(
     })
 }
 
+/// True when `catalog_id` has opted into iceberg-rest rule enforcement
+/// (`perm.catalog_rule_enforcement_switch`, migration 0237). A catalog with no
+/// row returns false: opt-in, so shipping the migration enables nothing.
+pub async fn catalog_enforces_rules(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let on: Option<bool> = sqlx::query_scalar(
+        "SELECT enforce FROM perm.catalog_rule_enforcement_switch WHERE catalog_id = $1",
+    )
+    .bind(catalog_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(on.unwrap_or(false))
+}
+
+/// SP5c: what the iceberg-rest switch means for data asks (read and write) on one catalog.
+/// Loaded once per request/ask-batch; fail closed throughout.
+pub enum ReadEnforcement {
+    /// The switch is off: reads are decided by grants alone (opt-in).
+    Off,
+    /// The switch is on but the rules cannot be enforced (the switch or the
+    /// snapshot failed to load, or the catalog has no registry row): every ask
+    /// is denied. A skipped restricting rule is never read as "nothing restricts".
+    DenyAll,
+    /// The switch is on: a read is denied when the table is restricted.
+    Check(Arc<Snapshot>),
+}
+
+impl ReadEnforcement {
+    pub async fn load(
+        cache: &CatalogEnforcementSnapshotCache,
+        conn: &mut sqlx::PgConnection,
+        catalog_id: Uuid,
+    ) -> Self {
+        match catalog_enforces_rules(conn, catalog_id).await {
+            Ok(false) => return Self::Off,
+            Ok(true) => {}
+            Err(e) => {
+                tracing::error!(%catalog_id, error = %e, "iceberg-rest enforcement switch unreadable: denying reads");
+                return Self::DenyAll;
+            }
+        }
+        match cache.get(conn, catalog_id).await {
+            Ok(Some(snap)) => Self::Check(snap),
+            Ok(None) => Self::DenyAll,
+            Err(e) => {
+                tracing::error!(%catalog_id, error = %e, "iceberg-rest enforcement snapshot unavailable: denying reads");
+                Self::DenyAll
+            }
+        }
+    }
+
+    /// True when ANY access (read or write) to `(namespace, table)` by `user`
+    /// must be denied: a restricted table vends no credential at all, since a
+    /// write credential can read the raw files. `namespace` is dot-joined
+    /// exactly as [`covers`] joins it.
+    pub fn denies_access(
+        &self,
+        user: &str,
+        catalog: &str,
+        namespace: &[String],
+        table: &str,
+    ) -> bool {
+        match self {
+            Self::Off => false,
+            Self::DenyAll => true,
+            Self::Check(snap) => {
+                snap.table_read_restricted(user, catalog, &namespace.join("."), table)
+            }
+        }
+    }
+}
+
 /// Does `principal_user` (a `users.username`) cover the requested
 /// `(namespace, table, is_write)` on `catalog_name`, under `snapshot`? The same
 /// boolean [`crate::grant_match::catalog_grant_covers_by`] returns for the
@@ -290,8 +364,9 @@ pub async fn unified_name_matching_is_exact(
 }
 
 /// A per-catalog freshness signal over the store the fold wrote: any add bumps a
-/// count or a max-timestamp, any delete bumps a count, so a changed catalog
-/// never reuses a stale snapshot. Cheap: both tables are indexed by
+/// count (and, for grants and owners, a max-timestamp), any delete bumps a
+/// count, so a changed catalog never reuses a stale snapshot.
+/// `principal_max` is always `None`: `perm.grant_principals` has no timestamp. Cheap: both tables are indexed by
 /// `catalog_id` (`grants_catalog_idx`, the owners' unique key).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Version {
@@ -304,7 +379,8 @@ struct Version {
 }
 
 /// The six scalars `version_of` reads in one row: a (count, max-timestamp) pair
-/// for grants, grant principals and owners.
+/// for grants, grant principals and owners (the principal timestamp is a NULL
+/// placeholder, see `version_of`).
 type VersionRow = (
     i64,
     Option<DateTime<Utc>>,
@@ -324,8 +400,7 @@ async fn version_of(
                (SELECT max(created_at) FROM perm.grants WHERE catalog_id = $1), \
                (SELECT count(*) FROM perm.grant_principals gp \
                   JOIN perm.grants g ON g.id = gp.grant_id WHERE g.catalog_id = $1), \
-               (SELECT max(gp.created_at) FROM perm.grant_principals gp \
-                  JOIN perm.grants g ON g.id = gp.grant_id WHERE g.catalog_id = $1), \
+               NULL::timestamptz, /* perm.grant_principals has no created_at */ \
                (SELECT count(*) FROM perm.securable_owners WHERE catalog_id = $1), \
                (SELECT max(updated_at) FROM perm.securable_owners WHERE catalog_id = $1)",
     )
@@ -400,6 +475,120 @@ impl CatalogSnapshotCache {
             catalog_id,
             Cached {
                 version,
+                snapshot: snapshot.clone(),
+            },
+        );
+        Ok(snapshot)
+    }
+}
+
+/// The freshness key of the enforcement snapshot: a content hash of every
+/// stored input `build_catalog_enforcement_snapshot` reads directly (rules and
+/// their exemptions, tags, this catalog's tag assignments, clearance policies).
+/// Not [`Version`]: that tracks grants, which the enforcement snapshot never
+/// reads, so a new mask or withhold rule would leave it unchanged and the stale
+/// snapshot would report the newly restricted table as open. A content hash (not
+/// count + max timestamp) because `perm.rules` has no `updated_at`: an in-place
+/// edit of a mask expression must change the key too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnforcementVersion(String);
+
+async fn enforcement_version_of(
+    conn: &mut sqlx::PgConnection,
+    catalog_id: Uuid,
+) -> Result<EnforcementVersion, sqlx::Error> {
+    // Every rule (tag rules reach any catalog; withhold rules are read by the
+    // clearance loader, not by catalog) is hashed whole: a superset of what the
+    // build reads is safe, a subset is a leak.
+    let hash: String = sqlx::query_scalar(
+        "SELECT md5(concat_ws('#', \
+           (SELECT coalesce(string_agg(r::text, '|' ORDER BY r.id), '') FROM perm.rules r), \
+           (SELECT coalesce(string_agg(e::text, '|' ORDER BY e::text), '') \
+              FROM perm.rule_exemptions e), \
+           (SELECT coalesce(string_agg(t::text, '|' ORDER BY t.id), '') FROM tags t), \
+           (SELECT coalesce(string_agg(a::text, '|' ORDER BY a::text), '') \
+              FROM catalog_tag_assignments a \
+              JOIN registry.catalogs c ON c.warehouse_id = a.warehouse_id \
+             WHERE c.id = $1), \
+           (SELECT coalesce(string_agg(cp::text, '|' ORDER BY cp::text), '') \
+              FROM classification_policies cp)))",
+    )
+    .bind(catalog_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(EnforcementVersion(hash))
+}
+
+/// How long an enforcement snapshot may be reused even when its content hash is
+/// unchanged. The hash covers the rules, exemptions, tags, assignments and
+/// clearances, but not what the build reads transitively (group and role
+/// membership behind an exemption or clearance, held-move column overlays); the
+/// TTL bounds how stale those can be.
+const ENFORCEMENT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct CachedEnforcement {
+    version: EnforcementVersion,
+    built_at: std::time::Instant,
+    snapshot: Option<Arc<Snapshot>>,
+}
+
+/// Like [`CatalogSnapshotCache`] but caches the ENFORCEMENT snapshot
+/// (`build_catalog_enforcement_snapshot`: rules + withhold + classified, no
+/// grants). It is a separate cache with a separate key: it is rebuilt when
+/// [`enforcement_version_of`] changes (or after [`ENFORCEMENT_TTL`]), not when
+/// grants change.
+#[derive(Clone, Default)]
+pub struct CatalogEnforcementSnapshotCache {
+    entries: Arc<Mutex<HashMap<Uuid, CachedEnforcement>>>,
+}
+
+impl std::fmt::Debug for CatalogEnforcementSnapshotCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CatalogEnforcementSnapshotCache")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CatalogEnforcementSnapshotCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn get_fresh(
+        &self,
+        catalog_id: Uuid,
+        version: &EnforcementVersion,
+    ) -> Option<Option<Arc<Snapshot>>> {
+        let map = self.entries.lock().expect("cache mutex");
+        map.get(&catalog_id)
+            .filter(|c| &c.version == version && c.built_at.elapsed() < ENFORCEMENT_TTL)
+            .map(|c| c.snapshot.clone())
+    }
+
+    /// The current enforcement snapshot for `catalog_id`. `Err` (a restricting
+    /// rule was skipped, so the catalog cannot be enforced) is propagated and
+    /// never cached or read as `None`. `Ok(None)` means the catalog has no
+    /// registry row.
+    pub async fn get(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        catalog_id: Uuid,
+    ) -> Result<Option<Arc<Snapshot>>, egret_perm::CompileError> {
+        let version = enforcement_version_of(conn, catalog_id)
+            .await
+            .map_err(egret_perm::CompileError::from_db)?;
+        if let Some(hit) = self.get_fresh(catalog_id, &version) {
+            return Ok(hit);
+        }
+        let snapshot =
+            egret_perm_compile::opa::build::build_catalog_enforcement_snapshot(conn, catalog_id)
+                .await?
+                .map(Arc::new);
+        self.entries.lock().expect("cache mutex").insert(
+            catalog_id,
+            CachedEnforcement {
+                version,
+                built_at: std::time::Instant::now(),
                 snapshot: snapshot.clone(),
             },
         );

@@ -992,3 +992,114 @@ fn a_catalog_mask_does_not_reach_information_schema() {
         1
     );
 }
+
+// ---- SP5c: `table_read_restricted`, the whole-table withheld-read predicate. ----
+
+fn orders(col: Option<&str>) -> Target {
+    path("sales", Some("eu"), Some("orders"), col)
+}
+fn restricted(s: &Snapshot, user: &str) -> bool {
+    s.table_read_restricted(user, "sales", "eu", "orders")
+}
+
+#[test]
+fn a_row_filter_restricts_the_table_for_all_but_the_exempt() {
+    let s = snap(
+        vec![st(
+            1,
+            who(&["*"], &["alice"]),
+            orders(None),
+            Effect::RowFilter {
+                expression: "region = 'eu'".into(),
+            },
+        )],
+        vec![],
+    );
+    assert!(restricted(&s, "bob"));
+    assert!(!restricted(&s, "alice"));
+    assert!(!s.table_read_restricted("bob", "sales", "eu", "other"));
+}
+
+#[test]
+fn a_masked_column_restricts_the_whole_table() {
+    let s = snap(
+        vec![st(
+            1,
+            who(&["*"], &["alice"]),
+            orders(Some("ssn")),
+            mask("MASK_NULL", None),
+        )],
+        vec![],
+    );
+    assert!(restricted(&s, "bob"));
+    assert!(!restricted(&s, "alice"));
+}
+
+#[test]
+fn a_withhold_restricts_the_table_for_all_but_the_exempt() {
+    let s = snap(
+        vec![st(
+            1,
+            who(&["*"], &["alice"]),
+            orders(None),
+            Effect::Withhold {
+                privileges: vec![Privilege::Read],
+            },
+        )],
+        vec![],
+    );
+    assert!(restricted(&s, "bob"));
+    assert!(!restricted(&s, "alice"));
+}
+
+#[test]
+fn a_classification_selected_mask_restricts_the_table_carrying_it_on_a_column() {
+    let s = snap(
+        vec![st(
+            1,
+            who(&["*"], &["alice"]),
+            Target::Classification { name: "pii".into() },
+            mask("MASK_NULL", None),
+        )],
+        vec![ClassifiedColumn {
+            catalog: "sales".into(),
+            schema: "eu".into(),
+            table: "orders".into(),
+            column: Some("ssn".into()),
+            classification: "pii".into(),
+        }],
+    );
+    assert!(restricted(&s, "bob"));
+    assert!(!restricted(&s, "alice"));
+    assert!(!s.table_read_restricted("bob", "sales", "eu", "untagged"));
+}
+
+#[test]
+fn an_allow_alone_restricts_nothing() {
+    let s = snap(
+        vec![st(
+            1,
+            who(&["*"], &[]),
+            orders(None),
+            Effect::Allow {
+                privileges: vec![Privilege::Read],
+            },
+        )],
+        vec![],
+    );
+    assert!(!restricted(&s, "bob"));
+}
+
+#[test]
+fn the_no_op_mask_restricts_nothing() {
+    let s = snap(
+        vec![st(
+            1,
+            who(&["*"], &[]),
+            orders(Some("ssn")),
+            mask("MASK_NONE", None),
+        )],
+        vec![],
+    );
+    assert!(!restricted(&s, "bob"));
+}

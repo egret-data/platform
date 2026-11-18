@@ -144,6 +144,8 @@ async fn env_with_profile(profile: Option<Value>) -> Option<Env> {
         keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
         catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
         snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache::new(),
+        enforcement_cache:
+            egret_catalog_engine::unified_decide::CatalogEnforcementSnapshotCache::new(),
     });
     let hold = Arc::new(ViewHold::new(db.clone(), Arc::new(NoExplain)));
     let hook = Arc::new(TableHook::new(db.clone()));
@@ -2158,4 +2160,245 @@ async fn a_body_that_never_arrives_is_a_408() {
         assert!(message(&body).contains("did not arrive"), "{route}: {body}");
     }
     assert!(!env.exists("tables", "sales", "t").await);
+}
+
+// ---------------------------------------------------------------------------
+// SP5c: the iceberg-rest switch denies a READ of a table carrying a mask.
+// ---------------------------------------------------------------------------
+
+/// A unified catalog over the env's warehouse: its registry row, three
+/// service-account clients (a reader, an exempt reader, a writer, each with a
+/// `catalog` grant), folded into `perm.grants`, and a mask on `sales.orders`.
+struct Enforcing {
+    catalog_id: uuid::Uuid,
+    reader: String,
+    exempt: String,
+    writer: String,
+    exempt_writer: String,
+}
+
+impl Env {
+    async fn enforcing(&self) -> Enforcing {
+        let pool = self.catalog.pool().clone();
+        let (ws, sc): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+            "SELECT workspace_id, storage_conn_id FROM catalog.warehouses WHERE id = $1",
+        )
+        .bind(self.warehouse_id)
+        .fetch_one(&pool)
+        .await
+        .expect("warehouse row");
+        let catalog_id: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO registry.catalogs (name, kind, config, warehouse_id, \
+                                            storage_connection_id) \
+             VALUES ($1, 'iceberg', jsonb_build_object('metastore', \
+                jsonb_build_object('warehouse_id', $2::text), \
+                'storage_connection_id', $3::text), $2, $3) RETURNING id",
+        )
+        .bind(unique("encat"))
+        .bind(self.warehouse_id)
+        .bind(sc)
+        .fetch_one(&pool)
+        .await
+        .expect("registry catalog");
+        let mut tokens = Vec::new();
+        let mut exempt_users: Vec<String> = Vec::new();
+        for (who, privilege) in [
+            ("reader", "read"),
+            ("exempt", "read"),
+            ("writer", "write"),
+            ("exempt_writer", "write"),
+        ] {
+            let role_name = unique("en-role");
+            let role: uuid::Uuid = sqlx::query_scalar(
+                "INSERT INTO catalog.catalog_roles (warehouse_id, name, consumer_type) \
+                 VALUES ($1,$2,'external') RETURNING id",
+            )
+            .bind(self.warehouse_id)
+            .bind(&role_name)
+            .fetch_one(&pool)
+            .await
+            .expect("role");
+            sqlx::query(
+                "INSERT INTO catalog.catalog_grants \
+                   (catalog_role_id, securable_type, privilege) VALUES ($1,'catalog',$2)",
+            )
+            .bind(role)
+            .bind(privilege)
+            .execute(&pool)
+            .await
+            .expect("grant");
+            let username = unique("enuser");
+            let sa: uuid::Uuid = sqlx::query_scalar(
+                "INSERT INTO users (provider, email, name, username) \
+                 VALUES ('local', $1, $1, $2) RETURNING id",
+            )
+            .bind(format!("{username}@service.invalid"))
+            .bind(&username)
+            .fetch_one(&pool)
+            .await
+            .expect("user");
+            sqlx::query(
+                "INSERT INTO service_accounts (user_id, scope, workspace_id, name) \
+                 VALUES ($1,'workspace',$2,$3)",
+            )
+            .bind(sa)
+            .bind(ws)
+            .bind(format!("n-{sa}"))
+            .execute(&pool)
+            .await
+            .expect("sa");
+            let client_id = unique("en-cid");
+            sqlx::query(
+                "INSERT INTO catalog.catalog_clients \
+                   (name, consumer_type, workspace_id, warehouse_id, catalog_role_id, \
+                    client_id, client_secret_hash, service_account_id) \
+                 VALUES ($1,'external',$2,$3,$4,$5,'h',$6)",
+            )
+            .bind(unique("c"))
+            .bind(ws)
+            .bind(self.warehouse_id)
+            .bind(role)
+            .bind(&client_id)
+            .bind(sa)
+            .execute(&pool)
+            .await
+            .expect("client");
+            if who.starts_with("exempt") {
+                exempt_users.push(username);
+            }
+            let km = self.keys.active().await.expect("active key");
+            let token = egret_machine_idp::sign_claims(
+                &km,
+                &json!({
+                    "sub": client_id, "aud": CATALOG_AUDIENCE,
+                    "warehouse": self.warehouse, "roles": [role_name],
+                    "exp": chrono::Utc::now().timestamp() + 600,
+                }),
+            )
+            .expect("sign");
+            tokens.push(token);
+        }
+        let mut c = pool.acquire().await.unwrap();
+        egret_perm_compile::catalog_rbac_migrate::fold_catalog(&mut c, catalog_id, "sp5c-test")
+            .await
+            .expect("fold");
+        sqlx::query(
+            "INSERT INTO perm.catalog_grant_switch (catalog_id, source, switched_at, switched_by) \
+             VALUES ($1,'unified',now(),'sp5c-test')",
+        )
+        .bind(catalog_id)
+        .execute(&pool)
+        .await
+        .expect("grant switch");
+        let rule: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO perm.rules (name, kind, mask_type, selector_kind, catalog_id, \
+                                     schema_name, table_name, column_name) \
+             VALUES ($1,'mask'::perm.rule_kind,'MASK_NULL','path'::perm.selector_kind, \
+                     $2,'sales','orders','id') RETURNING id",
+        )
+        .bind(unique("sp5c"))
+        .bind(catalog_id)
+        .fetch_one(&pool)
+        .await
+        .expect("rule");
+        for exempt_user in &exempt_users {
+            sqlx::query(
+                "INSERT INTO perm.rule_exemptions (rule_id, kind, ref, mode) \
+                 VALUES ($1,'user',$2,'include')",
+            )
+            .bind(rule)
+            .bind(exempt_user)
+            .execute(&pool)
+            .await
+            .expect("exemption");
+        }
+        let mut tokens = tokens.into_iter();
+        Enforcing {
+            catalog_id,
+            reader: tokens.next().unwrap(),
+            exempt: tokens.next().unwrap(),
+            writer: tokens.next().unwrap(),
+            exempt_writer: tokens.next().unwrap(),
+        }
+    }
+
+    async fn set_enforce(&self, catalog_id: uuid::Uuid, on: bool) {
+        sqlx::query(
+            "INSERT INTO perm.catalog_rule_enforcement_switch \
+               (catalog_id, enforce, switched_at, switched_by) VALUES ($1,$2,now(),'sp5c-test') \
+             ON CONFLICT (catalog_id) DO UPDATE SET enforce = EXCLUDED.enforce",
+        )
+        .bind(catalog_id)
+        .bind(on)
+        .execute(self.catalog.pool())
+        .await
+        .expect("enforcement switch");
+    }
+}
+
+#[tokio::test]
+async fn the_guard_refuses_a_read_of_a_masked_table_only_when_enforcing() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    env.create_table("sales", "plain").await;
+    let e = env.enforcing().await;
+
+    // Opt-in: with no enforcement row, then enforce=off, the grant decides.
+    assert_eq!(
+        env.load(&e.reader, "tables", "sales", "orders").await,
+        StatusCode::OK
+    );
+    env.set_enforce(e.catalog_id, false).await;
+    assert_eq!(
+        env.load(&e.reader, "tables", "sales", "orders").await,
+        StatusCode::OK
+    );
+
+    // Enforcing: the masked table is refused, an unruled one is not.
+    env.set_enforce(e.catalog_id, true).await;
+    assert_eq!(
+        env.load(&e.reader, "tables", "sales", "orders").await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        env.load(&e.reader, "tables", "sales", "plain").await,
+        StatusCode::OK
+    );
+    // The exempt principal still reads it.
+    assert_eq!(
+        env.load(&e.exempt, "tables", "sales", "orders").await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn the_guard_refuses_a_write_to_a_restricted_table_only_when_enforcing() {
+    let env = env_or_skip!();
+    env.create_table("sales", "orders").await;
+    env.create_table("sales", "plain").await;
+    let e = env.enforcing().await;
+    let commit = |token: &str, name: &str| {
+        let token = token.to_string();
+        let name = name.to_string();
+        let env = &env;
+        async move {
+            env.commit_one(&token, "tables", "sales", &name, commit_body(None, "v"))
+                .await
+        }
+    };
+
+    // Opt-in: not enforcing, the write grant is enough.
+    let (status, body) = commit(&e.writer, "orders").await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // Enforcing: a write credential can read raw files, so the write is
+    // refused on the masked table, still allowed on an unruled one.
+    env.set_enforce(e.catalog_id, true).await;
+    let (status, body) = commit(&e.writer, "orders").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = commit(&e.writer, "plain").await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+    // An exempt principal's write is allowed (the write grant exempt holder).
+    let (status, body) = commit(&e.exempt_writer, "orders").await;
+    assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
 }

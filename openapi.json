@@ -9842,6 +9842,218 @@
         }
       }
     },
+    "/api/control-plane/perm/iceberg-rest/{catalog}/plan": {
+      "post": {
+        "tags": [
+          "control-plane-catalog"
+        ],
+        "summary": "**plan**: preview rule enforcement on a catalog — the `(principal, table)`\nreads that would flip allow→deny, and whether the grant decision is provably\nunchanged. Changes nothing.",
+        "operationId": "iceberg_rest_plan",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rule-enforcement preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IcebergRestPlan"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/iceberg-rest/{catalog}/switch": {
+      "post": {
+        "tags": [
+          "control-plane-catalog"
+        ],
+        "summary": "**switch**: enable rule enforcement — refused (409, unchanged) unless the\ncatalog's grants are on the unified store and the grant check is clean.",
+        "operationId": "iceberg_rest_switch",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Enforcement is on; the plan it switched on",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IcebergRestPlan"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such registry catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing changed: grants not on the unified store, or not identical",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/iceberg-rest/{catalog}/undo": {
+      "post": {
+        "tags": [
+          "control-plane-catalog"
+        ],
+        "summary": "**undo**: disable rule enforcement. Reversible; drops nothing.",
+        "operationId": "iceberg_rest_undo",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "path",
+            "description": "Registry catalog id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Rule enforcement is off"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/migrate/clearances": {
       "post": {
         "tags": [
@@ -52683,6 +52895,45 @@
           }
         }
       },
+      "IcebergRestPlan": {
+        "type": "object",
+        "description": "The preview of switching a catalog's rule enforcement on.",
+        "required": [
+          "grantSourceUnified",
+          "grantsIdentical",
+          "grantDivergences",
+          "newDenies",
+          "previewComplete"
+        ],
+        "properties": {
+          "grantSourceUnified": {
+            "type": "boolean",
+            "description": "Whether the catalog's grants are on the unified store (the precondition)."
+          },
+          "grantsIdentical": {
+            "type": "boolean",
+            "description": "`false` ⇒ `switch` is refused (grants not proven unchanged)."
+          },
+          "grantDivergences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Divergence"
+            },
+            "description": "Legacy-vs-unified grant disagreements; empty when identical or skipped."
+          },
+          "newDenies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RuleDeny"
+            },
+            "description": "The intended allow→deny flips (reported, not refused)."
+          },
+          "previewComplete": {
+            "type": "boolean",
+            "description": "`true` when every restricting rule resolved to enumerated tables, so\n`new_denies` is the whole story. `false` means a catalog-wide or\nschema-wide path rule exists (or nothing was computed): ADDITIONAL tables\nbeyond `new_denies` will be denied, and an empty/short list must not be\nread as \"nothing will be denied\"."
+          }
+        }
+      },
       "ImpersonationDto": {
         "type": "object",
         "description": "The active impersonation as surfaced by `/me`: who is being acted-as\n(`target`), the admin behind it (`impersonator`), and the overlay's bounds.",
@@ -58847,6 +59098,32 @@
           },
           "exempt": {
             "$ref": "#/components/schemas/PrincipalSet"
+          }
+        }
+      },
+      "RuleDeny": {
+        "type": "object",
+        "description": "One `(principal, table)` whose read flips from allow to deny when rule\nenforcement is switched on.",
+        "required": [
+          "principal",
+          "catalog",
+          "schema",
+          "table"
+        ],
+        "properties": {
+          "principal": {
+            "type": "string",
+            "description": "The service-account username that is denied."
+          },
+          "catalog": {
+            "type": "string"
+          },
+          "schema": {
+            "type": "string",
+            "description": "The dot-joined namespace."
+          },
+          "table": {
+            "type": "string"
           }
         }
       },

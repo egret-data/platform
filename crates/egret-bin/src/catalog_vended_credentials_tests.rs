@@ -504,6 +504,8 @@ async fn env_with_lifetime(sts_token_validity_seconds: u64) -> Option<Env> {
         keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
         catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
         snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache::new(),
+        enforcement_cache:
+            egret_catalog_engine::unified_decide::CatalogEnforcementSnapshotCache::new(),
     });
     let hook = Arc::new(TableHook::new(db.clone()));
     let env = Env {

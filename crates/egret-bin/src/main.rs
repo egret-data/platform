@@ -591,6 +591,8 @@ struct EgretCatalogGuard {
     /// SP5b: per-catalog unified `perm` snapshots, used only for catalogs whose
     /// switch is `unified` (`egret_catalog_engine::unified_decide`).
     snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache,
+    /// SP5c: enforcement snapshots for catalogs with the iceberg-rest switch on.
+    enforcement_cache: egret_catalog_engine::unified_decide::CatalogEnforcementSnapshotCache,
 }
 
 impl EgretCatalogGuard {
@@ -1082,9 +1084,29 @@ impl egret_catalog_engine::CatalogGuard for EgretCatalogGuard {
             let eq = CatalogNameEq::load(&self.catalog, &grants, &requested)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("names: {e}")))?;
+            // SP5c: on a unified catalog with the iceberg-rest switch on, any
+            // access (read or write) to a table carrying a mask / row filter /
+            // withhold is refused even when a grant covers it. Loaded when a
+            // need names a table; any failure to enforce denies (fail closed).
+            let enforcement = match (&catalog_row, source) {
+                (Some((cid, _)), Source::Unified) if needs.iter().any(|n| n.table.is_some()) => {
+                    unified_decide::ReadEnforcement::load(&self.enforcement_cache, &mut conn, *cid)
+                        .await
+                }
+                _ => unified_decide::ReadEnforcement::Off,
+            };
             for need in needs {
                 if !decider.covers(&need.ns, need.table.as_deref(), need.write, &eq) {
                     return forbid(need.refusal);
+                }
+                if let Some(table) = need.table.as_deref() {
+                    if enforcement.denies_access(&unified_user, &unified_catalog, &need.ns, table) {
+                        return forbid(format!(
+                            "role '{token_role}' may not access {}.{table}: the table carries a \
+                             mask, row filter or withhold that the Iceberg REST surface cannot enforce",
+                            need.ns.join(".")
+                        ));
+                    }
                 }
             }
         }
@@ -2919,6 +2941,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
                 keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
                 catalog: egret_catalog_engine::CatalogStore::new(db.clone()),
                 snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache::new(),
+                enforcement_cache:
+                    egret_catalog_engine::unified_decide::CatalogEnforcementSnapshotCache::new(),
             });
         // View governance B2: a classified view's commit waits until every
         // Ranger plugin holds its tags. The lineage EXPLAIN runs as
@@ -4152,6 +4176,8 @@ mod catalog_guard_audience_tests {
             keys: egret_machine_idp::PgSigningKeyStore::new(db.clone()),
             catalog: egret_catalog_engine::CatalogStore::new(db),
             snapshot_cache: egret_catalog_engine::unified_decide::CatalogSnapshotCache::new(),
+            enforcement_cache:
+                egret_catalog_engine::unified_decide::CatalogEnforcementSnapshotCache::new(),
         })
     }
 

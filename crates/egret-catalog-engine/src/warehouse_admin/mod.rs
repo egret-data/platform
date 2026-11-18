@@ -340,6 +340,13 @@ fn router() -> Router<CatalogAdminState> {
             "/perm/catalog-migrate/{catalog}/finalize",
             post(catalog_migrate_finalize),
         )
+        // SP5c Task 4: gated per-catalog iceberg-rest rule enforcement.
+        .route("/perm/iceberg-rest/{catalog}/plan", post(iceberg_rest_plan))
+        .route(
+            "/perm/iceberg-rest/{catalog}/switch",
+            post(iceberg_rest_switch),
+        )
+        .route("/perm/iceberg-rest/{catalog}/undo", post(iceberg_rest_undo))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1769,6 +1776,85 @@ async fn catalog_migrate_finalize(
     Ok(Json(summary))
 }
 
+// ── SP5c Task 4: iceberg-rest rule enforcement plan/switch/undo ──────────────
+use crate::iceberg_rest_gate::{self, IcebergRestPlan};
+
+/// **plan**: preview rule enforcement on a catalog — the `(principal, table)`
+/// reads that would flip allow→deny, and whether the grant decision is provably
+/// unchanged. Changes nothing.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/iceberg-rest/{catalog}/plan",
+    tag = "control-plane-catalog",
+    params(("catalog" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 200, description = "The rule-enforcement preview", body = IcebergRestPlan),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not a platform admin", body = ErrorBody),
+        (status = 404, description = "No such registry catalog", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn iceberg_rest_plan(
+    State(st): State<CatalogAdminState>,
+    _admin: PlatformAuth,
+    Path(catalog): Path<Uuid>,
+) -> Result<Json<IcebergRestPlan>, CatalogHttpError> {
+    let cache = crate::unified_decide::CatalogEnforcementSnapshotCache::new();
+    Ok(Json(
+        iceberg_rest_gate::plan(&st.store, &cache, catalog).await?,
+    ))
+}
+
+/// **switch**: enable rule enforcement — refused (409, unchanged) unless the
+/// catalog's grants are on the unified store and the grant check is clean.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/iceberg-rest/{catalog}/switch",
+    tag = "control-plane-catalog",
+    params(("catalog" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 200, description = "Enforcement is on; the plan it switched on", body = IcebergRestPlan),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not a platform admin", body = ErrorBody),
+        (status = 404, description = "No such registry catalog", body = ErrorBody),
+        (status = 409, description = "Nothing changed: grants not on the unified store, or not identical", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn iceberg_rest_switch(
+    State(st): State<CatalogAdminState>,
+    PlatformAuth(p): PlatformAuth,
+    Path(catalog): Path<Uuid>,
+) -> Result<Json<IcebergRestPlan>, CatalogHttpError> {
+    let cache = crate::unified_decide::CatalogEnforcementSnapshotCache::new();
+    Ok(Json(
+        iceberg_rest_gate::switch(&st.store, &cache, catalog, &p.email).await?,
+    ))
+}
+
+/// **undo**: disable rule enforcement. Reversible; drops nothing.
+#[utoipa::path(
+    post,
+    path = "/api/control-plane/perm/iceberg-rest/{catalog}/undo",
+    tag = "control-plane-catalog",
+    params(("catalog" = Uuid, Path, description = "Registry catalog id")),
+    responses(
+        (status = 204, description = "Rule enforcement is off"),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Not a platform admin", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn iceberg_rest_undo(
+    State(st): State<CatalogAdminState>,
+    PlatformAuth(p): PlatformAuth,
+    Path(catalog): Path<Uuid>,
+) -> Result<StatusCode, CatalogHttpError> {
+    iceberg_rest_gate::undo(&st.store, catalog, &p.email).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(utoipa::OpenApi)]
 #[openapi(
     paths(
@@ -1803,6 +1889,9 @@ async fn catalog_migrate_finalize(
         catalog_migrate_switch,
         catalog_migrate_undo,
         catalog_migrate_finalize,
+        iceberg_rest_plan,
+        iceberg_rest_switch,
+        iceberg_rest_undo,
     ),
     components(schemas(
         WarehouseDto,
@@ -1835,6 +1924,8 @@ async fn catalog_migrate_finalize(
         EquivalenceReport,
         catalog_migrate_gate::Divergence,
         FinalizeSummary,
+        IcebergRestPlan,
+        iceberg_rest_gate::RuleDeny,
         ErrorBody,
     )),
     tags((name = "control-plane-catalog", description = "Embedded-catalog warehouse management: warehouses, catalog roles/grants/clients, browse, and admin ops")),
