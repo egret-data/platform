@@ -114,21 +114,24 @@ impl AccessGrantStore {
                   OR (ag.scope_type = 'workspace' AND ag.scope_id = $2) \
                   OR (ag.scope_type = 'object' AND ag.scope_id = ANY($3)) ) \
                AND (ag.expires_at IS NULL OR ag.expires_at > now())";
-        let sql = match read_source(&self.db).await {
+        let source = read_source(&self.db).await;
+        let sql = match source {
             GrantSource::Legacy => LEGACY_SQL,
             GrantSource::Unified => UNIFIED_SQL,
         };
-        let rows: Vec<GrantRow> = match sqlx::query_as(sql)
+        let first = sqlx::query_as(sql)
             .bind(user_id.0)
             .bind(ws.map(|w| w.0))
             .bind(object_scope_ids)
             .fetch_all(&self.db.pool)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                // Fail-safe (EO-D7): a unified read error falls back to the proven legacy table.
-                tracing::error!(error = %e, "EO4 unified grant read failed; FAIL-SAFE to access_grants");
+            .await;
+        let rows: Vec<GrantRow> = match (source, first) {
+            (_, Ok(r)) => r,
+            // Legacy: an error propagates exactly as before EO4 (no retry, no fallback).
+            (GrantSource::Legacy, Err(e)) => return Err(db_err(e)),
+            // Fail-safe (EO-D7): only a unified read error falls back to the proven legacy table.
+            (GrantSource::Unified, Err(e)) => {
+                tracing::error!(error = %e, "unified grant read failed; fail-safe to access_grants");
                 sqlx::query_as(LEGACY_SQL)
                     .bind(user_id.0)
                     .bind(ws.map(|w| w.0))
@@ -175,14 +178,14 @@ impl AccessGrantStore {
     pub async fn report(&self) -> Result<Vec<GrantDivergence>> {
         let only_legacy: Vec<(uuid::Uuid,)> = sqlx::query_as(
             "SELECT id FROM (SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM access_grants \
-             EXCEPT SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM perm.cedar_grants) x",
+             EXCEPT SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM perm.cedar_grants) x ORDER BY id",
         )
         .fetch_all(&self.db.pool)
         .await
         .map_err(db_err)?;
         let only_unified: Vec<(uuid::Uuid,)> = sqlx::query_as(
             "SELECT id FROM (SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM perm.cedar_grants \
-             EXCEPT SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM access_grants) x",
+             EXCEPT SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM access_grants) x ORDER BY id",
         )
         .fetch_all(&self.db.pool)
         .await

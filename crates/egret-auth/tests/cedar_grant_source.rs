@@ -139,8 +139,69 @@ async fn fold_backfills_and_trigger_mirrors_new_writes() {
     store.fold().await.unwrap();
 }
 
+/// Restores the shared DB even if an assertion panics: switch back to Legacy,
+/// rename the mirror back if it was renamed, and delete seeded rows.
+struct Cleanup {
+    ids: Vec<uuid::Uuid>,
+}
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let ids = self.ids.clone();
+        let h = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    // Own pool on this runtime: the test runtime is blocked in Drop.
+                    let url = egret_test_db::url().await.expect("DATABASE_URL");
+                    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+                    let _ = sqlx::query(
+                        "DO $$ BEGIN IF to_regclass('perm.cedar_grants') IS NULL AND to_regclass('perm.cedar_grants_tmp') IS NOT NULL THEN ALTER TABLE perm.cedar_grants_tmp RENAME TO cedar_grants; END IF; END $$",
+                    )
+                    .execute(&pool)
+                    .await;
+                    let _ = sqlx::query("UPDATE perm.cedar_grant_source SET source = 'legacy'")
+                        .execute(&pool)
+                        .await;
+                    for id in ids {
+                        let _ = sqlx::query("DELETE FROM perm.cedar_grants WHERE id = $1")
+                            .bind(id)
+                            .execute(&pool)
+                            .await;
+                        let _ = sqlx::query("DELETE FROM access_grants WHERE id = $1")
+                            .bind(id)
+                            .execute(&pool)
+                            .await;
+                    }
+                });
+        });
+        let _ = h.join();
+    }
+}
+
+async fn seed_role(db: &Db) -> uuid::Uuid {
+    sqlx::query_scalar("SELECT id FROM roles LIMIT 1")
+        .fetch_one(&db.pool)
+        .await
+        .expect("a seeded role")
+}
+
+async fn seed_legacy_grant(db: &Db, user: uuid::Uuid, role: uuid::Uuid) -> uuid::Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id, effect) \
+         VALUES ('user', $1, $2, 'platform', NULL, 'allow') RETURNING id",
+    )
+    .bind(user)
+    .bind(role)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn report_empty_when_mirror_is_faithful_and_catches_divergence() {
+    use egret_auth::grants::GrantDivergenceKind::{OnlyLegacy, OnlyUnified};
     let _g = SWITCH_LOCK.lock().await;
     let db = db().await;
     let store = egret_auth::grants::AccessGrantStore::new(db.clone());
@@ -150,8 +211,27 @@ async fn report_empty_when_mirror_is_faithful_and_catches_divergence() {
         "faithful mirror => empty report"
     );
 
-    // Teeth: a mirror row that does NOT exist in access_grants.
+    let role = seed_role(&db).await;
     let ghost = uuid::Uuid::new_v4();
+    let user = uuid::Uuid::new_v4();
+    // (a) legacy-only row: insert then drop its mirror copy.
+    let legacy_only = seed_legacy_grant(&db, user, role).await;
+    // (b) same id, different effect: insert then flip the mirror's effect.
+    let differing = seed_legacy_grant(&db, uuid::Uuid::new_v4(), role).await;
+    let _c = Cleanup {
+        ids: vec![ghost, legacy_only, differing],
+    };
+    sqlx::query("DELETE FROM perm.cedar_grants WHERE id = $1")
+        .bind(legacy_only)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE perm.cedar_grants SET effect = 'deny' WHERE id = $1")
+        .bind(differing)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    // (c) mirror-only ghost row.
     sqlx::query(
         "INSERT INTO perm.cedar_grants (id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at) \
          VALUES ($1,'user',$1,$1,'platform',NULL,NULL,'allow',NULL)",
@@ -160,18 +240,15 @@ async fn report_empty_when_mirror_is_faithful_and_catches_divergence() {
     .execute(&db.pool)
     .await
     .unwrap();
+
     let r = store.report().await.unwrap();
+    let has = |id, k| r.iter().any(|d| d.id == id && d.kind == k);
+    assert!(has(ghost, OnlyUnified), "mirror-only row");
+    assert!(has(legacy_only, OnlyLegacy), "legacy-only row");
     assert!(
-        r.iter().any(
-            |d| d.id == ghost && d.kind == egret_auth::grants::GrantDivergenceKind::OnlyUnified
-        ),
-        "report catches a mirror-only row"
+        has(differing, OnlyLegacy) && has(differing, OnlyUnified),
+        "same id with differing effect shows under both kinds"
     );
-    sqlx::query("DELETE FROM perm.cedar_grants WHERE id = $1")
-        .bind(ghost)
-        .execute(&db.pool)
-        .await
-        .unwrap();
 }
 
 #[tokio::test]
@@ -181,19 +258,12 @@ async fn grants_for_reads_the_source_the_switch_names() {
     let store = egret_auth::grants::AccessGrantStore::new(db.clone());
     let user = uuid::Uuid::new_v4();
     let uid = egret_core::ids::UserId(user);
-    let role_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM roles LIMIT 1")
-        .fetch_one(&db.pool)
-        .await
-        .expect("a seeded role");
-    let gid: uuid::Uuid = sqlx::query_scalar(
-        "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id, effect) \
-         VALUES ('user', $1, $2, 'platform', NULL, 'allow') RETURNING id",
-    )
-    .bind(user)
-    .bind(role_id)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
+    let role_id = seed_role(&db).await;
+    let gid = seed_legacy_grant(&db, user, role_id).await;
+    let ghost = uuid::Uuid::new_v4();
+    let _c = Cleanup {
+        ids: vec![gid, ghost],
+    };
     store.fold().await.unwrap();
 
     let key = |g: &egret_auth::grants::Grant| (g.role_id, g.scope_type.clone(), g.effect.clone());
@@ -214,7 +284,6 @@ async fn grants_for_reads_the_source_the_switch_names() {
     );
 
     // Mirror-only ghost for the same subject: visible ONLY under unified.
-    let ghost = uuid::Uuid::new_v4();
     sqlx::query(
         "INSERT INTO perm.cedar_grants (id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at) \
          VALUES ($1,'user',$2,$3,'platform',NULL,NULL,'deny',NULL)",
@@ -230,15 +299,32 @@ async fn grants_for_reads_the_source_the_switch_names() {
     let legacy_ghost = store.grants_for(uid, None, &[]).await.unwrap();
     assert_eq!(unified_ghost.len(), 2, "unified reads perm.cedar_grants");
     assert_eq!(legacy_ghost.len(), 1, "legacy ignores the mirror-only row");
+}
 
-    sqlx::query("DELETE FROM perm.cedar_grants WHERE id = $1")
-        .bind(ghost)
+#[tokio::test]
+async fn unified_read_error_fails_safe_to_access_grants() {
+    let _g = SWITCH_LOCK.lock().await;
+    let db = db().await;
+    let store = egret_auth::grants::AccessGrantStore::new(db.clone());
+    let user = uuid::Uuid::new_v4();
+    let role = seed_role(&db).await;
+    let gid = seed_legacy_grant(&db, user, role).await;
+    let _c = Cleanup { ids: vec![gid] };
+    write_source(&db, GrantSource::Unified, "t").await.unwrap();
+    // Force the unified read to error: the mirror table "does not exist".
+    sqlx::query("ALTER TABLE perm.cedar_grants RENAME TO cedar_grants_tmp")
         .execute(&db.pool)
         .await
         .unwrap();
-    sqlx::query("DELETE FROM access_grants WHERE id = $1")
-        .bind(gid)
+    let got = store
+        .grants_for(egret_core::ids::UserId(user), None, &[])
+        .await;
+    // Restore before asserting (Cleanup also restores on panic).
+    sqlx::query("ALTER TABLE perm.cedar_grants_tmp RENAME TO cedar_grants")
         .execute(&db.pool)
         .await
         .unwrap();
+    let got = got.expect("fail-safe: no error under Unified");
+    assert_eq!(got.len(), 1, "falls back to access_grants rows");
+    assert_eq!(got[0].role_id, role);
 }
