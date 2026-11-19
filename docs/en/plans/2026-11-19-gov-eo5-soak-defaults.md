@@ -61,7 +61,9 @@ fn shadow_round_trips_and_is_distinct() {
 
 ---
 
-### Task 2: EO4 shadow observe (report each reload) + `/shadow` endpoint + one-level undo
+### Task 3: EO4 shadow observe (report each reload) + `/shadow` endpoint + one-level undo
+
+**Ordering note:** this task runs AFTER the migration task (now Task 2), so `perm.cedar_grant_source`'s CHECK already allows `shadow` and the seeded default is already `shadow` — writing `Shadow` via the endpoint/undo succeeds, and tests that need a specific starting state should set it explicitly.
 
 **Files:**
 - Modify: `crates/egret-auth/src/pdp/mod.rs` (`load_inner` runs `report()` + logs when `grant_source == Shadow`)
@@ -133,11 +135,12 @@ Keep the `RolesChanged` publish and `read_state` response. Update the undo doc c
 
 ---
 
-### Task 3: Migration 0241 — fold + seed both switches to `shadow`
+### Task 2: Migration 0241 — fold + seed both switches to `shadow` + rebase test baselines
 
 **Files:**
 - Create: `migrations/0241_eo5_soak_defaults.sql`
 - Test: `crates/egret-auth/tests/cedar_grant_source.rs` (fold-in-migration faithful; seeded-default = shadow; ON CONFLICT keeps an explicit value)
+- Modify: whichever existing test files assert an initial switch state of `legacy` (now `shadow`) — the seeded-default fallout (see Global Constraints). This task MUST end green, so fix them here.
 
 **Interfaces:**
 - Consumes: `access_grants`, `perm.cedar_grants` (0240), `perm.pdp_policy_source` (0238), `perm.cedar_grant_source` (0240).
@@ -187,7 +190,9 @@ ON CONFLICT (id) DO NOTHING;
 
 - [ ] **Step 4: Run tests** — `CARGO_TARGET_DIR=target-eo5 cargo test -p egret-auth --test cedar_grant_source`. Expected: PASS.
 
-- [ ] **Step 5: Commit** — `git add migrations/0241_eo5_soak_defaults.sql crates/egret-auth/tests/cedar_grant_source.rs` then `git commit -m "feat(migrations): EO5 fold mirror and seed both switches to shadow (0241)"`.
+- [ ] **Step 5: Rebase the default-baseline fallout.** Seeding `shadow` means every scratch test DB now boots at `shadow`, not `legacy`. Run the full egret-auth suite: `DATABASE_URL=postgres://egret:egret@localhost:5468/egret_test CARGO_TARGET_DIR=target-eo5 cargo test -p egret-auth`. For each failure that is a test asserting an *initial* switch state of `legacy` (likely in `cedar_grant_source.rs`, `cedar_grant_routes.rs`, `cedar_grant_hot_flip.rs`, and the EO3 `pdp_source*` / `pdp_source_hot_flip` tests), fix it the minimal way: either update the expected initial state to `shadow`, or have the test explicitly set its required starting state first (preferred for lifecycle/hot-flip tests, which should set `legacy` explicitly before exercising the flip so they still cover the full path). Do NOT weaken any *decision* assertion — `shadow` serves exactly the legacy decisions, so decision assertions must stay. Re-run until the whole egret-auth suite is green.
+
+- [ ] **Step 6: Commit** — stage by explicit path: `git add migrations/0241_eo5_soak_defaults.sql` plus every test file you touched, then `git commit -m "feat(migrations): EO5 fold mirror and seed both switches to shadow (0241)"`.
 
 ---
 
@@ -208,7 +213,7 @@ ON CONFLICT (id) DO NOTHING;
 
 - [ ] **Step 4: Run the drift gates** — `CARGO_TARGET_DIR=target-eo5 cargo test -p egret-server --lib committed_openapi_json_is_current generated_client_was_emitted_from_the_committed_spec`. Expected: PASS.
 
-- [ ] **Step 5: Fix default-baseline fallout.** Run the full egret-auth suite: `CARGO_TARGET_DIR=target-eo5 cargo test -p egret-auth`. For each failure that is a test asserting an *initial* switch state of `legacy`, change the expectation to `shadow` (the new seeded default) — but confirm the test's *decisions* are unchanged (shadow serves legacy). Do NOT weaken any decision assertion. Re-run the EO2/EO3/EO4 differentials (`cedar_differential`, `pdp_source_hot_flip`, `cedar_grant_hot_flip`) and confirm green.
+- [ ] **Step 5: Confirm the full suite + differentials.** The default-baseline fallout was already fixed in Task 2; here just confirm nothing regressed after the endpoint/observe additions and the regen. Run `DATABASE_URL=postgres://egret:egret@localhost:5468/egret_test CARGO_TARGET_DIR=target-eo5 cargo test -p egret-auth` and confirm the EO2/EO3/EO4 differentials (`cedar_differential`, `pdp_source_hot_flip`, `cedar_grant_hot_flip`) are green. Fix any residual baseline assertion the same minimal way as Task 2 if one slipped through.
 
 - [ ] **Step 6: fmt + clippy** — `CARGO_TARGET_DIR=target-eo5 cargo fmt --all && CARGO_TARGET_DIR=target-eo5 cargo clippy -p egret-auth -p egret-server -- -D warnings`. Expected: clean.
 
@@ -218,7 +223,7 @@ ON CONFLICT (id) DO NOTHING;
 
 ## Self-Review
 
-- **Spec coverage:** EO5-D1 (observe-only) → Tasks 1–3 serve legacy, no serve-flip. EO5-D2 (seed + keep fail-safe) → Task 3 ON CONFLICT DO NOTHING; read_source untouched. EO5-D3 (EO4 shadow) → Tasks 1–2. EO5-D4 (fold-in-migration) → Task 3. EO5-D5 (one-level undo + /shadow) → Task 2. EO5-D6 (no deletion/vocab) → nothing deletes code; no vocab touched. Verification 1–6 → Tasks 2–4 tests.
+- **Spec coverage:** EO5-D1 (observe-only) → all tasks serve legacy, no serve-flip. EO5-D2 (seed + keep fail-safe) → Task 2 ON CONFLICT DO NOTHING; read_source untouched. EO5-D3 (EO4 shadow) → Task 1 (routing) + Task 3 (observe). EO5-D4 (fold-in-migration + widen CHECK) → Task 2. EO5-D5 (one-level undo + /shadow) → Task 3. EO5-D6 (no deletion/vocab) → nothing deletes code; no vocab touched. Verification 1–6 → Tasks 2–4 tests. **Execution order: Task 1 (done) → Task 2 migration (widen CHECK + fold + seed + baseline rebase) → Task 3 endpoint/observe/undo → Task 4 regen + typecheck.**
 - **Placeholder scan:** all steps carry concrete SQL/Rust or exact commands.
 - **Type consistency:** `GrantSource::Shadow` defined in Task 1 and used in Tasks 2–4; `report()`/`GrantDivergence`/`AccessGrantStore` names flagged "confirm against grants.rs" where quoted from memory; `operation_id = "cedar_grants_shadow"` consistent between Task 2 and Task 4.
 - **Owed outside this PR:** the `egret-data/docs` runbook PR (Global Constraints).
