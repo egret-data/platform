@@ -20,11 +20,14 @@ pub enum ObjectKind {
     SavedQuery,
     App,
     DataApiEndpoint,
+    Workflow,
+    /// An `automation.schedules` row (alert/report/schedule); spelled `alert`.
+    Schedule,
 }
 
 impl ObjectKind {
     /// Every kind, for exhaustive tests and iteration.
-    pub const ALL: [ObjectKind; 7] = [
+    pub const ALL: [ObjectKind; 9] = [
         ObjectKind::Dashboard,
         ObjectKind::Chart,
         ObjectKind::Dataset,
@@ -32,6 +35,8 @@ impl ObjectKind {
         ObjectKind::SavedQuery,
         ObjectKind::App,
         ObjectKind::DataApiEndpoint,
+        ObjectKind::Workflow,
+        ObjectKind::Schedule,
     ];
 
     /// The control-plane string spelling of this kind.
@@ -44,6 +49,8 @@ impl ObjectKind {
             ObjectKind::SavedQuery => "saved_query",
             ObjectKind::App => "app",
             ObjectKind::DataApiEndpoint => "data_api_endpoint",
+            ObjectKind::Workflow => "workflow",
+            ObjectKind::Schedule => "alert",
         }
     }
 
@@ -155,6 +162,10 @@ pub fn classify(key: &str) -> Option<PermissionMapping> {
         "data_api_endpoint:manage" => {
             return object_grant(ObjectKind::DataApiEndpoint, Privilege::Manage)
         }
+        "workflow:read" => return object_grant(ObjectKind::Workflow, Privilege::Read),
+        "workflow:manage" => return object_grant(ObjectKind::Workflow, Privilege::Manage),
+        "alert:read" => return object_grant(ObjectKind::Schedule, Privilege::Read),
+        "alert:manage" => return object_grant(ObjectKind::Schedule, Privilege::Manage),
         _ => {}
     }
     // Admin-graph actions are forbids, never grants. These are not in
@@ -164,7 +175,7 @@ pub fn classify(key: &str) -> Option<PermissionMapping> {
     }
     // Every other known permission is a typed EP privilege (EO-D3): engine,
     // catalog, storage, secret, policy, tag, workspace, user, group, role,
-    // service_account, workflow, alert, query, and the non-data object verbs
+    // service_account, workflow:use_secrets, query, and the non-data object verbs
     // (certify, invoke).
     if rbac::is_known(key) {
         return Some(PermissionMapping::TypedEpPrivilege);
@@ -183,7 +194,20 @@ mod tests {
             assert_eq!(ObjectKind::from_str_opt(k.as_str()), Some(k));
         }
         assert_eq!(ObjectKind::from_str_opt("notebook"), None);
-        assert_eq!(ObjectKind::from_str_opt("workflow"), None);
+        assert_eq!(
+            ObjectKind::from_str_opt("workflow"),
+            Some(ObjectKind::Workflow)
+        );
+        assert_eq!(
+            ObjectKind::from_str_opt("alert"),
+            Some(ObjectKind::Schedule)
+        );
+        assert_eq!(ObjectKind::from_str_opt("schedule"), None);
+        assert_eq!(ObjectKind::ALL.len(), 9);
+        assert_eq!(
+            classify("workflow:use_secrets"),
+            Some(PermissionMapping::TypedEpPrivilege)
+        );
         assert_eq!(ObjectKind::from_str_opt(""), None);
     }
 
@@ -233,8 +257,12 @@ mod tests {
             ("app:manage", App, Manage),
             ("data_api_endpoint:read", DataApiEndpoint, Read),
             ("data_api_endpoint:manage", DataApiEndpoint, Manage),
+            ("workflow:read", Workflow, Read),
+            ("workflow:manage", Workflow, Manage),
+            ("alert:read", Schedule, Read),
+            ("alert:manage", Schedule, Manage),
         ];
-        assert_eq!(cases.len(), 13);
+        assert_eq!(cases.len(), 17);
         for (key, kind, priv_) in cases {
             assert_eq!(
                 classify(key),
@@ -253,7 +281,7 @@ mod tests {
         // the author classifies the new key as an object grant or a typed EP
         // privilege. If you add a key and this fails, update classify() and
         // this count, deciding deliberately which bucket the key belongs in.
-        const OBJECT_GRANT_KEYS: usize = 13;
+        const OBJECT_GRANT_KEYS: usize = 17;
 
         let mut object_grants = 0usize;
         for p in rbac::PERMISSIONS {
