@@ -355,3 +355,65 @@ fn shadow_round_trips_and_is_distinct() {
     assert_ne!(GrantSource::Shadow, GrantSource::Legacy);
     assert_ne!(GrantSource::Shadow, GrantSource::Unified);
 }
+
+const MIG_0241: &str = include_str!("../../../migrations/0241_eo5_soak_defaults.sql");
+
+async fn apply_0241(db: &Db) {
+    sqlx::raw_sql(MIG_0241).execute(&db.pool).await.unwrap();
+}
+
+#[tokio::test]
+async fn seed_defaults_both_switches_to_shadow() {
+    let _g = SWITCH_LOCK.lock().await;
+    let db = db().await;
+    sqlx::query("DELETE FROM perm.cedar_grant_source")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM perm.pdp_policy_source")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    apply_0241(&db).await;
+    assert_eq!(read_source(&db).await, GrantSource::Shadow);
+    let pdp: String = sqlx::query_scalar("SELECT source FROM perm.pdp_policy_source")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(pdp, "shadow");
+    write_source(&db, GrantSource::Legacy, "reset")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn seed_keeps_an_explicit_value() {
+    let _g = SWITCH_LOCK.lock().await;
+    let db = db().await;
+    write_source(&db, GrantSource::Unified, "op@egret.local")
+        .await
+        .unwrap();
+    apply_0241(&db).await;
+    assert_eq!(read_source(&db).await, GrantSource::Unified);
+    write_source(&db, GrantSource::Legacy, "reset")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn migration_fold_backfills_rows_that_predate_the_trigger() {
+    let _g = SWITCH_LOCK.lock().await;
+    let db = db().await;
+    let store = egret_auth::grants::AccessGrantStore::new(db.clone());
+    let role = seed_role(&db).await;
+    let id = seed_legacy_grant(&db, uuid::Uuid::new_v4(), role).await;
+    let _c = Cleanup { ids: vec![id] };
+    sqlx::query("DELETE FROM perm.cedar_grants WHERE id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(!store.report().await.unwrap().is_empty());
+    apply_0241(&db).await;
+    assert!(store.report().await.unwrap().is_empty());
+}
