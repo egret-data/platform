@@ -598,9 +598,7 @@ async fn detail(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<ScheduleDetailDto>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, READ)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, READ).await?;
 
     // `ScheduleDetailDto::last_value` IS a `dataapi_alert`'s measured metric
     // (Task 4 review, Finding 1) — the same leak `runs` carries, on the
@@ -637,9 +635,7 @@ async fn update(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(body): Json<UpdateSchedule>,
 ) -> Result<Json<ScheduleDetailDto>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, MANAGE).await?;
 
     // Read first, for two reasons: an id from another workspace must 404 rather
     // than 400 on a body it was never going to write, and `type` is immutable —
@@ -754,9 +750,7 @@ async fn remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, MANAGE).await?;
     if !st
         .schedules
         .delete(ctx.workspace_id.0, id)
@@ -780,9 +774,7 @@ async fn runs(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<Vec<RunDto>>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, READ)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, READ).await?;
     // The schedule must be visible in this workspace before its runs are, or
     // the child would leak the existence of a parent that 404s.
     let schedule = st
@@ -826,9 +818,7 @@ async fn run_now(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<RunDto>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, MANAGE).await?;
 
     // Read (workspace-scoped) first: an id from another workspace must 404
     // rather than run a schedule the caller cannot even see.
@@ -895,9 +885,7 @@ async fn set_active(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(body): Json<SetActiveBody>,
 ) -> Result<Json<ScheduleSummaryDto>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, MANAGE).await?;
 
     let mut row = st
         .schedules
@@ -949,9 +937,7 @@ async fn trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, MANAGE).await?;
     ack(st.schedules.set_trashed(ctx.workspace_id.0, id, true).await)
 }
 
@@ -971,9 +957,7 @@ async fn restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, MANAGE).await?;
     ack(st
         .schedules
         .set_trashed(ctx.workspace_id.0, id, false)
@@ -1014,9 +998,7 @@ async fn set_folder(
     Path((_w, id)): Path<(String, Uuid)>,
     Json(body): Json<SetFolderBody>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, MANAGE)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, MANAGE).await?;
     // The schedule itself is scoped by `set_folder`'s own `WHERE id=$1 AND
     // workspace_id=$2`, but `folder_id` was going straight into the `SET`
     // clause unchecked: a foreign folder stored with a 200, and a nonexistent
@@ -1067,9 +1049,7 @@ async fn bookmark_add(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
-    egret_core::authz::require(&*st.pdp, &ctx, READ)
-        .await
-        .map_err(AutomationApiError::from)?;
+    require_schedule(&st, &ctx, id, READ).await?;
     st.schedules
         .add_bookmark(ctx.principal.user_id.0, id)
         .await
@@ -1101,6 +1081,57 @@ async fn bookmark_remove(
         .await
         .map_err(AutomationApiError::from)?;
     Ok(Json(egret_core::Ack { ok: true }))
+}
+
+/// The schedule `id` in the caller's workspace as an [`ObjectRef`]. `kind` is
+/// `"alert"` for every schedule type (alert, report, dataapi_alert): they share
+/// one securable kind, so one grant reaches whichever the row is.
+fn schedule_object_ref(
+    ctx: &egret_core::WorkspaceContext,
+    row: &crate::repo::Schedule,
+) -> egret_core::authz::ObjectRef {
+    egret_core::authz::ObjectRef {
+        kind: "alert".into(),
+        id: row.id,
+        folder_id: row.folder_id,
+        workspace_id: ctx.workspace_id,
+    }
+}
+
+/// `action` on this one schedule: a schedule / folder / workspace / object
+/// grant all reach it through `require_object`. An absent / foreign id is a 404
+/// -- but only after the workspace-level `action` check, so a caller holding
+/// nothing still gets the 403 the workspace-gated routes always gave.
+///
+/// This is ONLY the per-object check. A `dataapi_alert` additionally needs
+/// [`require_dataapi_endpoint_read`]; callers keep running it.
+async fn require_schedule(
+    st: &AutomationState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    action: &str,
+) -> Result<crate::repo::Schedule, AutomationApiError> {
+    match st
+        .schedules
+        .get(ctx.workspace_id.0, id)
+        .await
+        .map_err(AutomationApiError::from)?
+    {
+        Some(row) => {
+            egret_core::authz::require_object(&*st.pdp, ctx, action, schedule_object_ref(ctx, &row))
+                .await
+                .map_err(AutomationApiError::from)?;
+            Ok(row)
+        }
+        None => {
+            egret_core::authz::require(&*st.pdp, ctx, action)
+                .await
+                .map_err(AutomationApiError::from)?;
+            Err(AutomationApiError::from(AutomationError::NotFound(
+                "schedule".into(),
+            )))
+        }
+    }
 }
 
 /// Read a schedule with its owners and recipients, or 404.
