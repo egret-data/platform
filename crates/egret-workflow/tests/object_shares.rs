@@ -115,3 +115,111 @@ async fn a_manage_share_updates_that_flow_only() {
     .await;
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+// ── Execution routes: the execution is gated as the flow it belongs to ──────
+
+async fn execution_of(db: &Db, ws: Uuid, flow: Uuid, id: &str) -> Uuid {
+    common::run_with_labels(db, ws, flow, &yaml(id), None).await
+}
+
+#[tokio::test]
+async fn a_flow_read_share_reaches_that_flows_executions_only() {
+    let Some(db) = common::db().await else { return };
+    let (ws, owner) = common::seed_workspace(&db).await;
+    let x = common::seed_flow(&db, ws, owner, &yaml("x"), "draft").await;
+    let y = common::seed_flow(&db, ws, owner, &yaml("y"), "draft").await;
+    let ex = execution_of(&db, ws, x, "x").await;
+    let ey = execution_of(&db, ws, y, "y").await;
+    let guest = guest_with(&db, owner, x, &["workflow:read"]).await;
+    let app = common::app(&db).await;
+
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{ex}"),
+        guest,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{ey}"),
+        guest,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    // The execution's files are gated the same way.
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{ey}/file/metas?path=kestra%3A%2F%2F%2Fx"),
+        guest,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_read_share_cannot_kill_or_pause_an_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, owner) = common::seed_workspace(&db).await;
+    let x = common::seed_flow(&db, ws, owner, &yaml("x"), "draft").await;
+    let ex = execution_of(&db, ws, x, "x").await;
+    let guest = guest_with(&db, owner, x, &["workflow:read"]).await;
+    let app = common::app(&db).await;
+
+    for op in ["kill", "pause"] {
+        let res = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{ex}/{op}"),
+            guest,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{op}");
+    }
+}
+
+#[tokio::test]
+async fn a_cross_workspace_execution_is_not_found() {
+    let Some(db) = common::db().await else { return };
+    let (ws_a, owner_a) = common::seed_workspace(&db).await;
+    let (ws_b, owner_b) = common::seed_workspace(&db).await;
+    let fb = common::seed_flow(&db, ws_b, owner_b, &yaml("b"), "draft").await;
+    let eb = execution_of(&db, ws_b, fb, "b").await;
+    common::grant(&db, ws_a, owner_a, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+
+    let res = common::get(
+        &app,
+        &format!("/api/ws/{ws_a}/workflows/executions/{eb}"),
+        owner_a,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn an_execution_of_a_purged_flow_needs_the_workspace_permission() {
+    let Some(db) = common::db().await else { return };
+    let (ws, owner) = common::seed_workspace(&db).await;
+    let x = common::seed_flow(&db, ws, owner, &yaml("x"), "draft").await;
+    let ex = execution_of(&db, ws, x, "x").await;
+    let guest = guest_with(&db, owner, x, &["workflow:read"]).await;
+    let reader = common::seed_workspace(&db).await.1;
+    // A workspace reader in `ws` (the helper seeds its own workspace, so grant by hand).
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    sqlx::query("DELETE FROM workflow.flows WHERE id = $1")
+        .bind(x)
+        .execute(&db.pool)
+        .await
+        .expect("purge flow");
+    let app = common::app(&db).await;
+
+    let path = format!("/api/ws/{ws}/workflows/executions/{ex}");
+    assert_eq!(
+        common::get(&app, &path, guest).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        common::get(&app, &path, reader).await.status(),
+        StatusCode::OK
+    );
+}

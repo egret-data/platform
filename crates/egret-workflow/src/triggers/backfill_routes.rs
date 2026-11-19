@@ -384,7 +384,7 @@ pub(crate) async fn create_trigger_backfill(
     Path((ws_slug, id, trigger_id)): Path<(String, Uuid, String)>,
     body: Result<Json<CreateBackfillRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<TriggerEntryDto>), TriggerRouteError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    crate::routes::require_flow(&st, &ctx, id, WF_MANAGE).await?;
     let Json(body) = body.map_err(|r| {
         body_refusal_saying(
             r,
@@ -423,7 +423,7 @@ pub(crate) async fn set_trigger_backfill_paused(
     Path((ws_slug, id, trigger_id)): Path<(String, Uuid, String)>,
     body: Result<Json<SetBackfillPausedRequest>, JsonRejection>,
 ) -> Result<Json<TriggerEntryDto>, TriggerRouteError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    crate::routes::require_flow(&st, &ctx, id, WF_MANAGE).await?;
     let Json(body) =
         body.map_err(|r| body_refusal_saying(r, "{\"paused\": bool}", "nothing was changed"))?;
     let e = change_one(&st, &ctx, &ws_slug, id, &trigger_id, Op::Pause(body.paused)).await??;
@@ -454,7 +454,7 @@ pub(crate) async fn delete_trigger_backfill(
     WsContext(ctx): WsContext,
     Path((ws_slug, id, trigger_id)): Path<(String, Uuid, String)>,
 ) -> Result<Json<TriggerEntryDto>, TriggerRouteError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    crate::routes::require_flow(&st, &ctx, id, WF_MANAGE).await?;
     let e = change_one(&st, &ctx, &ws_slug, id, &trigger_id, Op::Delete).await??;
     Ok(Json(e))
 }
