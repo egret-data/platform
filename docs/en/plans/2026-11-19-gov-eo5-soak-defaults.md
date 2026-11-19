@@ -157,6 +157,14 @@ Keep the `RolesChanged` publish and `read_state` response. Update the undo doc c
 -- row still falls back to `legacy` in code, so `shadow` is the default and
 -- `legacy` the fail-safe floor.
 
+-- EO4's switch (0239) was created with CHECK (source IN ('legacy','unified')) —
+-- it has no `shadow`. Widen it to allow the new observe state before seeding it
+-- (EO3's 0238 switch already allows 'shadow'). The constraint's auto-generated
+-- name is <table>_<column>_check; drop IF EXISTS to be robust.
+ALTER TABLE perm.cedar_grant_source DROP CONSTRAINT IF EXISTS cedar_grant_source_source_check;
+ALTER TABLE perm.cedar_grant_source
+    ADD CONSTRAINT cedar_grant_source_source_check CHECK (source IN ('legacy', 'shadow', 'unified'));
+
 INSERT INTO perm.cedar_grants
     (id, principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect, expires_at)
 SELECT id, principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect, expires_at
