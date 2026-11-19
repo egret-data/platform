@@ -386,8 +386,9 @@ pub(crate) async fn list_flow_triggers(
     WsContext(ctx): WsContext,
     Path((ws_slug, id)): Path<(String, Uuid)>,
 ) -> Result<Json<FlowTriggersDto>, TriggerRouteError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
-    let may_manage = caller_may_manage(&st, &ctx).await?;
+    let (flow_obj, flow_row) = crate::routes::flow_ref(&st, &ctx, id, WF_READ).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, WF_READ, flow_obj).await?;
+    let may_manage = crate::routes::flow_caller_may_manage(&st, &ctx, &flow_row).await?;
 
     // The draft is read inside the snapshot, with the state: a save between
     // two separate reads would pair the new source with the old rows.
@@ -1009,7 +1010,7 @@ pub(crate) async fn set_trigger_disabled(
     Path((ws_slug, id, trigger_id)): Path<(String, Uuid, String)>,
     body: Result<Json<SetTriggerDisabledRequest>, JsonRejection>,
 ) -> Result<Json<TriggerEntryDto>, TriggerRouteError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    crate::routes::require_flow(&st, &ctx, id, WF_MANAGE).await?;
     let Json(body) =
         body.map_err(|r| body_refusal(r, "{\"disabled\": bool, \"recover_missed\"?: bool}"))?;
     let e = switch_one(
