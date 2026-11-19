@@ -468,6 +468,24 @@ async fn workflow_and_alert_object_grants_admit_guest() {
                 .unwrap(),
             "{kind} object grant must admit the guest"
         );
+        // Cross-workspace guard: the grant lives in `ws`, so it must not admit
+        // the guest to a different workspace where they hold nothing.
+        let other_ws: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (slug, name, created_by, status) \
+             VALUES ($1, 'Other', $2, 'active') RETURNING id",
+        )
+        .bind(format!("guest-other-{}", Uuid::new_v4().simple()))
+        .bind(owner)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert other workspace");
+        assert!(
+            !authz
+                .has_object_grant_in_workspace(guest_id, egret_core::WorkspaceId(other_ws))
+                .await
+                .unwrap(),
+            "{kind} grant in one workspace must not admit the guest to another"
+        );
     }
 }
 
