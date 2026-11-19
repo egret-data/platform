@@ -79,9 +79,14 @@ impl CedarPdp {
         // EO4: read the grant source once per reload (infallible; fail-safe to legacy).
         inner.grant_source = grant_source_switch::read_source(db).await;
         if inner.grant_source == GrantSource::Shadow {
-            match crate::grants::AccessGrantStore::new(db.clone()).report().await {
+            match crate::grants::AccessGrantStore::new(db.clone())
+                .report()
+                .await
+            {
                 Ok(d) if d.is_empty() => {
-                    tracing::info!("EO4 shadow: access_grants and the unified mirror are equivalent")
+                    tracing::info!(
+                        "EO4 shadow: access_grants and the unified mirror are equivalent"
+                    )
                 }
                 Ok(d) => {
                     tracing::warn!(divergences = d.len(), "EO4 shadow: grant sources DIVERGE");
