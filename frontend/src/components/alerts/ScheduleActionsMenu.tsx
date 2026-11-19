@@ -26,6 +26,7 @@ export function ScheduleActionsMenu({
   onDeletePermanent,
   onMove,
   onNewFolder,
+  onShare,
 }: {
   schedule: ScheduleSummary;
   canManage: boolean;
@@ -40,6 +41,7 @@ export function ScheduleActionsMenu({
   onDeletePermanent: (s: ScheduleSummary) => void;
   onMove: (s: ScheduleSummary, folderId: string | null) => void;
   onNewFolder: (s: ScheduleSummary) => void;
+  onShare: (s: ScheduleSummary) => void;
 }) {
   if (trashed) {
     // A trashed row offers only the two ways out of the bin. Run log is
@@ -75,6 +77,7 @@ export function ScheduleActionsMenu({
             onMove={(fid) => onMove(schedule, fid)}
             onNewFolder={() => onNewFolder(schedule)}
           />
+          <DropdownMenuItem onClick={() => onShare(schedule)}>Share…</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => onTrash(schedule)}>Move to Trash</DropdownMenuItem>
         </>

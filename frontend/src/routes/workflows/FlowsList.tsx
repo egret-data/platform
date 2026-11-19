@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, Search, Trash2, Workflow } from "lucide-reac
 import { useWorkflowListFlows } from "@/api/generated/workflow/workflow";
 import type { FlowListItemDto } from "@/api/generated/model";
 import { Button } from "@/components/ui/button";
+import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { EmptyState } from "@/components/explore/EmptyState";
@@ -51,7 +52,7 @@ const FLOW_STATES: { value: FlowActivity; label: string }[] = [
 ];
 
 /** The table's column count, for the skeleton and the header rows' span. */
-const COLS = 5;
+const COLS = 6;
 
 /** One namespace's header plus the flows that are its own, in tree order. */
 interface Section {
@@ -176,9 +177,12 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
     return out;
   }, [filtered, isCollapsed]);
 
+  const [shareTarget, setShareTarget] = useState<FlowListItemDto | null>(null);
+
   const count = (activity: FlowActivity) => filtered.filter((f) => flowActivity(f.state) === activity).length;
 
   const content = (
+    <>
       <ListStates
         isLoading={query.isLoading}
         isError={query.isError}
@@ -279,6 +283,7 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
                   <th>Version</th>
                   <th>Updated</th>
                   <th>Created by</th>
+                  <th className="w-px"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               {sections.map(({ node, depth }) => {
@@ -316,6 +321,16 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
                                 creator or the account is gone. */}
                             {f.created_by_name ?? "—"}
                           </td>
+                          <td className="text-right">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              aria-label={`Share ${f.namespace}.${f.flow_id}`}
+                              onClick={() => setShareTarget(f)}
+                            >
+                              Share
+                            </Button>
+                          </td>
                         </tr>
                       ))}
                   </tbody>
@@ -325,6 +340,18 @@ export default function FlowsList({ pinnedNamespace }: { pinnedNamespace?: strin
           </ScrollX>
         )}
       </ListStates>
+      {shareTarget && (
+        <ShareDialog
+          ws={ws}
+          kind="workflow"
+          id={shareTarget.id}
+          name={`${shareTarget.namespace}.${shareTarget.flow_id}`}
+          folderId={null}
+          open
+          onOpenChange={(o) => { if (!o) setShareTarget(null); }}
+        />
+      )}
+    </>
   );
 
   if (pinned) return content;

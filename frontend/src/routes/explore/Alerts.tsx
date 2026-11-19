@@ -31,6 +31,7 @@ import { useFolders, useFolderMutations, useSetFolder } from "@/api/folders";
 import { ConfirmDeleteDialog } from "@/components/ui/confirm-delete-dialog";
 import { ConfirmFolderDeleteDialog, ConfirmTrashDialog } from "@/components/explore/ConfirmActionDialog";
 import { ScheduleActionsMenu } from "@/components/alerts/ScheduleActionsMenu";
+import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { RunLogDrawer } from "@/components/alerts/RunLogDrawer";
 import { humanizeCrontab } from "@/lib/humanizeCron";
 import type { RunState } from "@/api/alerts";
@@ -143,6 +144,7 @@ export default function Alerts() {
   } = useFolderMutations(ws, "alerts");
   const collapse = useCollapsed(folderCollapseKey(ws, "alerts"));
 
+  const [shareTarget, setShareTarget] = useState<ScheduleSummary | null>(null);
   const [runLogFor, setRunLogFor] = useState<ScheduleSummary | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ScheduleSummary | null>(null);
   // Moving to the Trash and deleting a folder are confirmed first, as on Dashboards (KI-281):
@@ -451,6 +453,7 @@ export default function Alerts() {
           onDeletePermanent={setPendingDelete}
           onMove={(x, fid) => guard(setFolder.mutateAsync({ id: x.id, folder_id: fid }))}
           onNewFolder={(x) => setFolderDialog({ mode: "move", row: x })}
+          onShare={setShareTarget}
           onRunNow={(x) =>
             runNow
               .mutateAsync(x.id)
@@ -742,6 +745,18 @@ export default function Alerts() {
           else guard(createFolder.mutateAsync(name).then(() => toast.success("Folder created")));
         }}
       />
+
+      {shareTarget && (
+        <ShareDialog
+          ws={ws}
+          kind="alert"
+          id={shareTarget.id}
+          name={shareTarget.name}
+          folderId={shareTarget.folder_id ?? null}
+          open
+          onOpenChange={(o) => { if (!o) setShareTarget(null); }}
+        />
+      )}
 
       {runLogFor && (
         <RunLogDrawer ws={ws} schedule={runLogFor} onClose={() => setRunLogFor(null)} />

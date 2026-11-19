@@ -32,7 +32,7 @@ interface ShareTarget {
 /**
  * Workspace admin → Settings → Shared objects.
  *
- * A workspace-wide roll-up of every shared object (dashboard, chart,
+ * A workspace-wide roll-up of every shared object (dashboard, chart, app, workflow, alert,
  * dataset, folder, notebook, saved query) and who holds each grant on it —
  * one row per (object, principal) pair. Read-only: editing a grant opens the
  * existing per-object `ShareDialog`, which owns the actual mutation.
