@@ -33,6 +33,7 @@ pub fn cedar_grant_router() -> Router<CedarGrantState> {
         .route("/perm/cedar-grants", get(get_state))
         .route("/perm/cedar-grants/report", post(post_report))
         .route("/perm/cedar-grants/fold", post(post_fold))
+        .route("/perm/cedar-grants/shadow", post(post_shadow))
         .route("/perm/cedar-grants/switch", post(post_switch))
         .route("/perm/cedar-grants/undo", post(post_undo))
 }
@@ -41,7 +42,7 @@ pub fn cedar_grant_router() -> Router<CedarGrantState> {
 /// `egret_auth::openapi()`.
 #[derive(utoipa::OpenApi)]
 #[openapi(
-    paths(get_state, post_report, post_fold, post_switch, post_undo),
+    paths(get_state, post_report, post_fold, post_shadow, post_switch, post_undo),
     components(schemas(GrantSourceState, GrantSource, GrantDivergence, GrantDivergenceKind))
 )]
 pub struct CedarGrantApi;
@@ -93,6 +94,20 @@ async fn post_fold(
     Ok(Json(read_state(&st.db).await?))
 }
 
+#[utoipa::path(post, path = "/api/control-plane/perm/cedar-grants/shadow", tag = "control-plane-perm",
+    operation_id = "cedar_grants_shadow",
+    responses((status = 200, description = "Entered shadow (observe); still serves access_grants", body = GrantSourceState),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, body = egret_core::http::ErrorBody)))]
+async fn post_shadow(
+    State(st): State<CedarGrantState>,
+    PlatformAuth(p): PlatformAuth,
+) -> Result<Json<GrantSourceState>, egret_core::Error> {
+    write_source(&st.db, GrantSource::Shadow, &p.email).await?;
+    st.bus.publish(RolesChanged);
+    Ok(Json(read_state(&st.db).await?))
+}
+
 #[utoipa::path(post, path = "/api/control-plane/perm/cedar-grants/switch", tag = "control-plane-perm",
     operation_id = "cedar_grants_switch",
     responses(
@@ -120,14 +135,19 @@ async fn post_switch(
 
 #[utoipa::path(post, path = "/api/control-plane/perm/cedar-grants/undo", tag = "control-plane-perm",
     operation_id = "cedar_grants_undo",
-    responses((status = 200, description = "Back to legacy", body = GrantSourceState),
+    responses((status = 200, description = "Stepped back one level: unified to shadow to legacy", body = GrantSourceState),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, body = egret_core::http::ErrorBody)))]
 async fn post_undo(
     State(st): State<CedarGrantState>,
     PlatformAuth(p): PlatformAuth,
 ) -> Result<Json<GrantSourceState>, egret_core::Error> {
-    write_source(&st.db, GrantSource::Legacy, &p.email).await?;
+    // Steps back one level: unified -> shadow -> legacy.
+    let next = match read_state(&st.db).await?.source {
+        GrantSource::Unified => GrantSource::Shadow,
+        GrantSource::Shadow | GrantSource::Legacy => GrantSource::Legacy,
+    };
+    write_source(&st.db, next, &p.email).await?;
     st.bus.publish(RolesChanged);
     Ok(Json(read_state(&st.db).await?))
 }

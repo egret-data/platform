@@ -13,6 +13,8 @@ pub enum GrantSource {
     Legacy,
     /// Read the unified store mirror `perm.cedar_grants`.
     Unified,
+    /// Serve `access_grants`, but run the equivalence report each reload (observe).
+    Shadow,
 }
 
 impl GrantSource {
@@ -20,12 +22,14 @@ impl GrantSource {
         match self {
             GrantSource::Legacy => "legacy",
             GrantSource::Unified => "unified",
+            GrantSource::Shadow => "shadow",
         }
     }
     pub fn from_db(s: &str) -> Option<Self> {
         match s {
             "legacy" => Some(Self::Legacy),
             "unified" => Some(Self::Unified),
+            "shadow" => Some(Self::Shadow),
             _ => None,
         }
     }

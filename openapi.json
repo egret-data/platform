@@ -8898,6 +8898,46 @@
         }
       }
     },
+    "/api/control-plane/perm/cedar-grants/shadow": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "cedar_grants_shadow",
+        "responses": {
+          "200": {
+            "description": "Entered shadow (observe); still serves access_grants",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantSourceState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/cedar-grants/switch": {
       "post": {
         "tags": [
@@ -8956,7 +8996,7 @@
         "operationId": "cedar_grants_undo",
         "responses": {
           "200": {
-            "description": "Back to legacy",
+            "description": "Stepped back one level: unified to shadow to legacy",
             "content": {
               "application/json": {
                 "schema": {
@@ -52945,7 +52985,8 @@
         "type": "string",
         "enum": [
           "legacy",
-          "unified"
+          "unified",
+          "shadow"
         ]
       },
       "GrantSourceState": {

@@ -12,4 +12,5 @@ export type GrantSource = typeof GrantSource[keyof typeof GrantSource];
 export const GrantSource = {
   legacy: 'legacy',
   unified: 'unified',
+  shadow: 'shadow',
 } as const;

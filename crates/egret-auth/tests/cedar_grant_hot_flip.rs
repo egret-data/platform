@@ -5,7 +5,7 @@
 
 use egret_auth::events::RolesChanged;
 use egret_auth::grants::AccessGrantStore;
-use egret_auth::pdp::grant_source_switch::{read_source, write_source, GrantSource};
+use egret_auth::pdp::grant_source_switch::{read_source, read_state, write_source, GrantSource};
 use egret_auth::pdp::CedarPdp;
 use egret_auth::roles::RoleRepo;
 use egret_core::authz::{Pdp, Resource, Subject};
@@ -335,5 +335,30 @@ async fn grant_source_hot_flips_stays_live_and_rolls_back() {
         decisions(&pdp, &subject, w, other).await,
         baseline,
         "decisions changed after rollback to Legacy"
+    );
+
+    // Phase 5 (EO5): Shadow observes but serves access_grants. A mirror-only row is
+    // NOT honoured (mutation-killer: Shadow must not route to perm.cedar_grants).
+    let shadow_only = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO perm.cedar_grants (id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at) \
+         VALUES ($1,'user',$2,$3,'workspace',$4,NULL,'allow',NULL)",
+    )
+    .bind(shadow_only)
+    .bind(u.0)
+    .bind(manage_role)
+    .bind(other.0)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    write_source(&db, GrantSource::Shadow, "e2e@egret.local")
+        .await
+        .unwrap();
+    barrier().await;
+    assert_eq!(read_state(&db).await.unwrap().source, GrantSource::Shadow);
+    assert_eq!(
+        decisions(&pdp, &subject, w, other).await,
+        baseline,
+        "Shadow must serve legacy decisions; the mirror-only row must not be honoured"
     );
 }

@@ -140,6 +140,7 @@ async fn cedar_grant_endpoints_gate_and_step() {
         ("GET", ""),
         ("POST", "/report"),
         ("POST", "/fold"),
+        ("POST", "/shadow"),
         ("POST", "/switch"),
         ("POST", "/undo"),
     ] {
@@ -176,6 +177,15 @@ async fn cedar_grant_endpoints_gate_and_step() {
         admin_email.to_lowercase()
     );
 
+    // Undo steps back one level: unified -> shadow -> legacy.
+    let (s, j) = call(&app, &admin_c, "POST", "/undo").await;
+    assert_eq!((s, j["source"].as_str()), (StatusCode::OK, Some("shadow")));
+    let (s, j) = call(&app, &admin_c, "POST", "/undo").await;
+    assert_eq!((s, j["source"].as_str()), (StatusCode::OK, Some("legacy")));
+
+    // The shadow endpoint enters observe mode.
+    let (s, j) = call(&app, &admin_c, "POST", "/shadow").await;
+    assert_eq!((s, j["source"].as_str()), (StatusCode::OK, Some("shadow")));
     let (s, j) = call(&app, &admin_c, "POST", "/undo").await;
     assert_eq!((s, j["source"].as_str()), (StatusCode::OK, Some("legacy")));
 

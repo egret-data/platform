@@ -116,7 +116,7 @@ impl AccessGrantStore {
                   OR (ag.scope_type = 'object' AND ag.scope_id = ANY($3)) ) \
                AND (ag.expires_at IS NULL OR ag.expires_at > now())";
         let sql = match source {
-            GrantSource::Legacy => LEGACY_SQL,
+            GrantSource::Legacy | GrantSource::Shadow => LEGACY_SQL,
             GrantSource::Unified => UNIFIED_SQL,
         };
         let first = sqlx::query_as(sql)
@@ -128,7 +128,7 @@ impl AccessGrantStore {
         let rows: Vec<GrantRow> = match (source, first) {
             (_, Ok(r)) => r,
             // Legacy: an error propagates exactly as before EO4 (no retry, no fallback).
-            (GrantSource::Legacy, Err(e)) => return Err(db_err(e)),
+            (GrantSource::Legacy | GrantSource::Shadow, Err(e)) => return Err(db_err(e)),
             // Fail-safe (EO-D7): only a unified read error falls back to the proven legacy table.
             (GrantSource::Unified, Err(e)) => {
                 tracing::error!(error = %e, "unified grant read failed; fail-safe to access_grants");
