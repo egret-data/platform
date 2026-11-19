@@ -1,5 +1,6 @@
 //! `egret-auth` — authentication (local), sessions, and the request `Principal`.
 
+pub mod cedar_grant_routes;
 pub mod cookie;
 pub mod csrf;
 pub mod effective;
@@ -95,6 +96,7 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     let mut doc = routes::AuthApi::openapi();
     doc.merge(oidc_routes::OidcApi::openapi());
     doc.merge(pdp_source_routes::PdpSourceApi::openapi());
+    doc.merge(cedar_grant_routes::CedarGrantApi::openapi());
     doc
 }
 

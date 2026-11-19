@@ -1,5 +1,6 @@
 //! Read API over the unified `access_grants` table.
 
+use crate::pdp::grant_source_switch::GrantSource;
 use egret_core::ids::{UserId, WorkspaceId};
 use egret_core::{Error, Result};
 use egret_metastore::Db;
@@ -33,6 +34,46 @@ pub struct AccessGrantStore {
 }
 
 impl AccessGrantStore {
+    /// EO4: backfill `perm.cedar_grants` from the rows that predate the mirror
+    /// trigger (0240). Idempotent: upsert on id. The trigger keeps future writes in
+    /// sync, so this is a one-time catch-up (re-runnable). Returns the row count.
+    pub async fn fold(&self) -> Result<u64> {
+        let r = sqlx::query(
+            "INSERT INTO perm.cedar_grants \
+               (id, principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect, expires_at) \
+             SELECT id, principal_type, principal_id, role_id, scope_type, scope_id, object_type, effect, expires_at \
+             FROM access_grants \
+             ON CONFLICT (id) DO UPDATE SET \
+               principal_type = EXCLUDED.principal_type, principal_id = EXCLUDED.principal_id, \
+               role_id = EXCLUDED.role_id, scope_type = EXCLUDED.scope_type, scope_id = EXCLUDED.scope_id, \
+               object_type = EXCLUDED.object_type, effect = EXCLUDED.effect, expires_at = EXCLUDED.expires_at",
+        )
+        .execute(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        // Provenance (EO4-D5, refined): the mirror is a maintained replica, so each
+        // row's origin is carried as its own id (= access_grants.id); the fold/flip
+        // event is audited by the switch row (switched_at/switched_by) and the
+        // endpoint actor. No separate provenance table (perm.migrated_from is
+        // Ranger-policy-specific and does not fit).
+        tracing::info!(
+            rows = r.rows_affected(),
+            "EO4 fold: backfilled perm.cedar_grants from access_grants"
+        );
+        Ok(r.rows_affected())
+    }
+
+    /// EO4: empty the mirror (used by undo after the switch is back to legacy, and by
+    /// tests). The trigger refills it on the next access_grants write; `fold` refills
+    /// it fully. Never called while `unified`.
+    pub async fn clear_mirror(&self) -> Result<()> {
+        sqlx::query("DELETE FROM perm.cedar_grants")
+            .execute(&self.db.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     pub fn new(db: Db) -> Self {
         Self { db }
     }
@@ -46,11 +87,15 @@ impl AccessGrantStore {
     /// Pass `&[]` when no object scope is relevant (platform/workspace resources).
     pub async fn grants_for(
         &self,
+        source: GrantSource,
         user_id: UserId,
         ws: Option<WorkspaceId>,
         object_scope_ids: &[uuid::Uuid],
     ) -> Result<Vec<Grant>> {
-        let rows: Vec<GrantRow> = sqlx::query_as(
+        // sqlx 0.9 `query_as` takes `&'static str`, so the table name cannot be
+        // interpolated: two literal queries that differ ONLY in the table. `LEGACY_SQL`
+        // is the pre-EO4 query, unchanged.
+        const LEGACY_SQL: &str =
             "SELECT ag.role_id, ag.scope_type, ag.scope_id, ag.object_type, ag.effect \
              FROM access_grants ag \
              WHERE ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
@@ -59,14 +104,43 @@ impl AccessGrantStore {
                AND ( ag.scope_type = 'platform' \
                   OR (ag.scope_type = 'workspace' AND ag.scope_id = $2) \
                   OR (ag.scope_type = 'object' AND ag.scope_id = ANY($3)) ) \
-               AND (ag.expires_at IS NULL OR ag.expires_at > now())",
-        )
-        .bind(user_id.0)
-        .bind(ws.map(|w| w.0))
-        .bind(object_scope_ids)
-        .fetch_all(&self.db.pool)
-        .await
-        .map_err(db_err)?;
+               AND (ag.expires_at IS NULL OR ag.expires_at > now())";
+        const UNIFIED_SQL: &str =
+            "SELECT ag.role_id, ag.scope_type, ag.scope_id, ag.object_type, ag.effect \
+             FROM perm.cedar_grants ag \
+             WHERE ( (ag.principal_type = 'user'  AND ag.principal_id = $1) \
+                  OR (ag.principal_type = 'group' AND ag.principal_id IN \
+                        (SELECT group_id FROM user_groups WHERE user_id = $1)) ) \
+               AND ( ag.scope_type = 'platform' \
+                  OR (ag.scope_type = 'workspace' AND ag.scope_id = $2) \
+                  OR (ag.scope_type = 'object' AND ag.scope_id = ANY($3)) ) \
+               AND (ag.expires_at IS NULL OR ag.expires_at > now())";
+        let sql = match source {
+            GrantSource::Legacy => LEGACY_SQL,
+            GrantSource::Unified => UNIFIED_SQL,
+        };
+        let first = sqlx::query_as(sql)
+            .bind(user_id.0)
+            .bind(ws.map(|w| w.0))
+            .bind(object_scope_ids)
+            .fetch_all(&self.db.pool)
+            .await;
+        let rows: Vec<GrantRow> = match (source, first) {
+            (_, Ok(r)) => r,
+            // Legacy: an error propagates exactly as before EO4 (no retry, no fallback).
+            (GrantSource::Legacy, Err(e)) => return Err(db_err(e)),
+            // Fail-safe (EO-D7): only a unified read error falls back to the proven legacy table.
+            (GrantSource::Unified, Err(e)) => {
+                tracing::error!(error = %e, "unified grant read failed; fail-safe to access_grants");
+                sqlx::query_as(LEGACY_SQL)
+                    .bind(user_id.0)
+                    .bind(ws.map(|w| w.0))
+                    .bind(object_scope_ids)
+                    .fetch_all(&self.db.pool)
+                    .await
+                    .map_err(db_err)?
+            }
+        };
         Ok(rows
             .into_iter()
             .map(
@@ -79,6 +153,59 @@ impl AccessGrantStore {
                 },
             )
             .collect())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantDivergenceKind {
+    OnlyLegacy,
+    OnlyUnified,
+}
+
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct GrantDivergence {
+    pub kind: GrantDivergenceKind,
+    pub id: uuid::Uuid,
+    pub detail: String,
+}
+
+impl AccessGrantStore {
+    /// EO4: the equivalence report. A grant row present under one source and not
+    /// the other (over the full decision-relevant column tuple) is a divergence;
+    /// empty means the unified mirror is faithful and the switch is safe. Equal
+    /// row-sets imply identical `grants_for` output, hence identical PDP decisions.
+    pub async fn report(&self) -> Result<Vec<GrantDivergence>> {
+        let only_legacy: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT id FROM (SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM access_grants \
+             EXCEPT SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM perm.cedar_grants) x ORDER BY id",
+        )
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        let only_unified: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT id FROM (SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM perm.cedar_grants \
+             EXCEPT SELECT id,principal_type,principal_id,role_id,scope_type,scope_id,object_type,effect,expires_at FROM access_grants) x ORDER BY id",
+        )
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        let mut out = Vec::new();
+        for (id,) in only_legacy {
+            out.push(GrantDivergence {
+                kind: GrantDivergenceKind::OnlyLegacy,
+                id,
+                detail: "grant in access_grants but not the unified mirror".into(),
+            });
+        }
+        for (id,) in only_unified {
+            out.push(GrantDivergence {
+                kind: GrantDivergenceKind::OnlyUnified,
+                id,
+                detail: "grant in the unified mirror but not access_grants".into(),
+            });
+        }
+        Ok(out)
     }
 }
 

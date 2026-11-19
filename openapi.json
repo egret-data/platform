@@ -8765,6 +8765,229 @@
         }
       }
     },
+    "/api/control-plane/perm/cedar-grants": {
+      "get": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "cedar_grants_state",
+        "responses": {
+          "200": {
+            "description": "Current grant source + audit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantSourceState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/cedar-grants/fold": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "cedar_grants_fold",
+        "responses": {
+          "200": {
+            "description": "Mirror backfilled; source unchanged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantSourceState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/cedar-grants/report": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "cedar_grants_report",
+        "responses": {
+          "200": {
+            "description": "Live equivalence report (empty => safe to switch)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GrantDivergence"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a platform admin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/cedar-grants/switch": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "cedar_grants_switch",
+        "responses": {
+          "200": {
+            "description": "Switched to unified (report was clean)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantSourceState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The report is not clean",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/control-plane/perm/cedar-grants/undo": {
+      "post": {
+        "tags": [
+          "control-plane-perm"
+        ],
+        "operationId": "cedar_grants_undo",
+        "responses": {
+          "200": {
+            "description": "Back to legacy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantSourceState"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/control-plane/perm/clearances/{tag_id}/people": {
       "get": {
         "tags": [
@@ -52586,6 +52809,33 @@
           }
         }
       },
+      "GrantDivergence": {
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "detail"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/GrantDivergenceKind"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      },
+      "GrantDivergenceKind": {
+        "type": "string",
+        "enum": [
+          "only_legacy",
+          "only_unified"
+        ]
+      },
       "GrantDto": {
         "type": "object",
         "required": [
@@ -52690,6 +52940,37 @@
           }
         ],
         "description": "Why a grant exists. `WorkspaceAssignment`/`WorkspaceAssignmentGroup` rows are\nwritten by the assignment path, not by a human, and are recreated from the\nassignment on demand (D3) — `perm.grants` enforces at most one such row per\n`(catalog_id, workspace_id)` via `grants_one_per_assignment` (the old shape)\nand `grants_one_per_assignment_group` (the SP3c-3 shape).\n\n`WorkspaceAssignmentGroup` is the SP3c-3 Task-5 authoring shape: an explicit\nREAD grant on the managed `ws:<slug> members` group. It is a distinct origin\nvalue (not folded into `Explicit`) so the two assignment shapes stay out of\nthe human `explicit` grants' way — view-exposure follow, which keys on\n`Explicit`, must NOT treat an assignment grant as a human one — while the\ndedicated origin keeps bind/unbind idempotent through its own partial unique\nindex. Task 4's reversible migration converges the old\n`WorkspaceAssignment` rows onto this exact shape."
+      },
+      "GrantSource": {
+        "type": "string",
+        "enum": [
+          "legacy",
+          "unified"
+        ]
+      },
+      "GrantSourceState": {
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "$ref": "#/components/schemas/GrantSource"
+          },
+          "switched_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "switched_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "GrantView": {
         "allOf": [
