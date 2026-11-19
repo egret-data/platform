@@ -8770,7 +8770,7 @@
         "tags": [
           "control-plane-perm"
         ],
-        "operationId": "get_state",
+        "operationId": "cedar_grants_state",
         "responses": {
           "200": {
             "description": "Current grant source + audit",
@@ -8810,7 +8810,7 @@
         "tags": [
           "control-plane-perm"
         ],
-        "operationId": "post_fold",
+        "operationId": "cedar_grants_fold",
         "responses": {
           "200": {
             "description": "Mirror backfilled; source unchanged",
@@ -8850,7 +8850,7 @@
         "tags": [
           "control-plane-perm"
         ],
-        "operationId": "post_report",
+        "operationId": "cedar_grants_report",
         "responses": {
           "200": {
             "description": "Live equivalence report (empty => safe to switch)",
@@ -8903,7 +8903,7 @@
         "tags": [
           "control-plane-perm"
         ],
-        "operationId": "post_switch",
+        "operationId": "cedar_grants_switch",
         "responses": {
           "200": {
             "description": "Switched to unified (report was clean)",
@@ -8953,7 +8953,7 @@
         "tags": [
           "control-plane-perm"
         ],
-        "operationId": "post_undo",
+        "operationId": "cedar_grants_undo",
         "responses": {
           "200": {
             "description": "Back to legacy",
