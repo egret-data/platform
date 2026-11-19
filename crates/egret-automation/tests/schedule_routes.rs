@@ -3847,3 +3847,32 @@ async fn an_alert_object_grant_does_not_unlock_a_dataapi_alert() {
         );
     }
 }
+
+/// Destructive routes on a `dataapi_alert` need the endpoint read too, like
+/// `update` / `run_now`: an object-manage guest must not be able to disable or
+/// delete monitoring of an endpoint it cannot read.
+#[tokio::test]
+async fn destructive_routes_on_a_dataapi_alert_need_endpoint_read() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "eo6_destructive_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "eo6-destructive").await;
+    let guest = alert_guest(&fx.db, id, "ws_editor").await;
+    let tok = fx.token_for(guest).await;
+    let path = format!("/ws/{}/alerts/{id}", fx.slug);
+
+    for (m, p) in [
+        ("DELETE", path.clone()),
+        ("POST", format!("{path}/trash")),
+        ("POST", format!("{path}/restore")),
+    ] {
+        let (s, body) = req_raw(&fx, &tok, m, &p, None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{m} {p}: {body}");
+    }
+    let still: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM automation.schedules WHERE id=$1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(still, 1, "row must be neither deleted nor trashed");
+}

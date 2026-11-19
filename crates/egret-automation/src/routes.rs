@@ -750,7 +750,7 @@ async fn remove(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AutomationApiError> {
-    require_schedule(&st, &ctx, id, MANAGE).await?;
+    require_manage_unwatched(&st, &ctx, id).await?;
     if !st
         .schedules
         .delete(ctx.workspace_id.0, id)
@@ -937,7 +937,7 @@ async fn trash(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
-    require_schedule(&st, &ctx, id, MANAGE).await?;
+    require_manage_unwatched(&st, &ctx, id).await?;
     ack(st.schedules.set_trashed(ctx.workspace_id.0, id, true).await)
 }
 
@@ -957,7 +957,7 @@ async fn restore(
     WsContext(ctx): WsContext,
     Path((_w, id)): Path<(String, Uuid)>,
 ) -> Result<Json<egret_core::Ack>, AutomationApiError> {
-    require_schedule(&st, &ctx, id, MANAGE).await?;
+    require_manage_unwatched(&st, &ctx, id).await?;
     ack(st
         .schedules
         .set_trashed(ctx.workspace_id.0, id, false)
@@ -1132,6 +1132,22 @@ async fn require_schedule(
             )))
         }
     }
+}
+
+/// `MANAGE` on the schedule, plus -- for a `dataapi_alert` -- the Data API
+/// endpoint read `update`/`run_now` already demand. Without it an object-manage
+/// guest who cannot read the endpoint could still disable or delete its
+/// monitoring (trash / restore / delete).
+async fn require_manage_unwatched(
+    st: &AutomationState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> Result<(), AutomationApiError> {
+    let row = require_schedule(st, ctx, id, MANAGE).await?;
+    if row.r#type == "dataapi_alert" {
+        require_dataapi_endpoint_read(st, ctx, row.dataapi_endpoint_id).await?;
+    }
+    Ok(())
 }
 
 /// Read a schedule with its owners and recipients, or 404.
