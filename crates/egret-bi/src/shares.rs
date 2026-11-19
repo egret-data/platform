@@ -18,16 +18,18 @@ use uuid::Uuid;
 use crate::error::BiApiError;
 use crate::routes::BiState;
 
-/// The object kinds a share can target and their backing table under `analytics`.
+/// The object kinds a share can target and their schema-qualified backing table.
 /// Hard-coded so `kind` never reaches SQL as an interpolated identifier.
 fn object_table(kind: &str) -> Option<&'static str> {
     match kind {
-        "dashboard" => Some("dashboards"),
-        "chart" => Some("charts"),
-        "dataset" => Some("datasets"),
-        "folder" => Some("folders"),
-        "saved_query" => Some("saved_queries"),
-        "app" => Some("apps"),
+        "dashboard" => Some("analytics.dashboards"),
+        "chart" => Some("analytics.charts"),
+        "dataset" => Some("analytics.datasets"),
+        "folder" => Some("analytics.folders"),
+        "saved_query" => Some("analytics.saved_queries"),
+        "app" => Some("analytics.apps"),
+        "workflow" => Some("workflow.flows"),
+        "alert" => Some("automation.schedules"),
         _ => None,
     }
 }
@@ -49,6 +51,8 @@ fn manage_action(kind: &str) -> Option<&'static str> {
         "dataset" => Some("dataset:manage"),
         "saved_query" => Some("saved_query:manage"),
         "app" => Some("app:manage"),
+        "workflow" => Some("workflow:manage"),
+        "alert" => Some("alert:manage"),
         _ => None,
     }
 }
@@ -62,6 +66,8 @@ fn read_action(kind: &str) -> Option<&'static str> {
         "dataset" => Some("dataset:read"),
         "saved_query" => Some("saved_query:read"),
         "app" => Some("app:read"),
+        "workflow" => Some("workflow:read"),
+        "alert" => Some("alert:read"),
         _ => None,
     }
 }
@@ -75,9 +81,18 @@ fn read_action(kind: &str) -> Option<&'static str> {
 /// `folder:manage`, a key no role holds and the catalog does not contain, and so
 /// refused everyone -- workspace admins included.
 ///
-/// `InvalidInput` for a folder of a kind that cannot be shared at all (alerts,
-/// Data API endpoints): their folders only group, and an object grant on one
+/// `InvalidInput` for a folder of a kind that cannot be shared at all (Data API
+/// endpoints): their folders only group, and an object grant on one
 /// would be read by nothing.
+/// Folder `entity_type` -> the kind that gates it. Workflow folders are stored
+/// as `flow`; every other entity type is already the kind's own name.
+fn folder_gate_kind(entity_type: &str) -> &str {
+    match entity_type {
+        "flow" => "workflow",
+        other => other,
+    }
+}
+
 async fn gate_kind(db: &Db, kind: &str, id: Uuid) -> Result<String, Error> {
     if kind != "folder" {
         return Ok(kind.to_string());
@@ -89,6 +104,7 @@ async fn gate_kind(db: &Db, kind: &str, id: Uuid) -> Result<String, Error> {
             .await
             .map_err(|e| Error::Internal(e.into()))?
             .ok_or_else(|| Error::NotFound("folder".to_string()))?;
+    let held = folder_gate_kind(&held).to_string();
     if manage_action(&held).is_none() {
         return Err(Error::InvalidInput(format!(
             "a folder of {held}s cannot be shared"
@@ -114,7 +130,12 @@ pub async fn object_gate_kind(db: &Db, kind: &str, id: Uuid) -> Result<String, E
 /// `InvalidInput` for an unknown kind.
 pub async fn object_name(db: &Db, kind: &str, id: Uuid) -> Result<Option<String>, Error> {
     let table = object_table(kind).ok_or_else(|| Error::InvalidInput(format!("kind: {kind}")))?;
-    let sql = format!("SELECT name FROM analytics.{table} WHERE id = $1");
+    // Workflows have no `name`; their display name is `namespace.flow_id`.
+    let sql = if kind == "workflow" {
+        format!("SELECT namespace || '.' || flow_id FROM {table} WHERE id = $1")
+    } else {
+        format!("SELECT name FROM {table} WHERE id = $1")
+    };
     sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(&db.pool)
@@ -144,7 +165,7 @@ pub async fn object_ref(db: &Db, kind: &str, id: Uuid) -> Result<ObjectRef, Erro
         "SELECT NULL::uuid AS folder_id, workspace_id FROM analytics.folders WHERE id = $1"
             .to_string()
     } else {
-        format!("SELECT folder_id, workspace_id FROM analytics.{table} WHERE id = $1")
+        format!("SELECT folder_id, workspace_id FROM {table} WHERE id = $1")
     };
     let row: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
@@ -708,13 +729,13 @@ async fn object_tag_unassign(
         object_tag_unassign,
     ),
     components(schemas(ObjectGrantBody, ObjectGrantDto, TagDto)),
-    tags((name = "shares", description = "Per-object grants: share a dashboard / chart / dataset / folder with a user or group at a workspace role")),
+    tags((name = "shares", description = "Per-object grants: share a dashboard / chart / dataset / folder / app / saved query / workflow / alert with a user or group at a workspace role")),
 )]
 pub struct BiSharesApi;
 
 #[cfg(test)]
 mod tests {
-    use super::{manage_action, object_table, read_action};
+    use super::{folder_gate_kind, manage_action, object_table, read_action};
 
     /// Pins the action each kind requires, plus `app` from Data Apps P2. Every
     /// kind `object_table` accepts except `folder` has a manage action of its own,
@@ -739,12 +760,22 @@ mod tests {
         assert!(object_table("folder").is_some());
         assert_eq!(manage_action("folder"), None);
         assert_eq!(read_action("folder"), None);
+        assert_eq!(object_table("workflow"), Some("workflow.flows"));
+        assert_eq!(object_table("alert"), Some("automation.schedules"));
+        assert_eq!(object_table("dashboard"), Some("analytics.dashboards"));
+        assert_eq!(object_table("saved_query"), Some("analytics.saved_queries"));
+        assert_eq!(manage_action("workflow"), Some("workflow:manage"));
+        assert_eq!(read_action("workflow"), Some("workflow:read"));
+        assert_eq!(manage_action("alert"), Some("alert:manage"));
+        assert_eq!(read_action("alert"), Some("alert:read"));
+        assert_eq!(folder_gate_kind("flow"), "workflow");
+        assert_eq!(folder_gate_kind("alert"), "alert");
+        assert_eq!(folder_gate_kind("dashboard"), "dashboard");
         for kind in ["dashboard", "chart", "dataset", "saved_query", "app"] {
             assert_eq!(read_action(kind), Some(format!("{kind}:read").as_str()));
         }
         for kind in [
             "",
-            "alert",
             "data_api_endpoint",
             "apps",
             "Dashboard",
