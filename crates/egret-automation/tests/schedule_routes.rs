@@ -3652,7 +3652,7 @@ async fn reading_a_dataapi_alerts_run_state_needs_data_api_endpoint_read() {
 /// the response, so there is no field for this leak to ride on and nothing
 /// to redact.
 #[tokio::test]
-async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_cannot_read_it() {
+async fn toggling_active_on_a_dataapi_alert_needs_endpoint_read_and_shows_run_state_to_a_reader() {
     let fx = fixture!();
     let owner = mk_user(&fx.db, "z2_authz_active_owner").await;
     let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-authz-active").await;
@@ -3668,9 +3668,10 @@ async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_c
     .await
     .unwrap();
 
-    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. The toggle
-    // itself must still work (that is `alert:manage`'s job) — only the
-    // run-derived fields in the RESPONSE are at stake.
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. Disabling a
+    // `dataapi_alert` silences monitoring of an endpoint the caller cannot
+    // read, so it is refused outright (not merely redacted) and the row is
+    // left as it was.
     let (status, body) = req(
         &fx,
         &fx.editor_tok,
@@ -3679,19 +3680,13 @@ async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_c
         Some(serde_json::json!({"active": false}).to_string()),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the toggle itself must succeed: {body}"
-    );
-    assert_eq!(
-        body["active"], false,
-        "the field being toggled must still work: {body}"
-    );
-    assert!(
-        body["last_state"].is_null() && body["last_eval_at"].is_null(),
-        "set_active must redact last_state/last_eval_at for an endpoint the caller cannot read: {body}"
-    );
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let active: bool = sqlx::query_scalar("SELECT active FROM automation.schedules WHERE id = $1")
+        .bind(id)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert!(active, "a refused toggle must not change the row");
 
     // `ws_admin`: the same `alert:manage`, PLUS `data_api_endpoint:read` —
     // sees the real value.
@@ -3869,4 +3864,30 @@ async fn destructive_routes_on_a_dataapi_alert_need_endpoint_read() {
     .await
     .unwrap();
     assert_eq!(still, 1, "row must be neither deleted nor trashed");
+}
+
+/// An `alert:manage` OBJECT grantee without endpoint read cannot disable a
+/// `dataapi_alert` either.
+#[tokio::test]
+async fn set_active_on_a_dataapi_alert_needs_endpoint_read_for_an_object_grantee() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "eo6_active_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "eo6-active").await;
+    let guest = alert_guest(&fx.db, id, "ws_editor").await;
+    let tok = fx.token_for(guest).await;
+    let (s, body) = req_raw(
+        &fx,
+        &tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.slug),
+        Some(serde_json::json!({"active": false}).to_string()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    let active: bool = sqlx::query_scalar("SELECT active FROM automation.schedules WHERE id = $1")
+        .bind(id)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert!(active, "row must stay active");
 }
