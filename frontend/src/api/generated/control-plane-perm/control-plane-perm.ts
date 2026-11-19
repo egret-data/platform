@@ -26,6 +26,8 @@ import type {
 
 import type {
   ErrorBody,
+  GrantDivergence,
+  GrantSourceState,
   PdpDivergence,
   SourceState
 } from '../model';
@@ -52,7 +54,487 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   return result;
 };
 
-export type controlPlanePermGetSourceResponse200 = {
+export type controlPlanePermGetStateResponse200 = {
+  data: GrantSourceState
+  status: 200
+}
+
+export type controlPlanePermGetStateResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlanePermGetStateResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlanePermGetStateResponseSuccess = (controlPlanePermGetStateResponse200) & {
+  headers: Headers;
+};
+export type controlPlanePermGetStateResponseError = (controlPlanePermGetStateResponse401 | controlPlanePermGetStateResponse403) & {
+  headers: Headers;
+};
+
+export type controlPlanePermGetStateResponse = (controlPlanePermGetStateResponseSuccess | controlPlanePermGetStateResponseError)
+
+export const getControlPlanePermGetStateUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/cedar-grants`
+}
+
+export const controlPlanePermGetState = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlanePermGetStateResponse> => {
+
+  return customInstance<controlPlanePermGetStateResponse>(getControlPlanePermGetStateUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlanePermGetStateQueryKey = () => {
+    return [
+    `/api/control-plane/perm/cedar-grants`
+    ] as const;
+    }
+
+
+export const getControlPlanePermGetStateQueryOptions = <TData = Awaited<ReturnType<typeof controlPlanePermGetState>>, TError = ErrorBody>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlanePermGetState>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getControlPlanePermGetStateQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof controlPlanePermGetState>>> = ({ signal }) => controlPlanePermGetState({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof controlPlanePermGetState>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ControlPlanePermGetStateQueryResult = NonNullable<Awaited<ReturnType<typeof controlPlanePermGetState>>>
+export type ControlPlanePermGetStateQueryError = ErrorBody
+
+
+export function useControlPlanePermGetState<TData = Awaited<ReturnType<typeof controlPlanePermGetState>>, TError = ErrorBody>(
+  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlanePermGetState>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlanePermGetState>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlanePermGetState>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlanePermGetState<TData = Awaited<ReturnType<typeof controlPlanePermGetState>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlanePermGetState>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof controlPlanePermGetState>>,
+          TError,
+          Awaited<ReturnType<typeof controlPlanePermGetState>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useControlPlanePermGetState<TData = Awaited<ReturnType<typeof controlPlanePermGetState>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlanePermGetState>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useControlPlanePermGetState<TData = Awaited<ReturnType<typeof controlPlanePermGetState>>, TError = ErrorBody>(
+  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof controlPlanePermGetState>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getControlPlanePermGetStateQueryOptions(options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type controlPlanePermPostFoldResponse200 = {
+  data: GrantSourceState
+  status: 200
+}
+
+export type controlPlanePermPostFoldResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlanePermPostFoldResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlanePermPostFoldResponseSuccess = (controlPlanePermPostFoldResponse200) & {
+  headers: Headers;
+};
+export type controlPlanePermPostFoldResponseError = (controlPlanePermPostFoldResponse401 | controlPlanePermPostFoldResponse403) & {
+  headers: Headers;
+};
+
+export type controlPlanePermPostFoldResponse = (controlPlanePermPostFoldResponseSuccess | controlPlanePermPostFoldResponseError)
+
+export const getControlPlanePermPostFoldUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/cedar-grants/fold`
+}
+
+export const controlPlanePermPostFold = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlanePermPostFoldResponse> => {
+
+  return customInstance<controlPlanePermPostFoldResponse>(getControlPlanePermPostFoldUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlanePermPostFoldMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostFold>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostFold>>, TError,void, TContext> => {
+
+const mutationKey = ['controlPlanePermPostFold'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlanePermPostFold>>, void> = () => {
+
+
+          return  controlPlanePermPostFold(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlanePermPostFoldMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlanePermPostFold>>>
+
+    export type ControlPlanePermPostFoldMutationError = ErrorBody
+
+    export const useControlPlanePermPostFold = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostFold>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlanePermPostFold>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getControlPlanePermPostFoldMutationOptions(options), queryClient);
+    }
+    export type controlPlanePermPostReportResponse200 = {
+  data: GrantDivergence[]
+  status: 200
+}
+
+export type controlPlanePermPostReportResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlanePermPostReportResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlanePermPostReportResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type controlPlanePermPostReportResponseSuccess = (controlPlanePermPostReportResponse200) & {
+  headers: Headers;
+};
+export type controlPlanePermPostReportResponseError = (controlPlanePermPostReportResponse401 | controlPlanePermPostReportResponse403 | controlPlanePermPostReportResponse500) & {
+  headers: Headers;
+};
+
+export type controlPlanePermPostReportResponse = (controlPlanePermPostReportResponseSuccess | controlPlanePermPostReportResponseError)
+
+export const getControlPlanePermPostReportUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/cedar-grants/report`
+}
+
+export const controlPlanePermPostReport = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlanePermPostReportResponse> => {
+
+  return customInstance<controlPlanePermPostReportResponse>(getControlPlanePermPostReportUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlanePermPostReportMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostReport>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostReport>>, TError,void, TContext> => {
+
+const mutationKey = ['controlPlanePermPostReport'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlanePermPostReport>>, void> = () => {
+
+
+          return  controlPlanePermPostReport(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlanePermPostReportMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlanePermPostReport>>>
+
+    export type ControlPlanePermPostReportMutationError = ErrorBody
+
+    export const useControlPlanePermPostReport = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostReport>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlanePermPostReport>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getControlPlanePermPostReportMutationOptions(options), queryClient);
+    }
+    export type controlPlanePermPostSwitchResponse200 = {
+  data: GrantSourceState
+  status: 200
+}
+
+export type controlPlanePermPostSwitchResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlanePermPostSwitchResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlanePermPostSwitchResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type controlPlanePermPostSwitchResponseSuccess = (controlPlanePermPostSwitchResponse200) & {
+  headers: Headers;
+};
+export type controlPlanePermPostSwitchResponseError = (controlPlanePermPostSwitchResponse401 | controlPlanePermPostSwitchResponse403 | controlPlanePermPostSwitchResponse409) & {
+  headers: Headers;
+};
+
+export type controlPlanePermPostSwitchResponse = (controlPlanePermPostSwitchResponseSuccess | controlPlanePermPostSwitchResponseError)
+
+export const getControlPlanePermPostSwitchUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/cedar-grants/switch`
+}
+
+export const controlPlanePermPostSwitch = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlanePermPostSwitchResponse> => {
+
+  return customInstance<controlPlanePermPostSwitchResponse>(getControlPlanePermPostSwitchUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlanePermPostSwitchMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostSwitch>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostSwitch>>, TError,void, TContext> => {
+
+const mutationKey = ['controlPlanePermPostSwitch'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlanePermPostSwitch>>, void> = () => {
+
+
+          return  controlPlanePermPostSwitch(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlanePermPostSwitchMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlanePermPostSwitch>>>
+
+    export type ControlPlanePermPostSwitchMutationError = ErrorBody
+
+    export const useControlPlanePermPostSwitch = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostSwitch>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlanePermPostSwitch>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getControlPlanePermPostSwitchMutationOptions(options), queryClient);
+    }
+    export type controlPlanePermPostUndoResponse200 = {
+  data: GrantSourceState
+  status: 200
+}
+
+export type controlPlanePermPostUndoResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type controlPlanePermPostUndoResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type controlPlanePermPostUndoResponseSuccess = (controlPlanePermPostUndoResponse200) & {
+  headers: Headers;
+};
+export type controlPlanePermPostUndoResponseError = (controlPlanePermPostUndoResponse401 | controlPlanePermPostUndoResponse403) & {
+  headers: Headers;
+};
+
+export type controlPlanePermPostUndoResponse = (controlPlanePermPostUndoResponseSuccess | controlPlanePermPostUndoResponseError)
+
+export const getControlPlanePermPostUndoUrl = () => {
+
+
+
+
+  return `/api/control-plane/perm/cedar-grants/undo`
+}
+
+export const controlPlanePermPostUndo = async ( options?: Parameters<typeof customInstance>[1]): Promise<controlPlanePermPostUndoResponse> => {
+
+  return customInstance<controlPlanePermPostUndoResponse>(getControlPlanePermPostUndoUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getControlPlanePermPostUndoMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostUndo>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostUndo>>, TError,void, TContext> => {
+
+const mutationKey = ['controlPlanePermPostUndo'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof controlPlanePermPostUndo>>, void> = () => {
+
+
+          return  controlPlanePermPostUndo(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ControlPlanePermPostUndoMutationResult = NonNullable<Awaited<ReturnType<typeof controlPlanePermPostUndo>>>
+
+    export type ControlPlanePermPostUndoMutationError = ErrorBody
+
+    export const useControlPlanePermPostUndo = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof controlPlanePermPostUndo>>, TError,void, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof controlPlanePermPostUndo>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getControlPlanePermPostUndoMutationOptions(options), queryClient);
+    }
+    export type controlPlanePermGetSourceResponse200 = {
   data: SourceState
   status: 200
 }
