@@ -1,9 +1,9 @@
 //! EO4 operator endpoints for the cedar grant-source switch, driven over the real
-//! `auth_router` (login) + `pdp_source_router`. DB-gated via egret_test_db.
+//! `auth_router` (login) + `cedar_grant_router`. DB-gated via egret_test_db.
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use egret_auth::password::hash_password;
 use egret_auth::cedar_grant_routes::{cedar_grant_router, CedarGrantState};
+use egret_auth::password::hash_password;
 use egret_auth::routes::{auth_router, AuthState};
 use egret_auth::session::SessionService;
 use egret_auth::users::UserRepo;
@@ -61,14 +61,14 @@ fn app(db: &Db) -> axum::Router {
         oidc: None,
         cookie_key: None,
     };
-    let pdp = CedarGrantState {
+    let cg = CedarGrantState {
         db: db.clone(),
         sessions,
         bus: egret_events::EventBus::new(),
     };
     axum::Router::new()
         .nest("/api/auth", auth_router().with_state(auth))
-        .nest("/api/control-plane", cedar_grant_router().with_state(pdp))
+        .nest("/api/control-plane", cedar_grant_router().with_state(cg))
 }
 
 async fn login(app: &axum::Router, email: &str) -> String {

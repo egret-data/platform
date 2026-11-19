@@ -1,5 +1,6 @@
 //! Read API over the unified `access_grants` table.
 
+use crate::pdp::grant_source_switch::GrantSource;
 use egret_core::ids::{UserId, WorkspaceId};
 use egret_core::{Error, Result};
 use egret_metastore::Db;
@@ -86,11 +87,11 @@ impl AccessGrantStore {
     /// Pass `&[]` when no object scope is relevant (platform/workspace resources).
     pub async fn grants_for(
         &self,
+        source: GrantSource,
         user_id: UserId,
         ws: Option<WorkspaceId>,
         object_scope_ids: &[uuid::Uuid],
     ) -> Result<Vec<Grant>> {
-        use crate::pdp::grant_source_switch::{read_source, GrantSource};
         // sqlx 0.9 `query_as` takes `&'static str`, so the table name cannot be
         // interpolated: two literal queries that differ ONLY in the table. `LEGACY_SQL`
         // is the pre-EO4 query, unchanged.
@@ -114,7 +115,6 @@ impl AccessGrantStore {
                   OR (ag.scope_type = 'workspace' AND ag.scope_id = $2) \
                   OR (ag.scope_type = 'object' AND ag.scope_id = ANY($3)) ) \
                AND (ag.expires_at IS NULL OR ag.expires_at > now())";
-        let source = read_source(&self.db).await;
         let sql = match source {
             GrantSource::Legacy => LEGACY_SQL,
             GrantSource::Unified => UNIFIED_SQL,

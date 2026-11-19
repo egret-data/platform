@@ -252,7 +252,7 @@ async fn report_empty_when_mirror_is_faithful_and_catches_divergence() {
 }
 
 #[tokio::test]
-async fn grants_for_reads_the_source_the_switch_names() {
+async fn grants_for_routes_by_the_source_it_is_given() {
     let _g = SWITCH_LOCK.lock().await;
     let db = db().await;
     let store = egret_auth::grants::AccessGrantStore::new(db.clone());
@@ -273,10 +273,18 @@ async fn grants_for_reads_the_source_the_switch_names() {
         k
     };
 
-    write_source(&db, GrantSource::Legacy, "t").await.unwrap();
-    let legacy = sorted(store.grants_for(uid, None, &[]).await.unwrap());
-    write_source(&db, GrantSource::Unified, "t").await.unwrap();
-    let unified = sorted(store.grants_for(uid, None, &[]).await.unwrap());
+    let legacy = sorted(
+        store
+            .grants_for(GrantSource::Legacy, uid, None, &[])
+            .await
+            .unwrap(),
+    );
+    let unified = sorted(
+        store
+            .grants_for(GrantSource::Unified, uid, None, &[])
+            .await
+            .unwrap(),
+    );
     assert_eq!(legacy.len(), 1);
     assert_eq!(
         legacy, unified,
@@ -294,9 +302,14 @@ async fn grants_for_reads_the_source_the_switch_names() {
     .execute(&db.pool)
     .await
     .unwrap();
-    let unified_ghost = store.grants_for(uid, None, &[]).await.unwrap();
-    write_source(&db, GrantSource::Legacy, "t").await.unwrap();
-    let legacy_ghost = store.grants_for(uid, None, &[]).await.unwrap();
+    let unified_ghost = store
+        .grants_for(GrantSource::Unified, uid, None, &[])
+        .await
+        .unwrap();
+    let legacy_ghost = store
+        .grants_for(GrantSource::Legacy, uid, None, &[])
+        .await
+        .unwrap();
     assert_eq!(unified_ghost.len(), 2, "unified reads perm.cedar_grants");
     assert_eq!(legacy_ghost.len(), 1, "legacy ignores the mirror-only row");
 }
@@ -317,7 +330,12 @@ async fn unified_read_error_fails_safe_to_access_grants() {
         .await
         .unwrap();
     let got = store
-        .grants_for(egret_core::ids::UserId(user), None, &[])
+        .grants_for(
+            GrantSource::Unified,
+            egret_core::ids::UserId(user),
+            None,
+            &[],
+        )
         .await;
     // Restore before asserting (Cleanup also restores on panic).
     sqlx::query("ALTER TABLE perm.cedar_grants_tmp RENAME TO cedar_grants")

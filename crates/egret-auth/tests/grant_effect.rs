@@ -24,7 +24,15 @@ async fn grants_for_returns_effect() {
             .unwrap();
     sqlx::query("INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, scope_id, effect) VALUES ('user',$1,$2,'workspace',$3,'deny')")
         .bind(user.0).bind(role).bind(ws.0).execute(&db.pool).await.unwrap();
-    let grants = store.grants_for(user, Some(ws), &[]).await.unwrap();
+    let grants = store
+        .grants_for(
+            egret_auth::pdp::grant_source_switch::GrantSource::Legacy,
+            user,
+            Some(ws),
+            &[],
+        )
+        .await
+        .unwrap();
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].effect, "deny");
     sqlx::query("DELETE FROM access_grants WHERE principal_id=$1")

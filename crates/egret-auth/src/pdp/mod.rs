@@ -22,6 +22,7 @@ use tokio::sync::broadcast;
 
 use crate::events::RolesChanged;
 use crate::grants::{AccessGrantStore, Grant};
+use grant_source_switch::GrantSource;
 use source_switch::{Divergence, DivergenceKind};
 
 /// The compiled policy state the PDP authorizes against. Held behind an
@@ -30,6 +31,9 @@ use source_switch::{Divergence, DivergenceKind};
 pub(crate) struct PdpInner {
     templates: PolicySet,
     role_names: HashMap<uuid::Uuid, String>,
+    /// EO4: the grant source, read ONCE per reload (like the EO3 policy source) so the
+    /// decision path never reads the switch from the DB.
+    grant_source: GrantSource,
 }
 
 /// The Cedar-backed decision point. Templates are built from `role_permissions`
@@ -63,15 +67,18 @@ impl CedarPdp {
     /// byte-identical to before.
     async fn load_inner(db: &Db) -> Result<PdpInner> {
         use crate::pdp::source_switch::{read_source, PolicySource};
-        match read_source(db).await {
-            PolicySource::Legacy => Self::build_legacy(db).await,
+        let mut inner = match read_source(db).await {
+            PolicySource::Legacy => Self::build_legacy(db).await?,
             source => {
                 // Build legacy too, so we keep comparing (canary) AND have a fail-safe.
                 let legacy = Self::build_legacy(db).await?;
                 let compiled = Self::build_compiled(db).await;
-                Ok(Self::select_served(source, legacy, compiled))
+                Self::select_served(source, legacy, compiled)
             }
-        }
+        };
+        // EO4: read the grant source once per reload (infallible; fail-safe to legacy).
+        inner.grant_source = grant_source_switch::read_source(db).await;
+        Ok(inner)
     }
 
     /// EO3: choose what to serve for a non-legacy state. `shadow` always serves
@@ -322,6 +329,7 @@ impl CedarPdp {
         Ok(PdpInner {
             templates,
             role_names,
+            grant_source: GrantSource::Legacy,
         })
     }
 
@@ -348,6 +356,7 @@ impl CedarPdp {
         Ok(PdpInner {
             templates: compiled.policy_set,
             role_names: compiled.role_names,
+            grant_source: GrantSource::Legacy,
         })
     }
 
@@ -382,9 +391,10 @@ impl CedarPdp {
                 },
             ),
         };
+        let source = self.inner.load().grant_source;
         let grants = self
             .grants
-            .grants_for(subject.user_id, ws, &object_ids)
+            .grants_for(source, subject.user_id, ws, &object_ids)
             .await?;
         self.decide_with(templates, role_names, &grants, subject, action, resource)
             .await
@@ -434,11 +444,11 @@ impl Pdp for CedarPdp {
                 },
             ),
         };
+        let inner = self.inner.load();
         let grants = self
             .grants
-            .grants_for(subject.user_id, ws, &object_ids)
+            .grants_for(inner.grant_source, subject.user_id, ws, &object_ids)
             .await?;
-        let inner = self.inner.load();
         self.decide_with(
             &inner.templates,
             &inner.role_names,
@@ -610,10 +620,12 @@ mod eo3_diff_tests {
                 ("t2", "permit(principal == ?principal, action, resource);"),
             ]),
             role_names: HashMap::new(),
+            grant_source: GrantSource::Legacy,
         };
         let compiled = PdpInner {
             templates: tset(&[("t1", "forbid(principal == ?principal, action, resource);")]),
             role_names: HashMap::new(),
+            grant_source: GrantSource::Legacy,
         };
         let d = diff(&legacy, &compiled);
         assert_eq!(d.len(), 2);
@@ -631,10 +643,12 @@ mod eo3_diff_tests {
         let legacy = PdpInner {
             templates: a,
             role_names: HashMap::new(),
+            grant_source: GrantSource::Legacy,
         };
         let compiled = PdpInner {
             templates: b,
             role_names: HashMap::new(),
+            grant_source: GrantSource::Legacy,
         };
         assert!(diff(&legacy, &compiled).is_empty());
     }
@@ -647,6 +661,7 @@ mod eo3_diff_tests {
                 ("p2", "forbid(principal, action, resource);"),
             ]),
             role_names: HashMap::new(),
+            grant_source: GrantSource::Legacy,
         };
         let compiled = PdpInner {
             templates: pset(&[
@@ -654,6 +669,7 @@ mod eo3_diff_tests {
                 ("p3", "permit(principal, action, resource);"),
             ]),
             role_names: HashMap::new(),
+            grant_source: GrantSource::Legacy,
         };
         let d = diff(&legacy, &compiled);
         assert_eq!(d.len(), 3);
@@ -667,10 +683,12 @@ mod eo3_diff_tests {
         let legacy = PdpInner {
             templates: ps.clone(),
             role_names: HashMap::from([(r, "admin".to_string())]),
+            grant_source: GrantSource::Legacy,
         };
         let compiled = PdpInner {
             templates: ps,
             role_names: HashMap::from([(r, "ADMIN".to_string())]),
+            grant_source: GrantSource::Legacy,
         };
         let d = diff(&legacy, &compiled);
         assert_eq!(d.len(), 1);
@@ -686,10 +704,12 @@ mod eo3_diff_tests {
         let legacy = || PdpInner {
             templates: pset(&[("legacyA", "permit(principal, action, resource);")]),
             role_names: HashMap::from([(r, "legacy-role".to_string())]),
+            grant_source: GrantSource::Legacy,
         };
         let compiled = || PdpInner {
             templates: pset(&[("compiledB", "permit(principal, action, resource);")]),
             role_names: HashMap::from([(r, "compiled-role".to_string())]),
+            grant_source: GrantSource::Legacy,
         };
         let is_legacy = |i: &PdpInner| {
             i.role_names[&r] == "legacy-role"

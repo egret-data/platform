@@ -65,6 +65,7 @@ async fn get_state(
     post, path = "/api/control-plane/perm/cedar-grants/report", tag = "control-plane-perm",
     responses(
         (status = 200, description = "Live equivalence report (empty => safe to switch)", body = [GrantDivergence]),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Not a platform admin", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
@@ -78,6 +79,7 @@ async fn post_report(
 
 #[utoipa::path(post, path = "/api/control-plane/perm/cedar-grants/fold", tag = "control-plane-perm",
     responses((status = 200, description = "Mirror backfilled; source unchanged", body = GrantSourceState),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, body = egret_core::http::ErrorBody)))]
 async fn post_fold(
     State(st): State<CedarGrantState>,
@@ -91,6 +93,7 @@ async fn post_fold(
 #[utoipa::path(post, path = "/api/control-plane/perm/cedar-grants/switch", tag = "control-plane-perm",
     responses(
         (status = 200, description = "Switched to unified (report was clean)", body = GrantSourceState),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, body = egret_core::http::ErrorBody),
         (status = 409, description = "The report is not clean", body = egret_core::http::ErrorBody),
     ))]
@@ -113,6 +116,7 @@ async fn post_switch(
 
 #[utoipa::path(post, path = "/api/control-plane/perm/cedar-grants/undo", tag = "control-plane-perm",
     responses((status = 200, description = "Back to legacy", body = GrantSourceState),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, body = egret_core::http::ErrorBody)))]
 async fn post_undo(
     State(st): State<CedarGrantState>,
