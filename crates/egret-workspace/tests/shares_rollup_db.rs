@@ -363,3 +363,105 @@ async fn lists_app_grants_scoped_to_workspace() {
     assert_eq!(rows[0].object_name.as_deref(), Some(app_name.as_str()));
     assert_eq!(rows[0].role, "ws_viewer");
 }
+
+/// Workflows (`workflow`) and schedules (`alert`) are rolled up with their name
+/// (workflow: `namespace.flow_id`), and a non-member holding an object grant on
+/// either is admitted as an object-guest — not for one in another workspace.
+#[tokio::test]
+async fn lists_workflow_and_alert_grants_and_admits_guest() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let repo = AccessViewsRepo::new(db.clone());
+    let wrepo = WorkspaceRepo::new(db.clone());
+    let owner = seed_user_email(
+        &db,
+        &format!("own-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
+    let guest = seed_user_email(
+        &db,
+        &format!("gst-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
+    let w = wrepo.create(&uniq("ws"), "W", owner).await.unwrap();
+    let w2 = wrepo.create(&uniq("ws"), "W2", owner).await.unwrap();
+    let flow_id = uniq("flow");
+    let mk_flow = |ws: WorkspaceId, fid: String| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO workflow.flows (workspace_id, namespace, flow_id, source, plan) \
+                 VALUES ($1, 'ns', $2, 'id: x', '{}'::jsonb) RETURNING id",
+            )
+            .bind(ws.0)
+            .bind(fid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+        }
+    };
+    let mk_sched = |ws: WorkspaceId, name: String| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "WITH d AS (INSERT INTO analytics.dashboards (workspace_id, name, description) \
+                            VALUES ($1, 'D', '') RETURNING id) \
+                 INSERT INTO automation.schedules \
+                   (workspace_id, type, name, crontab, dashboard_id, report_format) \
+                 SELECT $1, 'report', $2, '* * * * *', d.id, 'png' FROM d RETURNING id",
+            )
+            .bind(ws.0)
+            .bind(name)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap()
+        }
+    };
+    let flow = mk_flow(w.id, flow_id.clone()).await;
+    let other_flow = mk_flow(w2.id, uniq("flow")).await;
+    let sched_name = uniq("sched");
+    let sched = mk_sched(w.id, sched_name.clone()).await;
+    let viewer = role_id(&db, "ws_viewer").await;
+    grant_object(&db, "user", guest.0, viewer, "workflow", flow, "allow").await;
+    grant_object(&db, "user", guest.0, viewer, "alert", sched, "allow").await;
+    grant_object(
+        &db, "user", guest.0, viewer, "workflow", other_flow, "allow",
+    )
+    .await;
+
+    let rows = repo.list_object_grants(w.id).await.unwrap();
+    assert_eq!(rows.len(), 2, "only this workspace's shares: {rows:?}");
+    let f = rows
+        .iter()
+        .find(|r| r.kind == "workflow")
+        .expect("workflow row");
+    assert_eq!(f.object_id, flow);
+    assert_eq!(
+        f.object_name.as_deref(),
+        Some(format!("ns.{flow_id}").as_str())
+    );
+    let a = rows.iter().find(|r| r.kind == "alert").expect("alert row");
+    assert_eq!(a.object_id, sched);
+    assert_eq!(a.object_name.as_deref(), Some(sched_name.as_str()));
+
+    let authz = egret_workspace::rbac::Authorizer::new(db.clone());
+    assert!(authz
+        .has_object_grant_in_workspace(guest, w.id)
+        .await
+        .unwrap());
+    assert!(authz
+        .has_object_grant_in_workspace(guest, w2.id)
+        .await
+        .unwrap());
+    let stranger = seed_user_email(
+        &db,
+        &format!("str-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
+    assert!(!authz
+        .has_object_grant_in_workspace(stranger, w.id)
+        .await
+        .unwrap());
+}

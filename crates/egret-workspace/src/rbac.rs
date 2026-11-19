@@ -68,7 +68,9 @@ impl Authorizer {
                     OR (ag.object_type = 'chart'     AND ag.scope_id IN (SELECT id FROM analytics.charts     WHERE workspace_id = $2)) \
                     OR (ag.object_type = 'dataset'   AND ag.scope_id IN (SELECT id FROM analytics.datasets   WHERE workspace_id = $2)) \
                     OR (ag.object_type = 'saved_query' AND ag.scope_id IN (SELECT id FROM analytics.saved_queries WHERE workspace_id = $2)) \
-                    OR (ag.object_type = 'app'       AND ag.scope_id IN (SELECT id FROM analytics.apps       WHERE workspace_id = $2)) ) )",
+                    OR (ag.object_type = 'app'       AND ag.scope_id IN (SELECT id FROM analytics.apps       WHERE workspace_id = $2)) \
+                    OR (ag.object_type = 'workflow'  AND ag.scope_id IN (SELECT id FROM workflow.flows       WHERE workspace_id = $2)) \
+                    OR (ag.object_type = 'alert'     AND ag.scope_id IN (SELECT id FROM automation.schedules WHERE workspace_id = $2)) ) )",
         )
         .bind(user_id.0)
         .bind(ws.0)
