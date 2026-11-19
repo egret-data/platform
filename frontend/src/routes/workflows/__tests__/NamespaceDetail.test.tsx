@@ -210,7 +210,7 @@ describe("NamespaceDetail: Flows and Executions, pinned to the namespace", () =>
       expect(await screen.findByRole("link", { name: "sync" }, LAZY)).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "load" })).toBeInTheDocument();
       // Folding here stays here: the workspace tree's stored state is untouched.
-      await user.click(screen.getByRole("button", { name: /company\.team\.etl|etl/ }));
+      await user.click(screen.getByRole("button", { name: /etl \(\d+\)$/ }));
       expect(screen.queryByRole("link", { name: "load" })).toBeNull();
       expect(JSON.parse(localStorage.getItem(nsCollapseKey(NS_WS)) ?? "[]")).toEqual(["company", "company.team"]);
     } finally {

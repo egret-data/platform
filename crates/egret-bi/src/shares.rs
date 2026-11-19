@@ -774,13 +774,7 @@ mod tests {
         for kind in ["dashboard", "chart", "dataset", "saved_query", "app"] {
             assert_eq!(read_action(kind), Some(format!("{kind}:read").as_str()));
         }
-        for kind in [
-            "",
-            "data_api_endpoint",
-            "apps",
-            "Dashboard",
-            "notebook",
-        ] {
+        for kind in ["", "data_api_endpoint", "apps", "Dashboard", "notebook"] {
             assert_eq!(object_table(kind), None, "{kind}");
             assert_eq!(manage_action(kind), None, "{kind}");
         }

@@ -1118,9 +1118,14 @@ async fn require_schedule(
         .map_err(AutomationApiError::from)?
     {
         Some(row) => {
-            egret_core::authz::require_object(&*st.pdp, ctx, action, schedule_object_ref(ctx, &row))
-                .await
-                .map_err(AutomationApiError::from)?;
+            egret_core::authz::require_object(
+                &*st.pdp,
+                ctx,
+                action,
+                schedule_object_ref(ctx, &row),
+            )
+            .await
+            .map_err(AutomationApiError::from)?;
             Ok(row)
         }
         None => {

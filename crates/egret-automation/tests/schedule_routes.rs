@@ -3769,14 +3769,7 @@ async fn an_object_grant_reaches_that_schedule_only() {
     let (s, _) = req(&fx, &tok, "GET", &format!("{}/runs", get(&x)), None).await;
     assert_eq!(s, StatusCode::OK, "runs are a read");
     // A read grant does not write.
-    let (s, _) = req(
-        &fx,
-        &tok,
-        "PUT",
-        &get(&x),
-        Some(minimal_update_body()),
-    )
-    .await;
+    let (s, _) = req(&fx, &tok, "PUT", &get(&x), Some(minimal_update_body())).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
     let (s, _) = req(&fx, &tok, "POST", &format!("{}/trash", get(&x)), None).await;
     assert_eq!(s, StatusCode::FORBIDDEN);
@@ -3868,11 +3861,12 @@ async fn destructive_routes_on_a_dataapi_alert_need_endpoint_read() {
         let (s, body) = req_raw(&fx, &tok, m, &p, None).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{m} {p}: {body}");
     }
-    let still: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM automation.schedules WHERE id=$1 AND deleted_at IS NULL")
-            .bind(id)
-            .fetch_one(&fx.db.pool)
-            .await
-            .unwrap();
+    let still: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM automation.schedules WHERE id=$1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
     assert_eq!(still, 1, "row must be neither deleted nor trashed");
 }

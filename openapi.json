@@ -67299,7 +67299,7 @@
     },
     {
       "name": "shares",
-      "description": "Per-object grants: share a dashboard / chart / dataset / folder with a user or group at a workspace role"
+      "description": "Per-object grants: share a dashboard / chart / dataset / folder / app / saved query / workflow / alert with a user or group at a workspace role"
     },
     {
       "name": "auth",

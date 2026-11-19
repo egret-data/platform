@@ -399,7 +399,7 @@ async fn sharing_a_folder_follows_the_manage_action_of_what_it_holds() {
     .await
     .expect("insert workspace");
     let mut folders = std::collections::HashMap::new();
-    for entity_type in ["dashboard", "app", "alert"] {
+    for entity_type in ["dashboard", "app", "alert", "data_api_endpoint"] {
         let id: Uuid = sqlx::query_scalar(
             "INSERT INTO analytics.folders (workspace_id, entity_type, name) \
              VALUES ($1, $2, 'Shared things') RETURNING id",
@@ -459,6 +459,9 @@ async fn sharing_a_folder_follows_the_manage_action_of_what_it_holds() {
         ("ws_admin", &admin, "app", StatusCode::OK),
         ("ws_editor", &editor, "app", StatusCode::FORBIDDEN),
         ("ws_viewer", &viewer, "app", StatusCode::FORBIDDEN),
+        ("ws_admin", &admin, "alert", StatusCode::OK),
+        ("ws_editor", &editor, "alert", StatusCode::OK),
+        ("ws_viewer", &viewer, "alert", StatusCode::FORBIDDEN),
     ];
     for (who, token, kind, expected) in cases {
         assert_eq!(
@@ -472,9 +475,9 @@ async fn sharing_a_folder_follows_the_manage_action_of_what_it_holds() {
     // object grant to hand out on it, for anyone. 400, not a 403 that reads as
     // "you lack a permission somebody else has".
     assert_eq!(
-        share(admin.clone(), folders["alert"]).await,
+        share(admin.clone(), folders["data_api_endpoint"]).await,
         StatusCode::BAD_REQUEST,
-        "an alerts folder is not shareable"
+        "a Data API endpoints folder is not shareable"
     );
 
     // And the grant is real: it is stored against the folder.
