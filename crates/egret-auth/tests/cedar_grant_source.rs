@@ -346,3 +346,12 @@ async fn unified_read_error_fails_safe_to_access_grants() {
     assert_eq!(got.len(), 1, "falls back to access_grants rows");
     assert_eq!(got[0].role_id, role);
 }
+
+#[test]
+fn shadow_round_trips_and_is_distinct() {
+    use egret_auth::pdp::grant_source_switch::GrantSource;
+    assert_eq!(GrantSource::Shadow.as_db(), "shadow");
+    assert_eq!(GrantSource::from_db("shadow"), Some(GrantSource::Shadow));
+    assert_ne!(GrantSource::Shadow, GrantSource::Legacy);
+    assert_ne!(GrantSource::Shadow, GrantSource::Unified);
+}
