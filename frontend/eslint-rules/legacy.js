@@ -69,7 +69,6 @@ export const legacy = {
     "src/components/chart/viz/table.tsx",
     "src/components/dataset/ColumnsTab.tsx",
     "src/components/dataset/CreateDatasetDialog.tsx",
-    "src/components/dataset/FormatPicker.tsx",
     "src/components/dataset/MetricsTab.tsx",
     "src/routes/control-plane/EngineAutoscaling.tsx",
     "src/routes/control-plane/EngineResourceGroups.tsx",

@@ -20,7 +20,7 @@ import { CreateDatasetDialog } from "@/components/dataset/CreateDatasetDialog";
 import { DatasetActionsMenu } from "@/components/dataset/DatasetActionsMenu";
 import { DeleteDatasetDialog } from "@/components/dataset/DeleteDatasetDialog";
 import { DuplicateDatasetDialog } from "@/components/dataset/DuplicateDatasetDialog";
-import { TrashDatasetDialog } from "@/components/dataset/TrashDatasetDialog";
+import { TrashDatasetDialog, TrashDatasetsDialog, bulkChartsNotice } from "@/components/dataset/TrashDatasetDialog";
 import { ShareDialog } from "@/components/sharing/ShareDialog";
 import { TagDialog } from "@/components/access/TagEditor";
 import { RelativeTime } from "@/components/explore/RelativeTime";
@@ -141,9 +141,13 @@ export default function Datasets() {
   function setSortKey(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
-  async function doBulkTrash() {
-    for (const id of bulk.selectedIds) { try { await trash.mutateAsync(id); } catch (e) { toast.error(String(e)); } }
-    toast.success("Moved to Trash"); bulk.clear();
+  // The ids the confirm dialog was opened for: the selection can change under an open dialog.
+  const [bulkTrashIds, setBulkTrashIds] = useState<string[] | null>(null);
+  async function doBulkTrash(ids: string[], chartCount: number) {
+    for (const id of ids) { try { await trash.mutateAsync(id); } catch (e) { toast.error(String(e)); } }
+    // KI-252: the single dialog's notice about the charts, carried into the toast.
+    toast.success("Moved to Trash", { description: bulkChartsNotice(chartCount) });
+    bulk.clear();
   }
   /**
    * Move the selected rows to a folder that already exists (`null` = out of any folder): one
@@ -307,7 +311,7 @@ export default function Datasets() {
                   onMove={doBulkMoveTo}
                   onNewFolder={() => setFolderDialog({ mode: "bulkmove" })}
                 />
-                <Button variant="destructive" size="sm" onClick={doBulkTrash}>
+                <Button variant="destructive" size="sm" onClick={() => setBulkTrashIds([...bulk.selectedIds])}>
                   Move {bulk.selectedIds.length} to Trash
                 </Button>
               </>
@@ -399,6 +403,17 @@ export default function Datasets() {
         onConfirm={() => {
           if (!trashTarget) return;
           trash.mutateAsync(trashTarget.id).then(() => toast.success("Moved to Trash")).catch((e) => toast.error(String(e)));
+        }}
+      />
+
+      <TrashDatasetsDialog
+        ws={ws}
+        datasets={bulkTrashIds && (data ?? []).filter((d) => bulkTrashIds.includes(d.id)).map((d) => ({ id: d.id, name: d.name }))}
+        onOpenChange={(o) => { if (!o) setBulkTrashIds(null); }}
+        onConfirm={(chartCount) => {
+          const ids = bulkTrashIds;
+          setBulkTrashIds(null);
+          if (ids) void doBulkTrash(ids, chartCount);
         }}
       />
 
