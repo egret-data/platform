@@ -272,7 +272,7 @@ export default function AccessSection() {
     // the actions, which was too narrow to put two controls on one line.
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Access</h2>
+        <h2 className="text-base font-semibold">Access</h2>
         <p className="max-w-prose text-sm text-muted-foreground">
           What each service account can actually do with this endpoint — the invoke right egret owns, and
           the data access it does not.

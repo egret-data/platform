@@ -155,7 +155,7 @@ export default function VersionsSection() {
           `Config.tsx`'s `Validate` shape and is where it belongs on its own
           merits: what Publish does is add a row to that table. */}
       <div>
-        <h2 className="text-lg font-semibold">Versions</h2>
+        <h2 className="text-base font-semibold">Versions</h2>
         <p className="max-w-prose text-sm text-muted-foreground">
           Every frozen snapshot of this endpoint&apos;s contract. A consumer only ever receives the one
           marked Live — never the draft sitting in Query.

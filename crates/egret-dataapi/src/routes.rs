@@ -1046,7 +1046,7 @@ async fn create_endpoint(
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing data_api_endpoint:manage permission", body = ErrorBody),
         (status = 404, description = "No such endpoint, or no such database, in this workspace", body = ErrorBody),
-        (status = 409, description = "Another endpoint's draft already sits at that method and path, or the endpoint is in the trash — restore it before editing it. A new path or method on a live endpoint's draft is saved but not served: it goes live at the next publish", body = ErrorBody),
+        (status = 409, description = "Another endpoint's draft already sits at that method and path, another endpoint is serving it live (the same refusal publish gives), or the endpoint is in the trash — restore it before editing it. A new path or method on a live endpoint's draft is saved but not served: it goes live at the next publish", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
     ),
 )]

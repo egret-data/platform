@@ -25908,7 +25908,7 @@
             }
           },
           "409": {
-            "description": "Another endpoint's draft already sits at that method and path, or the endpoint is in the trash — restore it before editing it. A new path or method on a live endpoint's draft is saved but not served: it goes live at the next publish",
+            "description": "Another endpoint's draft already sits at that method and path, another endpoint is serving it live (the same refusal publish gives), or the endpoint is in the trash — restore it before editing it. A new path or method on a live endpoint's draft is saved but not served: it goes live at the next publish",
             "content": {
               "application/json": {
                 "schema": {
