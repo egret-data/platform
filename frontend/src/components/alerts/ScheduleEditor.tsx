@@ -80,6 +80,8 @@ import { ConfigTable, ConfigTableGroup, ConfigTableRow } from "@/components/conf
 import { TagCombobox } from "@/components/ui/tag-combobox";
 import { DestinationRows } from "./DestinationRows";
 import { toDestinations, toRecipients, type Destination } from "./destinations";
+import { ownerLabel, withStoredOption } from "./storedOptions";
+import { useWorkspacePermission } from "@/hooks/useWorkspaceFeatures";
 import { SUBJECT_TOKENS, renderSubject } from "@/lib/subjectTemplate";
 
 /** The comparison operators a condition offers, in the order the picker lists them. */
@@ -449,8 +451,10 @@ export function ScheduleEditor({
    *  matching member is shown as itself rather than hidden — a former member
    *  still owns the schedule, and silently dropping them from the field would
    *  delete them on the next save. */
-  const memberName = (id: string) =>
-    userMembers.find((m) => m.principal_id === id)?.principal_name ?? id;
+  const memberName = (id: string) => ownerLabel(id, userMembers, existing?.owners);
+  // Only a workspace admin can add a connection (Workspace settings →
+  // Connections is gated on this permission), so the empty-list hint differs.
+  const canAddConnection = useWorkspacePermission()("workspace:manage_members");
   const defaultTarget =
     targetId || (targetKind === "dashboard" ? dashboards?.[0]?.id : charts?.[0]?.id) || "";
 
@@ -775,8 +779,9 @@ export function ScheduleEditor({
                 />
                 {(databases ?? []).length === 0 && (
                   <p className="text-xs text-destructive">
-                    This workspace has no connection yet. Add one under Workspace settings
-                    &rarr; Connections before creating an alert.
+                    {canAddConnection
+                      ? "This workspace has no connection yet. Add one under Workspace settings → Connections before creating an alert."
+                      : "This workspace has no connection yet. Ask a workspace admin to add one before creating an alert."}
                   </p>
                 )}
               </div>
@@ -1518,9 +1523,16 @@ export function ScheduleEditor({
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => (
-                            <SelectItem key={o.id} value={o.id}>
-                              {o.name}
+                          {withStoredOption(
+                            ((targetKind === "dashboard" ? dashboards : charts) ?? []).map((o) => ({
+                              value: o.id,
+                              label: o.name,
+                            })),
+                            defaultTarget,
+                            () => (targetKind === "dashboard" ? "(missing dashboard)" : "(missing chart)"),
+                          ).map((o) => (
+                            <SelectItem key={o.value} value={o.value}>
+                              {o.label}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -1532,6 +1544,9 @@ export function ScheduleEditor({
                         <SelectContent>
                           <SelectItem value="png">PNG image, shown here in the message</SelectItem>
                           <SelectItem value="pdf">PDF, as a file</SelectItem>
+                          {reportFormat !== "png" && reportFormat !== "pdf" && (
+                            <SelectItem value={reportFormat}>{reportFormat} (unsupported)</SelectItem>
+                          )}
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
