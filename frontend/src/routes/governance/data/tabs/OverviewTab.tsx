@@ -50,12 +50,15 @@ export function OverviewTab({
   catalog,
   browse,
   tags,
+  absent = false,
 }: {
   path: ObjectPath;
   kind: NodeKind | null;
   catalog: CatalogState;
   browse: BrowseResult;
   tags: TagsResult;
+  /** The catalog listed the schema and the table is not in it: nothing failed, there is no such table. */
+  absent?: boolean;
 }) {
   return (
     <CatalogGate catalog={catalog}>
@@ -72,18 +75,22 @@ export function OverviewTab({
               <ViewFacts catalogId={c.id} schema={path.schema} table={path.object} />
             ) : null}
             <Section title="Columns">
-              <Level browse={browse} what="columns">
-                {(body) => (
-                  <Columns
-                    path={path}
-                    catalog={c}
-                    columns={body.columns ?? []}
-                    source={body.source}
-                    tags={tags}
-                    taggable={c.warehouseId != null}
-                  />
-                )}
-              </Level>
+              {absent ? (
+                <EmptyState icon={Columns3} title="This table does not exist in the catalog." />
+              ) : (
+                <Level browse={browse} what="columns">
+                  {(body) => (
+                    <Columns
+                      path={path}
+                      catalog={c}
+                      columns={body.columns ?? []}
+                      source={body.source}
+                      tags={tags}
+                      taggable={c.warehouseId != null}
+                    />
+                  )}
+                </Level>
+              )}
             </Section>
           </div>
         )

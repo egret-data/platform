@@ -93,3 +93,10 @@ test("a 429 says when to try again", async () => {
     "Too many failed sign-in attempts. Try again in 4 minutes.",
   );
 });
+
+test("sign-in uses the shared standalone state frame (KI-279)", () => {
+  useAuthConfig.mockReturnValue({ data: { oidc_enabled: false } });
+  const { container } = renderLogin();
+  expect(container.querySelector("[data-state-page][data-standalone]")).not.toBeNull();
+  expect(screen.getByRole("heading", { level: 1, name: "Sign in to Egret" })).toBeInTheDocument();
+});

@@ -14,6 +14,11 @@ const deleteMutation = vi.fn();
 const testMutateAsync = vi.fn();
 const testMutation = vi.fn();
 const wsEngineViewMock = vi.fn();
+const canManageMock = vi.fn(() => true);
+vi.mock("@/hooks/useWorkspaceFeatures", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useWorkspaceFeatures")>()),
+  useWorkspacePermission: () => canManageMock,
+}));
 
 vi.mock("@/api/databases", async (importOriginal) => ({
   isFullConnection: (await importOriginal<typeof import("@/api/databases")>()).isFullConnection,
@@ -103,6 +108,8 @@ beforeEach(() => {
   deleteMutate.mockReset();
   testMutateAsync.mockReset();
   wsEngineViewMock.mockReset();
+  canManageMock.mockReset();
+  canManageMock.mockReturnValue(true);
 
   databasesMock.mockReturnValue({
     data: [mockDb1, mockDb2],
@@ -171,6 +178,17 @@ describe("DatabasesPage", () => {
     });
     renderAt();
     expect(screen.getByText("No connections yet.")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Add connection/ }).length).toBeGreaterThan(0);
+  });
+
+  it("tells a non-admin to ask an admin, and shows no Add button, on an empty list (KI-243)", () => {
+    canManageMock.mockReturnValue(false);
+    databasesMock.mockReturnValue({ data: [], isLoading: false, isError: false, error: null });
+    renderAt();
+    expect(canManageMock).toHaveBeenCalledWith("workspace:manage_members");
+    expect(screen.getByText("No connections yet.")).toBeInTheDocument();
+    expect(screen.getByText("Ask a workspace admin to add one.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add connection/ })).not.toBeInTheDocument();
   });
 
   it("shows skeleton while loading", () => {

@@ -36,4 +36,14 @@ impl Pdp for AuditingPdp {
         });
         Ok(decision)
     }
+
+    /// Observation only: a probe is not audited (see [`Pdp::probe`]).
+    async fn probe(
+        &self,
+        subject: &Subject,
+        action: &str,
+        resource: &Resource,
+    ) -> egret_core::Result<Decision> {
+        self.inner.probe(subject, action, resource).await
+    }
 }

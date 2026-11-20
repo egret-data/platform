@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Navigate, useLocation, useParams } from "react-router-dom";
 import { useAuth } from "./useAuth";
 import { canEnterControlPlane, canEnterGovernance } from "./appAccess";
+import { StandaloneLoading } from "@/components/layout/StatePage";
 import { useMyWorkspaces } from "@/api/hooks";
 import { Forbidden } from "@/routes/Forbidden";
 import { ImpersonationBanner } from "@/components/layout/ImpersonationBanner";
@@ -32,7 +33,7 @@ const WORKSPACE_REFUSAL =
  */
 export function RequireAuth({ children }: { children: ReactNode }) {
   const { me, isLoading } = useAuth();
-  if (isLoading) return <div className="p-10">Loading…</div>;
+  if (isLoading) return <StandaloneLoading />;
   if (!me) return <Navigate to="/login" replace />;
   return (
     <div className="flex h-screen flex-col">
@@ -115,7 +116,7 @@ export function RequireGovernanceAccess({ children }: { children: ReactNode }) {
 export function RequireWorkspace({ children }: { children: ReactNode }) {
   const { workspace } = useParams();
   const { data, isLoading } = useMyWorkspaces(true);
-  if (isLoading) return <div className="p-10">Loading…</div>;
+  if (isLoading) return <StandaloneLoading />;
   if (!data?.some((w) => w.slug === workspace))
     return (
       <AppShell>

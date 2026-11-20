@@ -153,7 +153,7 @@ function WorkflowsFallback() {
 
 function LoginRoute() {
   const { me, isLoading } = useAuth();
-  if (isLoading) return <div className="p-10">Loading…</div>;
+  if (isLoading) return <StandaloneLoading />;
   if (me) return <Navigate to="/" replace />;
   return <LoginPage />;
 }
@@ -191,7 +191,7 @@ import AccessSection from "@/routes/explore/dataapi/detail/AccessSection";
 import VersionsSection from "@/routes/explore/dataapi/detail/Versions";
 import TryIt from "@/routes/explore/dataapi/detail/TryIt";
 import { Placeholder } from "@/routes/Placeholder";
-import { StatePage } from "@/components/layout/StatePage";
+import { StandaloneLoading, StatePage } from "@/components/layout/StatePage";
 import Workspaces from "@/routes/control-plane/Workspaces";
 import WorkspaceDetail from "@/routes/control-plane/WorkspaceDetail";
 import ControlPlaneEngines from "@/routes/control-plane/ControlPlaneEngines";
@@ -224,12 +224,12 @@ import PolicyRedirect from "@/routes/governance/engines/PolicyRedirect";
 function HomeRedirect() {
   const { me, isLoading } = useAuth();
   const { data, isLoading: wsLoading } = useMyWorkspaces(!!me);
-  if (isLoading) return <div className="p-10">Loading…</div>;
+  if (isLoading) return <StandaloneLoading />;
   // Wait for the workspace list to settle (loaded or errored) before deciding
   // where a workspace-less user goes — otherwise a member with workspaces
   // would flash a Governance/Control Plane redirect while the fetch is
   // still in flight.
-  if (wsLoading) return <div className="p-10">Loading…</div>;
+  if (wsLoading) return <StandaloneLoading />;
   if (data && data.length > 0) return <Navigate to={`/explore/${data[0].slug}`} replace />;
   // No workspace yet. A steward or infra operator still has somewhere to go —
   // this page renders no header, so without the redirect they would be stranded.

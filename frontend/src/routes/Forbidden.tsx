@@ -1,4 +1,4 @@
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useMyWorkspaces } from "@/api/hooks";
 import { ApiError } from "@/api/client";
 import { StateActions, StatePage } from "@/components/layout/StatePage";
@@ -67,6 +67,11 @@ export function Forbidden({
 }) {
   const onward = useOnwardLink();
   const link = back ?? onward;
+  const { workspace } = useParams();
+  const { data: mine } = useMyWorkspaces(true);
+  // The refusal may be the whole workspace (a member whose only grant there is a deny): the
+  // switcher lists these same workspaces, so with none the reader has no way out but this page (KI-339).
+  const others = (mine ?? []).filter((w) => w.slug !== workspace);
   if (level === "section") {
     return (
       <section className="space-y-2 rounded-md border bg-muted/40 p-6" aria-labelledby="no-access-title">
@@ -82,6 +87,23 @@ export function Forbidden({
   return (
     <StatePage eyebrow="403 — Forbidden" title="You don't have access to this page." link={link}>
       {reason ? <p>{reason}</p> : null}
+      {workspace && others.length > 0 ? (
+        <p>
+          Other workspaces you can open:{" "}
+          {others.map((w, i) => (
+            <span key={w.id}>
+              {i > 0 ? ", " : ""}
+              <Link className="font-medium text-foreground hover:underline" to={`/explore/${w.slug}`}>
+                {w.name}
+              </Link>
+            </span>
+          ))}
+          .
+        </p>
+      ) : null}
+      {workspace && others.length === 0 ? (
+        <p>You are not a member of any other workspace. Ask a workspace admin if you need access.</p>
+      ) : null}
     </StatePage>
   );
 }

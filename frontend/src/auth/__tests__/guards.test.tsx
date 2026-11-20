@@ -46,6 +46,18 @@ test("RequirePlatform blocks a non-platform user", () => {
   expect(screen.getByText(/Forbidden/i)).toBeInTheDocument();
 });
 
+test("RequireAuth shows the standalone state frame, not bare text, while the session loads (KI-279)", () => {
+  const { container } = render(
+    <QueryClientProvider client={qc()}>
+      <AuthContext.Provider value={{ me: null, isLoading: true }}>
+        <MemoryRouter><RequireAuth><span>secret</span></RequireAuth></MemoryRouter>
+      </AuthContext.Provider>
+    </QueryClientProvider>,
+  );
+  expect(container.querySelector("[data-state-page][data-standalone]")).not.toBeNull();
+  expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+});
+
 test("RequireGlobalAdmin blocks a platform role that is not platform_admin", () => {
   render(
     <QueryClientProvider client={qc()}>
@@ -298,6 +310,8 @@ test("RequireWorkspace refuses a workspace the reader is not in, inside the shel
   expect(screen.queryByTestId("app-sidebar")).not.toBeInTheDocument();
   expect(screen.getByText(/you are not a member of it/)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Open Engineering" })).toHaveAttribute("href", "/explore/eng");
+  // KI-339: the reader is told which other workspaces they can open, not left with an empty switcher.
+  expect(screen.getByText(/Other workspaces you can open/)).toBeInTheDocument();
   // The first page of the tab: there is nothing to go back to.
   expect(screen.queryByRole("button", { name: "Go back" })).not.toBeInTheDocument();
 });

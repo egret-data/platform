@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PageContainer } from "./PageContainer";
 import { PageTitle } from "./PageTitle";
 
@@ -60,5 +61,50 @@ export function StateActions({ link }: { link: { to: string; label: string } }) 
         <Link to={link.to}>{link.label}</Link>
       </Button>
     </div>
+  );
+}
+
+/**
+ * The state frame for a page that renders BEFORE the app shell exists: sign-in,
+ * "No workspaces yet" and the bare loading state (KI-279). Same look as
+ * `StatePage` (a `max-w-xl` block with a `PageTitle`, a muted body, actions
+ * below) on the page background, centred in the viewport because there is no
+ * shell or list edge to align to.
+ */
+export function StandaloneStatePage({
+  title,
+  children,
+  actions,
+  width = "xl",
+}: {
+  title?: string;
+  children?: ReactNode;
+  actions?: ReactNode;
+  width?: "sm" | "xl";
+}) {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background p-4">
+      <div
+        className={`w-full space-y-2 py-6 ${width === "sm" ? "max-w-sm" : "max-w-xl"}`}
+        data-state-page
+        data-standalone
+      >
+        {title ? <PageTitle>{title}</PageTitle> : null}
+        {children ? <div className="space-y-2 text-sm text-muted-foreground">{children}</div> : null}
+        {actions ? <div className="flex flex-wrap items-center gap-2 pt-2">{actions}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+/** The loading state before the shell exists: the standalone frame with a skeleton, no bare text. */
+export function StandaloneLoading() {
+  return (
+    <StandaloneStatePage>
+      <div role="status" aria-label="Loading" className="space-y-2">
+        <Skeleton className="h-6 w-48" />
+        <Skeleton className="h-4 w-72" />
+      </div>
+    </StandaloneStatePage>
   );
 }
