@@ -728,7 +728,7 @@ export default function ResponseSection() {
     // the `ConfigTable` below, which is the other half of this change.
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Response</h2>
+        <h2 className="text-base font-semibold">Response</h2>
         <p className="max-w-prose text-sm text-muted-foreground">
           What a consumer actually receives when they call this endpoint.
         </p>

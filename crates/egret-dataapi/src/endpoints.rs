@@ -1084,6 +1084,10 @@ impl EndpointStore {
         id: Uuid,
         input: &UpdateEndpointInput,
     ) -> Result<DataApiEndpointDto> {
+        if input.path.is_some() || input.method.is_some() {
+            self.refuse_live_route_of_another(workspace, id, input)
+                .await?;
+        }
         let res: std::result::Result<Option<Row>, sqlx::Error> = sqlx::query_as(concat!(
             "UPDATE dataapi.endpoints SET \
                name = COALESCE($2, name), \
@@ -1151,6 +1155,55 @@ impl EndpointStore {
                     Error::NotFound("endpoint".into()),
                 )
                 .await),
+        }
+    }
+
+    /// KI-253: refuse, at draft save, a method + path that ANOTHER endpoint is
+    /// serving live — the same collision publish refuses late with
+    /// `dataapi_endpoints_live_route_key` (see `live_route_err`), surfaced when
+    /// the author types it. Same 409, same meaning ("keeps its published URL until
+    /// it is published again"), so the two never disagree.
+    ///
+    /// Only a draft-vs-LIVE collision is refused here. A draft-vs-draft one is
+    /// `UNIQUE (workspace_id, method, path)`, answered by [`Self::update`]'s own
+    /// 23505 branch, and a route this draft already holds is not re-refused: an
+    /// unrelated edit must not start failing on a collision that was already there
+    /// (publish still catches it). A row that is absent, foreign or trashed
+    /// matches nothing here and falls through to `update`'s own 404 / trash answer.
+    ///
+    /// A check-then-write, so a publish racing this save can still win; the unique
+    /// index at publish remains the authority.
+    async fn refuse_live_route_of_another(
+        &self,
+        workspace: Uuid,
+        id: Uuid,
+        input: &UpdateEndpointInput,
+    ) -> Result<()> {
+        let route: Option<(String, String)> = sqlx::query_as(
+            "SELECT COALESCE($3, c.method), COALESCE($4, c.path) \
+               FROM dataapi.endpoints c \
+              WHERE c.id = $1 AND c.workspace_id = $2 AND c.deleted_at IS NULL \
+                AND (COALESCE($3, c.method), COALESCE($4, c.path)) \
+                    IS DISTINCT FROM (c.method, c.path) \
+                AND EXISTS (SELECT 1 FROM dataapi.endpoints o \
+                             WHERE o.workspace_id = $2 AND o.id <> c.id \
+                               AND o.live_method = COALESCE($3, c.method) \
+                               AND o.live_path = COALESCE($4, c.path))",
+        )
+        .bind(id)
+        .bind(workspace)
+        .bind(input.method.as_deref())
+        .bind(input.path.as_deref())
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        match route {
+            Some((method, path)) => Err(Error::Conflict(format!(
+                "another endpoint in this workspace is served at {method} {path}; an endpoint \
+                 keeps its published URL until it is published again, so choose another path \
+                 or publish the move of the endpoint that holds it first"
+            ))),
+            None => Ok(()),
         }
     }
 

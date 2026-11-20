@@ -141,7 +141,7 @@ export default function Config() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Config</h2>
+        <h2 className="text-base font-semibold">Config</h2>
         <p className="max-w-prose text-sm text-muted-foreground">
           The endpoint as an HTTP object: the URL contract callers use, and the cache, limits, and
           rate-limit policy applied to their calls.
@@ -255,7 +255,7 @@ export default function Config() {
           {pending?.method && (
             <p id="cfg-method-pending" className="mt-1.5 text-xs text-muted-foreground">
               The new method goes live when you publish. Callers still use{" "}
-              <code className="font-mono">{pending.liveUrl}</code>.
+              <code className="whitespace-nowrap font-mono">{pending.liveUrl}</code>.
             </p>
           )}
         </ConfigTableRow>
@@ -274,7 +274,7 @@ export default function Config() {
           {pending?.path && (
             <p id="cfg-path-pending" className="mt-1.5 text-xs text-muted-foreground">
               The new path goes live when you publish. Callers still use{" "}
-              <code className="font-mono">{pending.liveUrl}</code>.
+              <code className="whitespace-nowrap font-mono">{pending.liveUrl}</code>.
             </p>
           )}
         </ConfigTableRow>

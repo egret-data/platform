@@ -873,6 +873,51 @@ async fn a_second_endpoint_cannot_go_live_at_a_url_another_still_serves() {
 }
 
 #[tokio::test]
+async fn a_draft_cannot_be_saved_onto_a_url_another_endpoint_serves_live() {
+    // KI-253. The same collision publish refuses with a 409, refused when the
+    // path is typed instead of at publish.
+    let f = skip_without_db!();
+    let a = f.publish_endpoint("GET", "/x", "SELECT 1 AS n").await;
+    let b: Uuid = sqlx::query_scalar(
+        "INSERT INTO dataapi.endpoints \
+           (workspace_id, name, path, method, database_id, statements, created_by) \
+         VALUES ($1, 'b', '/z', 'GET', $2, \
+                 jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 3 AS n')), $3) \
+         RETURNING id",
+    )
+    .bind(f.ws_id)
+    .bind(f.database_id)
+    .bind(f.admin)
+    .fetch_one(&f.db.pool)
+    .await
+    .unwrap();
+    let url = format!("/api/ws/{}/data-api/endpoints/{b}", f.ws_slug);
+
+    let (status, body) = f
+        .mgmt_send("PATCH", &url, Some(serde_json::json!({ "path": "/x" })))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body.to_string().contains("GET /x"), "names the URL: {body}");
+    assert_eq!(f.endpoint_json(b).await["path"], "/z", "nothing was saved");
+
+    // The method is half the route: a different method on the same path is free.
+    f.patch_draft(b, serde_json::json!({ "path": "/x", "method": "POST" }))
+        .await;
+
+    // A live endpoint may save its own route, and a moved-away URL is free.
+    f.patch_draft(a, serde_json::json!({ "path": "/x", "name": "renamed" }))
+        .await;
+    f.patch_draft(a, serde_json::json!({ "path": "/y" })).await;
+    f.patch_draft(b, serde_json::json!({ "path": "/z", "method": "GET" }))
+        .await;
+    // A's draft left /x, but A still serves it live until published: still refused.
+    let (status, _) = f
+        .mgmt_send("PATCH", &url, Some(serde_json::json!({ "path": "/x" })))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn a_disabled_endpoint_is_404_not_403() {
     // Disable keeps the row and its `live_version_id` (an enable must restore
     // the same version), so only the `state = 'live'` predicate makes this a

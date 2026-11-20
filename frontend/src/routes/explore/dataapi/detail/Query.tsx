@@ -418,7 +418,7 @@ export default function Query() {
           its own `h2`, and this is the only thing that names the section for a
           reader who arrived by URL rather than by clicking the nav. */}
       <div className="flex shrink-0 flex-wrap items-baseline gap-x-3 gap-y-1 pb-2">
-        <h2 className="text-lg font-semibold">Query</h2>
+        <h2 className="text-base font-semibold">Query</h2>
         <p className="max-w-prose text-sm text-muted-foreground">
           The query this endpoint runs, and the parameters callers may pass it.
         </p>
@@ -461,7 +461,7 @@ export default function Query() {
             cap, not a percentage one — `<details>` has an auto height, and a
             percentage `max-height` against an auto-height parent computes to
             `none`, i.e. no cap at all. */}
-        <div className="max-h-[40vh] space-y-4 overflow-auto pb-3 pt-2">
+        <div className="max-h-[70vh] space-y-4 overflow-auto pb-3 pt-2">
           <ConfigTable valueClassName="w-64">
             <ConfigTableRow
               label="Connection"
