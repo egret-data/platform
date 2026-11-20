@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
+import * as rowsLabelMod from "@/components/sqllab/rowsLabel";
 import { ResultsGrid } from "@/components/sqllab/ResultsGrid";
 import type { ResultsPage } from "@/api/sqllab";
 
@@ -100,4 +102,26 @@ test("rounds floating-point cells for display only, and leaves exact types and t
   // The expanded cell shows the exact value.
   fireEvent.click(screen.getByText("63339475.32"));
   expect(screen.getByRole("dialog")).toHaveTextContent("63339475.32000001");
+});
+
+/** KI-248: typing in the editor (a parent re-render) must not re-render the grid. */
+test("a parent re-render with the same props does not re-render the grid", async () => {
+  const page = mk([[1, "a"], [2, "b"]]);
+  // The grid calls `rowsLabel` once per render: a render counter that needs no test hook in it.
+  const spy = vi.spyOn(rowsLabelMod, "rowsLabel");
+  function Parent() {
+    const [sql, setSql] = useState("");
+    return (
+      <>
+        <input aria-label="sql" value={sql} onChange={(e) => setSql(e.target.value)} />
+        <ResultsGrid page={page} csvHref={null} truncated={false} />
+      </>
+    );
+  }
+  render(<Parent />);
+  const mounted = spy.mock.calls.length;
+  expect(mounted).toBeGreaterThan(0);
+  await userEvent.type(screen.getByLabelText("sql"), "select 1");
+  expect(spy.mock.calls.length).toBe(mounted);
+  spy.mockRestore();
 });

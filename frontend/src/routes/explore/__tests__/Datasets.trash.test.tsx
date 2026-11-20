@@ -19,6 +19,10 @@ let datasets: DatasetFixture[] = DEFAULT_DATASETS;
 let folders: { id: string; name: string }[] = [];
 vi.mock("@/api/datasets", () => ({
   useDatasetUsage: () => ({ data: [{ id: "c1", name: "Uses it", viz_type: "bar", trashed: false }], isPending: false, isError: false }),
+  useDatasetsUsage: (_ws: string, ids: string[]) => ({
+    byId: Object.fromEntries(ids.map((id) => [id, [{ id: "c1", name: "Uses it", viz_type: "bar", trashed: false }]])),
+    isPending: false, isError: false,
+  }),
   useDuplicateDataset: () => ({ mutate: vi.fn(), isPending: false }),
   useDatasets: () => ({ data: datasets, isLoading: false }),
   useDataset: () => ({ data: undefined }),
@@ -126,6 +130,10 @@ describe("Datasets — bulk select only reaches rows on screen", () => {
     expect(screen.queryByLabelText("Select Hidden set")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    // KI-252: the bulk trash asks first, with the single dialog's notice about the charts.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/1 chart uses these datasets and will keep working/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
 
     // The ids, not merely that it was called: `toHaveBeenCalled()` is satisfied
     // by trashing exactly the wrong dataset, which is the whole defect.
@@ -152,6 +160,10 @@ describe("Datasets — bulk select only reaches rows on screen", () => {
     expect(screen.getByRole("button", { name: "Move 1 to Trash" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Move 1 to Trash" }));
+    // KI-252: the bulk trash asks first, with the single dialog's notice about the charts.
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/1 chart uses these datasets and will keep working/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
 
     await waitFor(() => expect(trashMock).toHaveBeenCalledWith("ds-shown"));
     expect(trashMock).not.toHaveBeenCalledWith("ds-hidden");

@@ -710,6 +710,11 @@ export default function ChartExplore() {
                   {(datasets.data ?? []).map((d) => (
                     <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
                   ))}
+                  {/* KI-250: the list is live datasets only, so a chart whose dataset is in the
+                      Trash would open with an empty picker. Offer the current one, marked. */}
+                  {datasetId && detail.data?.deleted_at && !(datasets.data ?? []).some((d) => d.id === datasetId) && (
+                    <SelectItem value={datasetId}>{detail.data.name} (in Trash)</SelectItem>
+                  )}
                 </SelectContent>
               </Select>
             </div>

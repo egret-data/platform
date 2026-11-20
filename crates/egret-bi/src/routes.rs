@@ -800,7 +800,11 @@ async fn introspect(
         SourceSpec::Virtual { sql } => build_connector(spec)
             .describe(sql, Duration::from_secs(15))
             .await
-            .map_err(|e| BiApiError::from(crate::BiError::from(e)))?
+            .map_err(|e| match crate::BiError::from(e) {
+                // KI-247: the user's SQL rejected is a 400, not a 502.
+                crate::BiError::Engine(m) => BiApiError::from(crate::BiError::classify_engine(m)),
+                other => BiApiError::from(other),
+            })?
             .into_iter()
             .map(|c| (c.name, c.ty))
             .collect(),

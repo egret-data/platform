@@ -269,18 +269,38 @@ export function useDatasetMutations(ws: string, id: string) {
   };
 }
 
+async function fetchDatasetUsage(ws: string, id: string, all: boolean): Promise<DatasetUsage[]> {
+  const r = await fetch(`/api/ws/${encodeURIComponent(ws)}/datasets/${id}/usage${all ? "?include_trashed=true" : ""}`, { credentials: "same-origin" });
+  if (!r.ok) throw new Error(`usage failed: ${r.status}`);
+  return (await r.json()) as DatasetUsage[];
+}
+
 /** Charts built on the dataset. `includeTrashed` adds the trashed ones: everything a delete takes. */
 export function useDatasetUsage(ws: string, id: string | null, opts?: { includeTrashed?: boolean }) {
   const all = !!opts?.includeTrashed;
   return useQuery<DatasetUsage[]>({
     queryKey: ["datasets", ws, "usage", id ?? "", all],
     enabled: !!id,
-    queryFn: async () => {
-      const r = await fetch(`/api/ws/${encodeURIComponent(ws)}/datasets/${id}/usage${all ? "?include_trashed=true" : ""}`, { credentials: "same-origin" });
-      if (!r.ok) throw new Error(`usage failed: ${r.status}`);
-      return (await r.json()) as DatasetUsage[];
-    },
+    queryFn: () => fetchDatasetUsage(ws, id as string, all),
   });
+}
+
+/**
+ * The charts built on each of `ids` (KI-252: a bulk trash says what a single one does). Shares
+ * `useDatasetUsage`'s cache keys, so a dataset checked singly is not fetched again.
+ */
+export function useDatasetsUsage(ws: string, ids: string[]) {
+  const results = useQueries({
+    queries: ids.map((id) => ({
+      queryKey: ["datasets", ws, "usage", id, false],
+      queryFn: () => fetchDatasetUsage(ws, id, false),
+    })),
+  });
+  return {
+    byId: Object.fromEntries(ids.map((id, i) => [id, results[i]?.data ?? []])) as Record<string, DatasetUsage[]>,
+    isPending: results.some((r) => r.isPending),
+    isError: results.some((r) => r.isError),
+  };
 }
 
 /**

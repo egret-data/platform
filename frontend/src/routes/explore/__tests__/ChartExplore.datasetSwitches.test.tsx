@@ -58,7 +58,8 @@ const c = (column_name: string, groupby: boolean) => ({
   groupby, filterable: true, format: "", semantic_type: "",
 });
 vi.mock("@/api/datasets", () => ({
-  useDatasets: () => ({ data: [{ id: "d1", name: "Orders" }], isLoading: false }),
+  // The list is live datasets only: a trashed dataset is not in it (the real endpoint).
+  useDatasets: () => ({ data: dataset.deleted_at ? [] : [{ id: "d1", name: "Orders" }], isLoading: false }),
   useDataset: () => ({
     data: {
       id: "d1", name: "Orders", deleted_at: dataset.deleted_at,
@@ -102,5 +103,7 @@ describe("ChartExplore and the dataset's switches", () => {
     dataset.deleted_at = "2026-10-21T00:00:00Z";
     await mount();
     expect(await screen.findByText(/dataset “Orders” is in the Trash\. The chart keeps working until the dataset is deleted/)).toBeInTheDocument();
+    // KI-250: the picker shows the trashed dataset as its value rather than appearing empty.
+    expect(screen.getAllByRole("combobox")[0]).toHaveTextContent("Orders (in Trash)");
   });
 });

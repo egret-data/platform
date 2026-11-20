@@ -72,6 +72,51 @@ impl BiError {
     }
 }
 
+impl BiError {
+    /// KI-247: an engine error that is the USER's SQL being rejected (a parse
+    /// or semantic error), not an engine fault: a 400 that says so, instead of
+    /// the 502 every `Engine` answers. Only the shapes known to be a verdict
+    /// on the statement qualify; everything else (transport, `http 5xx`,
+    /// decode, internal errors, anything unrecognised) stays an `Engine`
+    /// fault, so a real outage is never mislabelled.
+    ///
+    /// - Trino: every parse/analysis failure is positioned, `line L:C: …`
+    ///   (`SYNTAX_ERROR`, `COLUMN_NOT_FOUND`, `TABLE_NOT_FOUND`, …).
+    /// - StarRocks (MySQL protocol): `ERROR <code> (42xxx): …`, SQLSTATE class
+    ///   42 is "syntax error or access rule violation".
+    pub fn classify_engine(msg: String) -> BiError {
+        if is_user_sql_error(&msg) {
+            BiError::BadRequest(msg)
+        } else {
+            BiError::Engine(msg)
+        }
+    }
+}
+
+fn is_user_sql_error(msg: &str) -> bool {
+    fn digits(s: &str) -> Option<&str> {
+        let n = s.bytes().take_while(u8::is_ascii_digit).count();
+        (n > 0).then(|| &s[n..])
+    }
+    let msg = msg.trim_start();
+    // `line L:C: …`
+    if let Some(rest) = msg.strip_prefix("line ") {
+        if let Some(rest) = digits(rest).and_then(|r| r.strip_prefix(':')) {
+            if let Some(rest) = digits(rest) {
+                return rest.starts_with(':');
+            }
+        }
+    }
+    // `ERROR 1064 (42000): …`
+    if let Some(rest) = msg.strip_prefix("ERROR ") {
+        if let Some(rest) = digits(rest).and_then(|r| r.strip_prefix(" (42")) {
+            let b = rest.as_bytes();
+            return b.len() >= 4 && b[..3].iter().all(u8::is_ascii_digit) && b[3] == b')';
+        }
+    }
+    false
+}
+
 impl From<egret_query::DatabaseError> for BiError {
     fn from(e: egret_query::DatabaseError) -> Self {
         match e {
@@ -264,6 +309,31 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("recompiling profile"));
+    }
+
+    #[test]
+    fn a_users_sql_error_is_a_400_and_an_engine_fault_stays_a_502() {
+        for m in [
+            "line 1:14: mismatched input 'FROM'. Expecting: <expression>",
+            "line 2:8: Column 'x' cannot be resolved",
+            "line 1:15: Table 'c.s.t' does not exist",
+            "ERROR 1064 (42000): You have an error in your SQL syntax",
+        ] {
+            let r = BiError::classify_engine(m.into()).into_response();
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{m}");
+        }
+        for m in [
+            "http 503 Service Unavailable",
+            "decode: expected value at line 1 column 1",
+            "Trino refused the X-Forwarded-Proto header (HTTP 406)",
+            "connect: connection refused",
+            "Query exceeded maximum time limit of 15.00s",
+            "line one of the log",
+            "ERROR 2013 (HY000): Lost connection to server",
+        ] {
+            let r = BiError::classify_engine(m.into()).into_response();
+            assert_eq!(r.status(), StatusCode::BAD_GATEWAY, "{m}");
+        }
     }
 
     #[test]

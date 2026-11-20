@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertTriangle, ArrowDown, Ban, ArrowUp, ChevronsUpDown, Copy, Download, Search, TableProperties,
@@ -41,7 +41,10 @@ function copyText(text: string, label: string) {
 
 type SortDir = "asc" | "desc";
 
-export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Query failed", cancelled, loading }: {
+/** Memoised (KI-248): the tab's SQL lives in the same component as this grid, so
+ *  without it every keystroke re-rendered up to 1,000 rows. Every prop is a
+ *  primitive or the query's own (stable) page, so typing leaves it alone. */
+export const ResultsGrid = memo(function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Query failed", cancelled, loading }: {
   page: ResultsPage | null; csvHref: string | null; truncated: boolean;
   error?: string | null;
   /** The error panel's heading: "Query failed" unless the query never started. */
@@ -278,4 +281,4 @@ export function ResultsGrid({ page, csvHref, truncated, error, errorTitle = "Que
       </Dialog>
     </div>
   );
-}
+});

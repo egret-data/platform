@@ -87,6 +87,10 @@ export function FormatPicker({ value, onChange, type = "", className }: {
   const kind = isTemporalType(type) ? "date" : type && !isNumericType(type) ? "text" : "number";
   const [open, setOpen] = useState(false);
   const currencyId = useId();
+  const uid = useId();
+  const decimalsId = `${uid}-decimals`;
+  const prefixId = `${uid}-prefix`;
+  const suffixId = `${uid}-suffix`;
   const [draft, setDraft] = useState<ColumnFormat>({});
 
   function openChange(o: boolean) {
@@ -134,17 +138,17 @@ export function FormatPicker({ value, onChange, type = "", className }: {
               )}
               <div className="grid grid-cols-3 gap-1.5 px-2 pt-1.5">
                 <div className="space-y-1">
-                  <Label className="text-[11px]">Decimals</Label>
-                  <Input type="number" min={0} max={10} className="h-7 px-1 text-xs" placeholder="auto"
+                  <Label htmlFor={decimalsId} className="text-[11px]">Decimals</Label>
+                  <Input id={decimalsId} type="number" min={0} max={10} className="h-7 px-1 text-xs" placeholder="auto"
                     value={draft.decimals ?? ""} onChange={(e) => patch({ decimals: e.target.value === "" ? undefined : Number(e.target.value) })} />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-[11px]">Prefix</Label>
-                  <Input className="h-7 px-1 text-xs" value={draft.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
+                  <Label htmlFor={prefixId} className="text-[11px]">Prefix</Label>
+                  <Input id={prefixId} className="h-7 px-1 text-xs" value={draft.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-[11px]">Suffix</Label>
-                  <Input className="h-7 px-1 text-xs" value={draft.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
+                  <Label htmlFor={suffixId} className="text-[11px]">Suffix</Label>
+                  <Input id={suffixId} className="h-7 px-1 text-xs" value={draft.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
                 </div>
               </div>
             </>
@@ -189,12 +193,12 @@ export function FormatPicker({ value, onChange, type = "", className }: {
               ))}
               <div className="grid grid-cols-2 gap-1.5 px-2 pt-1.5">
                 <div className="space-y-1">
-                  <Label className="text-[11px]">Prefix</Label>
-                  <Input className="h-7 px-1 text-xs" value={draft.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
+                  <Label htmlFor={prefixId} className="text-[11px]">Prefix</Label>
+                  <Input id={prefixId} className="h-7 px-1 text-xs" value={draft.prefix ?? ""} onChange={(e) => patch({ prefix: e.target.value })} />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-[11px]">Suffix</Label>
-                  <Input className="h-7 px-1 text-xs" value={draft.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
+                  <Label htmlFor={suffixId} className="text-[11px]">Suffix</Label>
+                  <Input id={suffixId} className="h-7 px-1 text-xs" value={draft.suffix ?? ""} onChange={(e) => patch({ suffix: e.target.value })} />
                 </div>
               </div>
             </>
