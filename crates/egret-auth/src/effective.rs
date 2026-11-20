@@ -276,19 +276,31 @@ impl AccessResolver {
         Ok(out)
     }
 
-    /// Map an object `kind` to its `analytics` table name. Returns a `'static`
+    /// Map an object `kind` to its schema-qualified table name. Returns a `'static`
     /// literal only — never the caller's raw string — so the value spliced into
     /// SQL below can't carry an injection.
     fn object_table(kind: &str) -> Option<&'static str> {
         match kind {
-            "dashboard" => Some("dashboards"),
-            "chart" => Some("charts"),
-            "dataset" => Some("datasets"),
-            "notebook" => Some("notebooks"),
-            "saved_query" => Some("saved_queries"),
-            "folder" => Some("folders"),
-            "app" => Some("apps"),
+            "dashboard" => Some("analytics.dashboards"),
+            "chart" => Some("analytics.charts"),
+            "dataset" => Some("analytics.datasets"),
+            "notebook" => Some("analytics.notebooks"),
+            "saved_query" => Some("analytics.saved_queries"),
+            "folder" => Some("analytics.folders"),
+            "app" => Some("analytics.apps"),
+            "workflow" => Some("workflow.flows"),
+            "alert" => Some("automation.schedules"),
             _ => None,
+        }
+    }
+
+    /// Display-name SQL for an object table: `workflow.flows` has no `name`
+    /// column, so its name is the composed `namespace.flow_id`. `'static` only.
+    fn name_expr(table: &str) -> &'static str {
+        if table == "workflow.flows" {
+            "(o.namespace || '.' || o.flow_id)"
+        } else {
+            "o.name::text"
         }
     }
 
@@ -300,8 +312,9 @@ impl AccessResolver {
             };
             let (name, ws_slug) = if let Some(table) = Self::object_table(kind) {
                 let sql = format!(
-                    "SELECT o.name::text, w.slug FROM analytics.{table} o \
-                     JOIN workspaces w ON w.id = o.workspace_id WHERE o.id = $1"
+                    "SELECT {name}, w.slug FROM {table} o \
+                     JOIN workspaces w ON w.id = o.workspace_id WHERE o.id = $1",
+                    name = Self::name_expr(table)
                 );
                 // AssertSqlSafe: audited. `table` is `object_table`'s `&'static str`
                 // from a closed match — the caller's `kind` is matched against, never
@@ -428,10 +441,11 @@ impl AccessResolver {
         // Resolve the object → its name + owning workspace (id + slug). The only
         // spliced value is the `'static` table literal from `object_table`.
         let sql = format!(
-            "SELECT o.name::text, o.workspace_id, w.slug \
-               FROM analytics.{table} o \
+            "SELECT {name}, o.workspace_id, w.slug \
+               FROM {table} o \
                JOIN workspaces w ON w.id = o.workspace_id \
-              WHERE o.id = $1"
+              WHERE o.id = $1",
+            name = Self::name_expr(table)
         );
         // AssertSqlSafe: audited — same reason as `objects` above, the only spliced
         // value is `object_table`'s `'static` literal.

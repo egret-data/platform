@@ -3652,7 +3652,7 @@ async fn reading_a_dataapi_alerts_run_state_needs_data_api_endpoint_read() {
 /// the response, so there is no field for this leak to ride on and nothing
 /// to redact.
 #[tokio::test]
-async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_cannot_read_it() {
+async fn toggling_active_on_a_dataapi_alert_needs_endpoint_read_and_shows_run_state_to_a_reader() {
     let fx = fixture!();
     let owner = mk_user(&fx.db, "z2_authz_active_owner").await;
     let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "z2-authz-active").await;
@@ -3668,9 +3668,10 @@ async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_c
     .await
     .unwrap();
 
-    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. The toggle
-    // itself must still work (that is `alert:manage`'s job) — only the
-    // run-derived fields in the RESPONSE are at stake.
+    // `ws_editor`: `alert:manage`, no `data_api_endpoint:read`. Disabling a
+    // `dataapi_alert` silences monitoring of an endpoint the caller cannot
+    // read, so it is refused outright (not merely redacted) and the row is
+    // left as it was.
     let (status, body) = req(
         &fx,
         &fx.editor_tok,
@@ -3679,19 +3680,13 @@ async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_c
         Some(serde_json::json!({"active": false}).to_string()),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the toggle itself must succeed: {body}"
-    );
-    assert_eq!(
-        body["active"], false,
-        "the field being toggled must still work: {body}"
-    );
-    assert!(
-        body["last_state"].is_null() && body["last_eval_at"].is_null(),
-        "set_active must redact last_state/last_eval_at for an endpoint the caller cannot read: {body}"
-    );
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let active: bool = sqlx::query_scalar("SELECT active FROM automation.schedules WHERE id = $1")
+        .bind(id)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert!(active, "a refused toggle must not change the row");
 
     // `ws_admin`: the same `alert:manage`, PLUS `data_api_endpoint:read` —
     // sees the real value.
@@ -3710,4 +3705,189 @@ async fn toggling_active_on_a_dataapi_alert_redacts_run_state_for_a_caller_who_c
         body["last_state"], "success",
         "an admin who CAN read the endpoint must see the real last_state: {body}"
     );
+}
+
+// ── EO6 Task 5: per-object schedule grants ──────────────────────────────
+
+/// A user with NO workspace role holding SEEDED role `role` on exactly the one
+/// schedule `schedule` (object scope, `object_type = 'alert'`). A seeded role
+/// is used because the fixture's PDP snapshots role templates at build time.
+async fn alert_guest(db: &Db, schedule: Uuid, role: &str) -> Uuid {
+    let user = mk_user(db, "alert_guest").await;
+    let role_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope = 'workspace' AND name = $1")
+            .bind(role)
+            .fetch_one(&db.pool)
+            .await
+            .expect("seeded role");
+    sqlx::query(
+        "INSERT INTO access_grants \
+           (principal_type, principal_id, role_id, scope_type, scope_id, object_type) \
+         VALUES ('user', $1, $2, 'object', $3, 'alert')",
+    )
+    .bind(user)
+    .bind(role_id)
+    .bind(schedule)
+    .execute(&db.pool)
+    .await
+    .expect("object grant");
+    user
+}
+
+async fn make_alert(fx: &Fx, name: &str) -> String {
+    let (s, made) = req(
+        fx,
+        &fx.editor_tok,
+        "POST",
+        &format!("/ws/{}/alerts", fx.slug),
+        Some(alert_json(fx, name)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "create failed: {made}");
+    made["id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn an_object_grant_reaches_that_schedule_only() {
+    let fx = fixture!();
+    let x = make_alert(&fx, "obj-x").await;
+    let y = make_alert(&fx, "obj-y").await;
+
+    let reader = alert_guest(&fx.db, x.parse().unwrap(), "ws_viewer").await;
+    let tok = fx.token_for(reader).await;
+    let get = |id: &str| format!("/ws/{}/alerts/{id}", fx.slug);
+
+    let (s, _) = req(&fx, &tok, "GET", &get(&x), None).await;
+    assert_eq!(s, StatusCode::OK, "read grant reaches X");
+    let (s, _) = req(&fx, &tok, "GET", &get(&y), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "read grant does not reach Y");
+    let (s, _) = req(&fx, &tok, "GET", &format!("{}/runs", get(&x)), None).await;
+    assert_eq!(s, StatusCode::OK, "runs are a read");
+    // A read grant does not write.
+    let (s, _) = req(&fx, &tok, "PUT", &get(&x), Some(minimal_update_body())).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = req(&fx, &tok, "POST", &format!("{}/trash", get(&x)), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _) = req(&fx, &tok, "POST", &format!("{}/run", get(&x)), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_manage_object_grant_can_write_that_schedule() {
+    let fx = fixture!();
+    let x = make_alert(&fx, "mg-x").await;
+    let y = make_alert(&fx, "mg-y").await;
+    let mgr = alert_guest(&fx.db, x.parse().unwrap(), "ws_editor").await;
+    let tok = fx.token_for(mgr).await;
+
+    let (s, body) = req(
+        &fx,
+        &tok,
+        "PATCH",
+        &format!("/ws/{}/alerts/{x}/folder", fx.slug),
+        Some(serde_json::json!({ "folder_id": null }).to_string()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "manage grant writes X: {body}");
+    let (s, _) = req(
+        &fx,
+        &tok,
+        "POST",
+        &format!("/ws/{}/alerts/{x}/trash", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = req(
+        &fx,
+        &tok,
+        "POST",
+        &format!("/ws/{}/alerts/{y}/trash", fx.slug),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "but not Y");
+}
+
+/// The security-critical one: an `alert` object grant must NOT stand in for
+/// the Data API endpoint read a `dataapi_alert` additionally needs.
+#[tokio::test]
+async fn an_alert_object_grant_does_not_unlock_a_dataapi_alert() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "eo6_dataapi_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "eo6-gate").await;
+    // Full-power on the alert object, no data_api_endpoint:read anywhere.
+    let guest = alert_guest(&fx.db, id, "ws_admin").await;
+    let tok = fx.token_for(guest).await;
+    let path = format!("/ws/{}/alerts/{id}", fx.slug);
+
+    for (m, p, b) in [
+        ("GET", path.clone(), None),
+        ("GET", format!("{path}/runs"), None),
+        ("POST", format!("{path}/run"), None),
+        ("PUT", path.clone(), Some(minimal_update_body())),
+    ] {
+        let (s, body) = req_raw(&fx, &tok, m, &p, b).await;
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "{m} {p}: object grant must not bypass the endpoint-read gate: {body}"
+        );
+    }
+}
+
+/// Destructive routes on a `dataapi_alert` need the endpoint read too, like
+/// `update` / `run_now`: an object-manage guest must not be able to disable or
+/// delete monitoring of an endpoint it cannot read.
+#[tokio::test]
+async fn destructive_routes_on_a_dataapi_alert_need_endpoint_read() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "eo6_destructive_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "eo6-destructive").await;
+    let guest = alert_guest(&fx.db, id, "ws_editor").await;
+    let tok = fx.token_for(guest).await;
+    let path = format!("/ws/{}/alerts/{id}", fx.slug);
+
+    for (m, p) in [
+        ("DELETE", path.clone()),
+        ("POST", format!("{path}/trash")),
+        ("POST", format!("{path}/restore")),
+    ] {
+        let (s, body) = req_raw(&fx, &tok, m, &p, None).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{m} {p}: {body}");
+    }
+    let still: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM automation.schedules WHERE id=$1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(still, 1, "row must be neither deleted nor trashed");
+}
+
+/// An `alert:manage` OBJECT grantee without endpoint read cannot disable a
+/// `dataapi_alert` either.
+#[tokio::test]
+async fn set_active_on_a_dataapi_alert_needs_endpoint_read_for_an_object_grantee() {
+    let fx = fixture!();
+    let owner = mk_user(&fx.db, "eo6_active_owner").await;
+    let id = insert_workspace_scoped_dataapi_alert(&fx.db, fx.ws, owner, "eo6-active").await;
+    let guest = alert_guest(&fx.db, id, "ws_editor").await;
+    let tok = fx.token_for(guest).await;
+    let (s, body) = req_raw(
+        &fx,
+        &tok,
+        "PUT",
+        &format!("/ws/{}/alerts/{id}/active", fx.slug),
+        Some(serde_json::json!({"active": false}).to_string()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "{body}");
+    let active: bool = sqlx::query_scalar("SELECT active FROM automation.schedules WHERE id = $1")
+        .bind(id)
+        .fetch_one(&fx.db.pool)
+        .await
+        .unwrap();
+    assert!(active, "row must stay active");
 }

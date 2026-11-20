@@ -92,6 +92,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use egret_auth::session::SessionService;
+use egret_core::authz::{require_object, ObjectRef};
 use egret_core::{Ack, Error, Result as EgretResult, WorkspacePath};
 use egret_workspace::context::WsContext;
 use egret_workspace::rbac::Authorizer;
@@ -742,11 +743,11 @@ async fn get_flow(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> EgretResult<Json<FlowDto>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    require_flow(&st, &ctx, id, WF_READ).await?;
     let row = st.repo.get(ctx.workspace_id.0, id).await?;
     // The check the mutating routes make, so the editor and the routes
     // cannot disagree about who may write.
-    let can_manage = caller_may_manage(&st, &ctx).await?;
+    let can_manage = flow_caller_may_manage(&st, &ctx, &row).await?;
     Ok(Json(draft_dto(
         row,
         can_manage,
@@ -807,7 +808,7 @@ async fn update_flow(
     Path((_ws, id)): Path<(String, Uuid)>,
     Json(body): Json<UpdateFlowRequest>,
 ) -> std::result::Result<Json<FlowDto>, WriteError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_flow(&st, &ctx, id, WF_MANAGE).await?;
     let (namespace, flow_id, plan) = parse_draft(&body.source)?;
     require_secret_use(&st, &ctx, &body.source).await?;
     // Same containment as `create_flow`, and for the identical reason: a PUT
@@ -878,7 +879,7 @@ async fn delete_flow(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> EgretResult<Json<Ack>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_flow(&st, &ctx, id, WF_MANAGE).await?;
     st.repo.soft_delete(ctx.workspace_id.0, id).await?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
@@ -920,7 +921,7 @@ async fn restore_flow(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> EgretResult<Json<FlowDto>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_flow(&st, &ctx, id, WF_MANAGE).await?;
     let restored = st.repo.restore(ctx.workspace_id.0, id).await?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
@@ -963,7 +964,7 @@ async fn purge_flow(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> EgretResult<Json<Ack>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_flow(&st, &ctx, id, WF_MANAGE).await?;
     let gone = st.repo.purge(ctx.workspace_id.0, id).await?;
     // The names go in the detail: the row is gone, and the trail is the only
     // record left of which flow this id was.
@@ -1008,7 +1009,7 @@ async fn validate_flow(
 ) -> EgretResult<Json<ValidationReportDto>> {
     // `:manage`, not `:read` -- an authoring action, exactly like
     // `data_api_endpoint:manage` gating `POST .../validate` in `egret-dataapi`.
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_flow(&st, &ctx, id, WF_MANAGE).await?;
     // Containment only: `id` must name a flow in this workspace, but nothing
     // about IT is read below -- the source checked is the body's, per this
     // module's doc comment.
@@ -1135,7 +1136,7 @@ async fn publish_flow(
     Path((_ws, id)): Path<(String, Uuid)>,
     body: Option<Json<PublishFlowRequest>>,
 ) -> std::result::Result<Json<FlowVersionDto>, WriteError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_flow(&st, &ctx, id, WF_MANAGE).await?;
     // I3: the draft `publish_gated` is about to freeze. Read here as well as
     // there: a draft stored before this gate existed (or by a writer that is
     // not these routes) must not be published by someone without the
@@ -1200,7 +1201,7 @@ async fn list_flow_versions(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> EgretResult<Json<Vec<FlowVersionDto>>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    require_flow(&st, &ctx, id, WF_READ).await?;
     // Containment first, and DELIBERATELY a separate call from the list
     // below: `FlowRepo::list_versions` alone cannot tell "no such flow" from
     // "this flow has zero versions" (both answer an empty `Vec` — its own
@@ -1232,7 +1233,7 @@ async fn get_flow_version(
     WsContext(ctx): WsContext,
     Path((_ws, id, version)): Path<(String, Uuid, i32)>,
 ) -> EgretResult<Json<FlowVersionDto>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    require_flow(&st, &ctx, id, WF_READ).await?;
     let row = st.repo.get_version(ctx.workspace_id.0, id, version).await?;
     Ok(Json(FlowVersionDto::from(row)))
 }
@@ -1374,7 +1375,7 @@ async fn get_flow_graph(
     Query(q): Query<FlowGraphQuery>,
     axum::extract::RawQuery(raw): axum::extract::RawQuery,
 ) -> std::result::Result<Json<crate::graph::FlowGraph>, GraphRouteError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    require_flow(&st, &ctx, id, WF_READ).await?;
     let ws = ctx.workspace_id.0;
     let source = match q.version {
         // Scoped by the workspace through the flow: a foreign flow's version
@@ -1463,7 +1464,7 @@ async fn get_execution_graph(
     axum::extract::RawQuery(raw): axum::extract::RawQuery,
 ) -> std::result::Result<Json<crate::graph::ExecutionGraph>, GraphRouteError> {
     use crate::graph::ExecutionSource as _;
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    require_exec(&st, &ctx, id, WF_READ).await?;
     let ws = ctx.workspace_id.0;
     // Scoped by the workspace in the read itself: a foreign id is `None`.
     let frozen = st
@@ -1893,10 +1894,116 @@ pub(crate) async fn caller_may_manage(
     st: &WorkflowState,
     ctx: &egret_core::WorkspaceContext,
 ) -> EgretResult<bool> {
-    match egret_core::authz::require(&*st.pdp, ctx, WF_MANAGE).await {
+    refusal_as_false(egret_core::authz::require(&*st.pdp, ctx, WF_MANAGE).await)
+}
+
+fn refusal_as_false(r: EgretResult<()>) -> EgretResult<bool> {
+    match r {
         Ok(()) => Ok(true),
         Err(Error::Forbidden) => Ok(false),
         Err(e) => Err(e),
+    }
+}
+
+/// The one place a flow's [`ObjectRef`] is built, so a capability flag and the
+/// handler that enforces it ask about the same resource.
+fn flow_object_ref(ctx: &egret_core::WorkspaceContext, row: &FlowRow) -> ObjectRef {
+    ObjectRef {
+        kind: "workflow".into(),
+        id: row.id,
+        folder_id: row.folder_id,
+        workspace_id: ctx.workspace_id,
+    }
+}
+
+/// Resolve `id` in the caller's workspace to the flow's [`ObjectRef`] and row.
+/// An absent / foreign flow is `NotFound` -- but only after the workspace-level
+/// `action` check, so a caller holding nothing still gets the 403 the
+/// workspace-gated routes always gave.
+pub(crate) async fn flow_ref(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    action: &str,
+) -> EgretResult<(ObjectRef, FlowRow)> {
+    match st.repo.get(ctx.workspace_id.0, id).await {
+        Ok(row) => Ok((flow_object_ref(ctx, &row), row)),
+        Err(Error::NotFound(w)) => {
+            egret_core::authz::require(&*st.pdp, ctx, action).await?;
+            Err(Error::NotFound(w))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `action` on this one flow: a flow / folder / workspace / object grant all
+/// reach it through [`require_object`].
+pub(crate) async fn require_flow(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    action: &str,
+) -> EgretResult<()> {
+    let (obj, _) = flow_ref(st, ctx, id, action).await?;
+    require_object(&*st.pdp, ctx, action, obj).await
+}
+
+/// Per-object `can_manage` for a flow response (compare `apps::caps`).
+pub(crate) async fn flow_caller_may_manage(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    row: &FlowRow,
+) -> EgretResult<bool> {
+    refusal_as_false(require_object(&*st.pdp, ctx, WF_MANAGE, flow_object_ref(ctx, row)).await)
+}
+
+/// The flow behind an execution as an [`ObjectRef`]. `None` when the execution
+/// names no flow any more (purged): it then has no object to be granted on.
+async fn exec_flow_ref(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    action: &str,
+) -> EgretResult<Option<ObjectRef>> {
+    let flow = match st.executions.flow_of(ctx.workspace_id.0, id).await {
+        Ok(f) => f,
+        Err(Error::NotFound(w)) => {
+            egret_core::authz::require(&*st.pdp, ctx, action).await?;
+            return Err(Error::NotFound(w));
+        }
+        Err(e) => return Err(e),
+    };
+    let Some(flow) = flow else { return Ok(None) };
+    match st.repo.get(ctx.workspace_id.0, flow).await {
+        Ok(row) => Ok(Some(flow_object_ref(ctx, &row))),
+        Err(Error::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `action` on the flow an execution belongs to; an execution whose flow is
+/// gone falls back to the workspace-level permission.
+pub(crate) async fn require_exec(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    action: &str,
+) -> EgretResult<()> {
+    match exec_flow_ref(st, ctx, id, action).await? {
+        Some(obj) => require_object(&*st.pdp, ctx, action, obj).await,
+        None => egret_core::authz::require(&*st.pdp, ctx, action).await,
+    }
+}
+
+/// [`flow_caller_may_manage`] for an execution response.
+async fn exec_caller_may_manage(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> EgretResult<bool> {
+    match exec_flow_ref(st, ctx, id, WF_MANAGE).await? {
+        Some(obj) => refusal_as_false(require_object(&*st.pdp, ctx, WF_MANAGE, obj).await),
+        None => caller_may_manage(st, ctx).await,
     }
 }
 
@@ -2115,12 +2222,12 @@ async fn get_execution(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> EgretResult<Json<ExecutionDto>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    require_exec(&st, &ctx, id, WF_READ).await?;
     // No containment pre-check the way `list_flow_versions` needs one: this is
     // a SINGLE call that already answers `NotFound` for a foreign id, so there
     // is no second statement whose empty result could be mistaken for one.
     let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    let can_manage = caller_may_manage(&st, &ctx).await?;
+    let can_manage = exec_caller_may_manage(&st, &ctx, id).await?;
     Ok(Json(ExecutionDto::new(
         detail,
         can_manage,
@@ -2276,7 +2383,7 @@ async fn get_execution_logs(
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<ExecutionLogsQuery>,
 ) -> EgretResult<Json<LogPageDto>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    require_exec(&st, &ctx, id, WF_READ).await?;
     if !(1..=MAX_LOG_PAGE_LIMIT).contains(&q.limit) {
         return Err(Error::InvalidInput(format!(
             "limit must be between 1 and {MAX_LOG_PAGE_LIMIT}, got {}",
@@ -2400,7 +2507,7 @@ async fn delete_execution(
         axum::extract::rejection::QueryRejection,
     >,
 ) -> std::result::Result<StatusCode, ExecOpError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let Query(q) = query.map_err(|r| {
         ExecOpError::Core(Error::InvalidInput(format!(
             "deleteStorage, deleteLogs and deleteMetrics are true or false: {}",
@@ -2481,7 +2588,7 @@ async fn set_execution_labels(
     Path((_ws, id)): Path<(String, Uuid)>,
     body: std::result::Result<Json<Vec<LabelDto>>, axum::extract::rejection::JsonRejection>,
 ) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let Json(body) = body.map_err(|r| {
         ExecOpError::Core(Error::InvalidInput(format!(
             "the body is not a JSON list of `{{\"key\": …, \"value\": …}}`: {}",
@@ -2560,7 +2667,7 @@ async fn download_execution_logs(
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<LogDownloadQuery>,
 ) -> EgretResult<axum::response::Response> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    require_exec(&st, &ctx, id, WF_READ).await?;
     let ws = ctx.workspace_id.0;
     // Existence and ownership: a foreign id is a 404 before any line is read.
     let status = st.executions.log_status(ws, id).await?;
@@ -2697,7 +2804,7 @@ async fn delete_execution_logs(
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<DeleteLogsQuery>,
 ) -> EgretResult<StatusCode> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let ws = ctx.workspace_id.0;
     // Existence and ownership, as the read: a foreign id is a 404 (S13: the flow is not looked at).
     st.executions.log_status(ws, id).await?;
@@ -3146,7 +3253,7 @@ async fn start_flow_execution(
     Path((_ws, id)): Path<(String, Uuid)>,
     req: axum::extract::Request,
 ) -> std::result::Result<(StatusCode, Json<ExecutionDto>), axum::response::Response> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+    require_flow(&st, &ctx, id, WF_MANAGE)
         .await
         .map_err(core_refusal)?;
     // Scoping, the trash and both disabled doors, in the one place `replay`
@@ -3417,7 +3524,7 @@ async fn validate_execution_inputs(
 ) -> EgretResult<Json<ValidateInputsDto>> {
     // The start's gate, its flow lookup and its refusals, in its order, so
     // this answers nothing a start would not (D14).
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_flow(&st, &ctx, id, WF_MANAGE).await?;
     let row = startable_flow(&st, ctx.workspace_id.0, id).await?;
     let request = if body.is_empty() {
         StartExecutionRequest::default()
@@ -3890,7 +3997,7 @@ async fn pause_execution(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let ws = ctx.workspace_id.0;
     // The scoped read first: a foreign id is a 404 here and never reaches
     // the worker.
@@ -4104,7 +4211,7 @@ async fn resume_execution(
 ) -> std::result::Result<Json<ExecutionDto>, axum::response::Response> {
     use axum::response::IntoResponse as _;
     let op = |e: ExecOpError| e.into_response();
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+    require_exec(&st, &ctx, id, WF_MANAGE)
         .await
         .map_err(core_refusal)?;
     let ws = ctx.workspace_id.0;
@@ -4285,7 +4392,7 @@ async fn validate_resume_inputs(
     req: axum::extract::Request,
 ) -> std::result::Result<Json<ValidateInputsDto>, axum::response::Response> {
     use axum::response::IntoResponse as _;
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+    require_exec(&st, &ctx, id, WF_MANAGE)
         .await
         .map_err(core_refusal)?;
     let ws = ctx.workspace_id.0;
@@ -4415,7 +4522,7 @@ async fn replay_execution(
 ) -> std::result::Result<(StatusCode, Json<ExecutionDto>), axum::response::Response> {
     use axum::response::IntoResponse as _;
     let op = |e: ExecOpError| e.into_response();
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE)
+    require_exec(&st, &ctx, id, WF_MANAGE)
         .await
         .map_err(core_refusal)?;
     // Spec Q3: refused before anything is read, so it writes nothing.
@@ -4711,7 +4818,7 @@ async fn kill_execution(
     // alone, under the execution's lock: since end hooks #2b (the user's
     // answer to Q3, 2026-10-27) a terminal execution whose `afterExecution:`
     // is still running is killable, and only its plan can tell.
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
     let cascade = q.cascade.unwrap_or(true);
     let (outcome, forced) =
@@ -5310,7 +5417,7 @@ async fn restart_execution(
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<RestartQuery>,
 ) -> std::result::Result<(StatusCode, Json<ExecutionDto>), ExecOpError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let choice = source_choice(q.source.as_deref(), q.revision.as_deref())?;
     let ws = ctx.workspace_id.0;
     let caller = ctx.principal.user_id.0;
@@ -5431,7 +5538,7 @@ async fn set_task_run_state(
     Path((_ws, id, task_run_id)): Path<(String, Uuid, Uuid)>,
     body: std::result::Result<Json<StateChangeBody>, axum::extract::rejection::JsonRejection>,
 ) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let Json(body) = body.map_err(state_change_body_refusal)?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
     let run = before
@@ -5499,7 +5606,7 @@ async fn set_execution_status(
     Path((_ws, id)): Path<(String, Uuid)>,
     body: std::result::Result<Json<StateChangeBody>, axum::extract::rejection::JsonRejection>,
 ) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let Json(body) = body.map_err(state_change_body_refusal)?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
     let target = body.state.run_state();

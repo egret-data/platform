@@ -218,9 +218,10 @@ describe("FlowsList — the namespace tree", () => {
       flow("a", "gone", { created_by: ALICE, created_by_name: null }),
     ]);
     renderAt();
+    const createdByColumn = screen.getAllByRole("columnheader").findIndex((h) => h.textContent === "Created by");
     for (const id of ["nobody", "gone"]) {
       const row = screen.getByRole("link", { name: id }).closest("tr") as HTMLElement;
-      expect(within(row).getAllByRole("cell").at(-1)).toHaveTextContent(/^—$/);
+      expect(within(row).getAllByRole("cell")[createdByColumn]).toHaveTextContent(/^—$/);
     }
     expect(screen.queryByText(ALICE.slice(0, 8))).not.toBeInTheDocument();
   });

@@ -396,6 +396,99 @@ async fn lone_deny_grant_does_not_admit() {
     );
 }
 
+/// A non-member holding an object grant on a workflow or a schedule (alert) is
+/// admitted as an object-guest, exactly like the analytics kinds.
+#[tokio::test]
+async fn workflow_and_alert_object_grants_admit_guest() {
+    let Some(url) = egret_test_db::url().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&url, 5).await.expect("connect");
+    db.migrate().await.expect("migrate");
+    let authz = egret_workspace::rbac::Authorizer::new(db.clone());
+    let owner = seed_user(&db).await;
+    let viewer: Uuid =
+        sqlx::query_scalar("SELECT id FROM roles WHERE scope='workspace' AND name='ws_viewer'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+    for kind in ["workflow", "alert"] {
+        let ws: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (slug, name, created_by, status) \
+             VALUES ($1, 'Guest', $2, 'active') RETURNING id",
+        )
+        .bind(format!("guest-{}", Uuid::new_v4().simple()))
+        .bind(owner)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert workspace");
+        let obj: Uuid = if kind == "workflow" {
+            sqlx::query_scalar(
+                "INSERT INTO workflow.flows (workspace_id, namespace, flow_id, source, plan) \
+                 VALUES ($1, 'ns', 'f', 'id: f', '{}'::jsonb) RETURNING id",
+            )
+        } else {
+            // A report (schedule kind `alert` in grants) needs a target.
+            sqlx::query_scalar(
+                "WITH d AS (INSERT INTO analytics.dashboards (workspace_id, name, description) \
+                            VALUES ($1, 'D', '') RETURNING id) \
+                 INSERT INTO automation.schedules \
+                   (workspace_id, type, name, crontab, dashboard_id, report_format) \
+                 SELECT $1, 'report', 'a', '* * * * *', d.id, 'png' FROM d RETURNING id",
+            )
+        }
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert object");
+        let guest = seed_user(&db).await;
+        let guest_id = egret_core::ids::UserId(guest);
+        let wsid = egret_core::WorkspaceId(ws);
+        assert!(!authz
+            .has_object_grant_in_workspace(guest_id, wsid)
+            .await
+            .unwrap());
+        sqlx::query(
+            "INSERT INTO access_grants (principal_type, principal_id, role_id, scope_type, object_type, scope_id, effect) \
+             VALUES ('user', $1, $2, 'object', $3, $4, 'allow')",
+        )
+        .bind(guest)
+        .bind(viewer)
+        .bind(kind)
+        .bind(obj)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            authz
+                .has_object_grant_in_workspace(guest_id, wsid)
+                .await
+                .unwrap(),
+            "{kind} object grant must admit the guest"
+        );
+        // Cross-workspace guard: the grant lives in `ws`, so it must not admit
+        // the guest to a different workspace where they hold nothing.
+        let other_ws: Uuid = sqlx::query_scalar(
+            "INSERT INTO workspaces (slug, name, created_by, status) \
+             VALUES ($1, 'Other', $2, 'active') RETURNING id",
+        )
+        .bind(format!("guest-other-{}", Uuid::new_v4().simple()))
+        .bind(owner)
+        .fetch_one(&db.pool)
+        .await
+        .expect("insert other workspace");
+        assert!(
+            !authz
+                .has_object_grant_in_workspace(guest_id, egret_core::WorkspaceId(other_ws))
+                .await
+                .unwrap(),
+            "{kind} grant in one workspace must not admit the guest to another"
+        );
+    }
+}
+
 /// `grant_put` accepts an `expires_at` in the request body (P2a Task 2, part A)
 /// and persists it on the `access_grants` row. Omitting it must leave the row's
 /// `expires_at` NULL (never expires — unchanged default behavior).

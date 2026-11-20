@@ -275,7 +275,7 @@ pub(crate) async fn download_execution_file(
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<FileQuery>,
 ) -> Result<Response, Response> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ)
+    crate::routes::require_exec(&st, &ctx, id, WF_READ)
         .await
         .map_err(core_refusal)?;
     let workspace = ctx.workspace_id.0;
@@ -340,7 +340,7 @@ pub(crate) async fn execution_file_metas(
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<FileQuery>,
 ) -> egret_core::Result<Json<FileMetasDto>> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    crate::routes::require_exec(&st, &ctx, id, WF_READ).await?;
     let file = family_file(&st, ctx.workspace_id.0, id, &q.path).await?;
     Ok(Json(FileMetasDto { size: file.size }))
 }
@@ -370,7 +370,7 @@ pub(crate) async fn preview_execution_file(
     Path((_ws, id)): Path<(String, Uuid)>,
     Query(q): Query<PreviewQuery>,
 ) -> Result<Json<FilePreviewDto>, Response> {
-    egret_core::authz::require(&*st.pdp, &ctx, WF_READ)
+    crate::routes::require_exec(&st, &ctx, id, WF_READ)
         .await
         .map_err(core_refusal)?;
     let workspace = ctx.workspace_id.0;

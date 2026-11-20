@@ -1477,6 +1477,24 @@ impl ExecutionRepo {
         })
     }
 
+    /// The flow an execution came from: `Some(flow)` while that flow row
+    /// exists, `None` once it has been purged (`executions.flow_id` is
+    /// `ON DELETE SET NULL`). `NotFound` when the execution is absent or in
+    /// another workspace. One narrow read, so a per-object authorization
+    /// check does not load the whole execution.
+    pub async fn flow_of(&self, ws: Uuid, id: Uuid) -> Result<Option<Uuid>> {
+        let row: Option<(Option<Uuid>,)> = sqlx::query_as(
+            "SELECT flow_id FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(ws)
+        .fetch_optional(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        row.map(|(f,)| f)
+            .ok_or_else(|| Error::NotFound("execution".into()))
+    }
+
     /// Every task run of `execution`, ordered by `run_ix` -- their CREATION
     /// order, which is the order `advance()` addresses them in and the order
     /// the oracle compares -- **except a run a restart emptied** (empty

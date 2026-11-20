@@ -203,6 +203,8 @@ impl AccessViewsRepo {
                  UNION ALL SELECT 'folder',      id, name FROM analytics.folders       WHERE workspace_id = $1 \
                  UNION ALL SELECT 'saved_query', id, name FROM analytics.saved_queries WHERE workspace_id = $1 \
                  UNION ALL SELECT 'app',         id, name FROM analytics.apps          WHERE workspace_id = $1 \
+                 UNION ALL SELECT 'workflow',    id, namespace || '.' || flow_id FROM workflow.flows WHERE workspace_id = $1 \
+                 UNION ALL SELECT 'alert',       id, name FROM automation.schedules WHERE workspace_id = $1 \
              ) \
              SELECT o.kind, o.id AS object_id, o.name AS object_name, \
                     ag.principal_type, ag.principal_id, \
