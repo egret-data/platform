@@ -122,6 +122,16 @@ describe("buildBoxplotOption", () => {
     expect(pointSeries(all).find((s: any) => s.symbolSize === 0).data).toHaveLength(10); // 5 per box
   });
 
+  // KI-257: "All" shifts colliding labels apart instead of stacking (or dropping) them.
+  it("keeps every label but separates overlapping ones in All mode", () => {
+    const layoutOf = (labelMode?: "median" | "all") => {
+      const opt = buildBoxplotOption(cols, rows, { category: "g", value: "v", showLabels: true, labelMode, showMean: false }) as any;
+      return pointSeries(opt).find((s: any) => s.symbolSize === 0).labelLayout;
+    };
+    expect(layoutOf("all")).toEqual({ moveOverlap: "shiftY" });
+    expect(layoutOf("median")).toEqual({ hideOverlap: true });
+  });
+
   // Metabase's `graph.label_value_formatting` defaults to COMPACT on a box plot — a median printed
   // as 87.957 beside a 47px box is why. The axis keeps the shared "compact once wide" rule.
   it("shortens the data labels by default, and stops when told to", () => {

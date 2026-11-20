@@ -508,7 +508,9 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
     // The map used to print raw `toLocaleString()` numbers, ignoring the chart's column
     // formats entirely — it is the one builder that never formatted its metric.
     tooltip: itemTooltip(fmt),
-    visualMap: {
+    // KI-259: no region lit means nothing for a colour legend to describe — a 0→1 ramp beside an
+    // unshaded map. Left out, as the empty-result path already does.
+    ...(data.length === 0 ? {} : { visualMap: {
       min,
       max,
       left: 8,
@@ -521,7 +523,7 @@ export function buildMapOption(columns: ResultColumn[], rows: unknown[][], cfg: 
       // "High"/"Low" said nothing the shading had not already said.
       formatter: (v: number) => fmt(v),
       seriesIndex: 0, // colour the choropleth (map) series only, not the annotation scatter
-    },
+    } }),
     ...(annotations.length > 0
       ? { geo: { map: cfg.echartsName, roam: false, show: false, ...layout } }
       : {}),

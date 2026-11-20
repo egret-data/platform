@@ -1673,6 +1673,9 @@ function scatterXY(columns: ResultColumn[], rows: unknown[][], cfg: CartesianBui
       type: cfg.logScale ? ("log" as const) : ("value" as const),
       scale: unpinFromZeroOn(cfg),
       name: yTitle,
+      // KI-256: ECharts' default `nameLocation` is "end" (the axis top, clipped); centre beside the axis
+      // like every other cartesian value axis, clear of the tick labels.
+      nameLocation: "middle", nameGap: 44,
       nameTextStyle: { color: axisLabelColor },
       axisLabel: { fontSize: CHART_THEME.axisFontSize, color: axisLabelColor, formatter: axisFmt(yMetric, widestOfMetric(1)) },
       axisLine: { show: cfg.yAxisTicks !== false, lineStyle: { color: gridLine } },
