@@ -673,7 +673,10 @@ export function buildBoxplotOption(
         //
         // Unconditional until the LabelManager reached the bundle, when it cost 12 of 45 texts at
         // 640x400 and 26 at a dashboard card, with no way for the user to ask for the rest.
-        labelLayout: { hideOverlap: labelMode !== "all" },
+        // KI-257: "All" must not stack numbers on top of each other either, but it cannot DROP them
+        // (hideOverlap) — the user asked for every statistic. `moveOverlap: "shiftY"` nudges colliding
+        // labels apart vertically (all share one x beside the box), so every value stays readable.
+        labelLayout: labelMode === "all" ? { moveOverlap: "shiftY" } : { hideOverlap: true },
       }] : []),
     ],
   };

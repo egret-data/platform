@@ -173,3 +173,14 @@ describe("a scatter's axis titles are drawn in the family's axis-title colour", 
     expect((one(o.yAxis) as Named).nameTextStyle?.color).toBe(ink);
   });
 });
+
+// KI-256: the metric-vs-metric scatter's Y title sat at the axis END (ECharts' default), clipped at
+// the top edge. It is centred beside the axis like every other cartesian chart.
+describe("a scatter's Y-axis title", () => {
+  it("is centred beside the axis on the metric-vs-metric scatter", () => {
+    const y = one(xy({ yLabel: "Revenue" }).yAxis) as Axis & { name?: string; nameLocation?: string; nameGap?: number };
+    expect(y.name).toBe("Revenue");
+    expect(y.nameLocation).toBe("middle");
+    expect(y.nameGap).toBeGreaterThanOrEqual(40);
+  });
+});

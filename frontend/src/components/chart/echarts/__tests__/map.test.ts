@@ -16,6 +16,15 @@ describe("buildMapOption", () => {
     expect([opt.visualMap.min, opt.visualMap.max]).toEqual([40, 100]);
   });
 
+  // KI-259: rows exist but none lands on a region — nothing is shaded, so no 0→1 legend either.
+  it("draws no colour legend when no row matches a region", () => {
+    const none = buildMapOption(cols, rows, { ...base, regions: new Set(["Ohio"]) }) as any;
+    expect(none.series[0].data).toEqual([]);
+    expect(none.visualMap).toBeUndefined();
+    const some = buildMapOption(cols, rows, { ...base, regions: new Set(["Texas"]) }) as any;
+    expect(some.visualMap).toBeDefined();
+  });
+
   it("maps rows to normalised region keys, dropping what does not resolve", () => {
     const opt = buildMapOption(cols, [...rows, ["", 5], ["Ohio", NaN]], base) as any;
     expect(opt.series[0].data).toEqual([
