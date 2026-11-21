@@ -28,7 +28,7 @@ spec:
           ports:
             - { containerPort: 8080 }
             {{- if .Values.apps.origin }}
-            - { containerPort: 8081 }
+            - { containerPort: 8083 }
             {{- end }}
             {{- if and .Values.opa.enabled .Values.ranger.enabled }}
             - { name: opa, containerPort: {{ .Values.opa.port }} }
@@ -52,7 +52,7 @@ spec:
             {{- if .Values.apps.origin }}
             - { name: EGRET_APPS__ORIGIN, value: "{{ .Values.apps.origin }}" }
             - { name: EGRET_APPS__EGRET_ORIGIN, value: "{{ .Values.apps.egretOrigin }}" }
-            - { name: EGRET_APPS__LISTEN, value: "0.0.0.0:8081" }
+            - { name: EGRET_APPS__LISTEN, value: "0.0.0.0:8083" }
             {{- if eq .Values.apps.pod.launcher "kubernetes" }}
             - { name: EGRET_APPS__POD__LAUNCHER, value: "kubernetes" }
             - { name: EGRET_APPS__POD__NAMESPACE, value: "{{ .Values.apps.pod.namespace }}" }

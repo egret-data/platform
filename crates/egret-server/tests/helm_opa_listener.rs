@@ -43,7 +43,7 @@ fn api_and_apps_ports_stay_open_to_every_peer() {
         !open.contains("from:"),
         "8080 must stay open to every peer: {open}"
     );
-    assert!(open.contains("port: 8081"));
+    assert!(open.contains("port: 8083"));
     assert!(!open.contains(".Values.opa.port"));
 }
 

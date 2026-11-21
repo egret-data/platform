@@ -154,7 +154,7 @@ services:
       # Data Apps (subprocess launcher, DEMO ONLY: no isolation between pods, see the guide).
       EGRET_APPS__ORIGIN: ${DEMO_APPS_URL:-http://apps.localtest.me:8080}
       EGRET_APPS__EGRET_ORIGIN: ${DEMO_URL:-http://egret.localtest.me:8080}
-      EGRET_APPS__LISTEN: 0.0.0.0:8081
+      EGRET_APPS__LISTEN: 0.0.0.0:8083
       EGRET_APPS__POD__LAUNCHER: subprocess
       EGRET_APPS__POD__COMMAND: '["python","-I","-m","egret_marimo.launcher"]'
       EGRET_APPS__POD__WORK_DIR: /var/lib/egret-apps

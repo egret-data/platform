@@ -1,7 +1,7 @@
 {{- /*
 The apps host (spec §6.1): marimo is served from a SIBLING subdomain of egret's own host, a
 separate origin, because the author's JavaScript runs in the viewer's browser and must not share
-egret's origin, cookies or storage. It reaches the backend's apps listener (port 8081), which serves
+egret's origin, cookies or storage. It reaches the backend's apps listener (port 8083), which serves
 only the ticket route and the marimo proxy — never egret's API.
 
 Its own Ingress object, not another rule on `egret`: that object pins `proxy-read-timeout: 60` (see
@@ -38,5 +38,5 @@ spec:
             backend:
               service:
                 name: egret
-                port: { number: 8081 }
+                port: { number: 8083 }
 {{- end }}

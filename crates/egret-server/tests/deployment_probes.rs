@@ -385,8 +385,8 @@ fn every_single_instance_store_is_recreated_rather_than_rolled() {
 /// that file for why) which would cut every idle marimo WebSocket at a minute. This pins the
 /// relation: the timeouts here must out-last the apps proxy's idle token window's shortest sensible
 /// wait, buffering must be off for server-sent events, and the backend must be the APPS listener
-/// (8081), never the API port. The apps listener's port is in the backend Deployment and the
-/// Service; all three have to say 8081 or the host serves nothing.
+/// (8083), never the API port. The apps listener's port is in the backend Deployment and the
+/// Service; all three have to say 8083 or the host serves nothing.
 #[test]
 fn the_apps_ingress_keeps_websockets_alive_and_reaches_the_apps_listener() {
     let ingress = read("deploy/helm/egret/templates/ingress-apps.yaml");
@@ -411,7 +411,7 @@ fn the_apps_ingress_keeps_websockets_alive_and_reaches_the_apps_listener() {
         "SSE needs buffering off"
     );
     assert!(
-        ingress.contains("port: { number: 8081 }"),
+        ingress.contains("port: { number: 8083 }"),
         "the apps host must reach the apps listener, not the API port"
     );
     assert!(
@@ -420,18 +420,18 @@ fn the_apps_ingress_keeps_websockets_alive_and_reaches_the_apps_listener() {
     );
     // the other two places that must agree on the port
     assert!(
-        deployment().contains("containerPort: 8081"),
-        "the Deployment must expose 8081"
+        deployment().contains("containerPort: 8083"),
+        "the Deployment must expose 8083"
     );
     assert!(
-        read("deploy/helm/egret/templates/backend-service.yaml").contains("targetPort: 8081"),
-        "the Service must route 8081"
+        read("deploy/helm/egret/templates/backend-service.yaml").contains("targetPort: 8083"),
+        "the Service must route 8083"
     );
     // and the default config of the listener is the same number
     assert!(
         egret_config::AppsConfig::default()
             .listen
-            .ends_with(":8081"),
+            .ends_with(":8083"),
         "the chart and the config default disagree on the apps port"
     );
 }
