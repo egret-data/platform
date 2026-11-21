@@ -124,6 +124,7 @@ impl Fx {
                 working_timeout: Duration::from_secs(3600),
                 container_default_timeout: egret_workflow::worker::DEFAULT_CONTAINER_TIMEOUT,
                 kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
+                shutdown_drain: egret_workflow::runtime::DEFAULT_SHUTDOWN_DRAIN,
                 scheduler_enabled: false,
                 trigger_interval: Duration::from_secs(3600),
                 log_limits: LogLimits::default(),

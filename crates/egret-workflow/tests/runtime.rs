@@ -184,6 +184,7 @@ fn fast(tick_ms: u64, batch: usize) -> RuntimeConfig {
         working_timeout: Duration::from_secs(3600),
         container_default_timeout: Duration::from_secs(3600),
         kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
+        shutdown_drain: egret_workflow::runtime::DEFAULT_SHUTDOWN_DRAIN,
         scheduler_enabled: false,
         trigger_interval: Duration::from_millis(tick_ms),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -335,6 +336,7 @@ async fn a_cancelled_token_stops_both_tickers(pool: sqlx::PgPool) {
         working_timeout: Duration::from_secs(1),
         container_default_timeout: Duration::from_secs(3600),
         kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
+        shutdown_drain: egret_workflow::runtime::DEFAULT_SHUTDOWN_DRAIN,
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -925,6 +927,7 @@ async fn two_tickers_reclaim_an_expired_lease_once_and_leave_a_live_one(pool: sq
         working_timeout: Duration::from_secs(3600),
         container_default_timeout: Duration::from_secs(3600),
         kill_poll: egret_workflow::worker::DEFAULT_KILL_POLL,
+        shutdown_drain: egret_workflow::runtime::DEFAULT_SHUTDOWN_DRAIN,
         scheduler_enabled: false,
         trigger_interval: Duration::from_secs(3600),
         log_limits: egret_workflow::logs::LogLimits::default(),
@@ -3532,5 +3535,87 @@ async fn a_cancel_waits_for_the_runs_in_flight_and_claims_nothing_new(pool: sqlx
     assert!(
         lease_of(&pool, late).await.is_none(),
         "nothing is claimed after the cancel"
+    );
+}
+
+// ── KI-237: a graceful stop hands a run still in its handler back ───────────
+
+/// A handler that never returns, and says when it has been entered. It is a
+/// `Sleep` that outlives any grace period, without the wall-clock.
+#[derive(Default)]
+struct Stuck {
+    entered: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Registry for Stuck {
+    async fn run(&self, _task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+    async fn cancel(&self, _task: &TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// **KI-237.** A replica stopped with SIGTERM while a long task runs used to
+/// leave that run `RUNNING` under a fresh lease until the reaper took it,
+/// `working_timeout` (an hour) later, because the claim loop waited for the
+/// handler for ever and `main` gave up and exited.
+///
+/// Both directions, as `reap`'s test has them: the run THIS replica held is
+/// claimable the moment the loop stops, and a lease a different live worker
+/// holds (claimed by hand, before this replica started, so this one never held
+/// it) is untouched.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_graceful_stop_releases_the_lease_it_held_and_only_that_one(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let ws = seed(&pool).await;
+
+    let foreign = start_execution(&pool, ws, None, &one_task("foreign"), serde_json::json!({}))
+        .await
+        .expect("start foreign");
+    let theirs = claim(&pool, 1).await.expect("another worker claims");
+    assert_eq!(theirs.len(), 1);
+    let their_lease = lease_of(&pool, foreign).await;
+    assert!(their_lease.is_some());
+
+    let mine = start_execution(&pool, ws, None, &one_task("mine"), serde_json::json!({}))
+        .await
+        .expect("start mine");
+    let reg = Arc::new(Stuck::default());
+    let cancel = CancellationToken::new();
+    let cfg = RuntimeConfig {
+        shutdown_drain: Duration::from_millis(300),
+        ..fast(20, 4)
+    };
+    let handle = spawn(pool.clone(), reg.clone(), cfg, cancel.clone());
+    wait_until("the handler entered", Duration::from_secs(5), || async {
+        if reg.entered.load(Ordering::SeqCst) == 1 && lease_of(&pool, mine).await.is_some() {
+            Ok(())
+        } else {
+            Err("not yet".into())
+        }
+    })
+    .await;
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(3), handle.join())
+        .await
+        .expect("the runtime must stop within the grace window, not wait for the handler");
+
+    assert!(
+        lease_of(&pool, mine).await.is_none(),
+        "the lease this replica held is released, so the run is claimable at once"
+    );
+    assert_eq!(
+        run_state(&pool, mine, "a").await.as_deref(),
+        Some("RUNNING"),
+        "released, not finished: the run is handed back as it was"
+    );
+    assert_eq!(
+        lease_of(&pool, foreign).await,
+        their_lease,
+        "a lease another live worker holds is not this replica's to release"
     );
 }

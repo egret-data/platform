@@ -535,6 +535,70 @@ async fn reap_reclaims_the_expired_lease_and_leaves_the_live_one(pool: sqlx::PgP
     );
 }
 
+/// **KI-237: releasing the leases a process holds is fenced on the exact lease
+/// it wrote, in both directions.** Mirrors `reap`'s two-direction test: a held
+/// lease inside the timeout is cleared at once; a lease the process no longer
+/// holds (reaped and re-claimed by another worker, so the row carries a newer
+/// `claimed_at`) is left alone, as is a lease the process never held.
+#[sqlx::test(migrations = "../../migrations")]
+async fn releasing_held_leases_clears_mine_and_leaves_anyone_elses(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let mine = start_execution(&pool, ws, None, &one_task("mine"), serde_json::json!({}))
+        .await
+        .expect("start mine");
+    let lost = start_execution(&pool, ws, None, &one_task("lost"), serde_json::json!({}))
+        .await
+        .expect("start lost");
+    let theirs = start_execution(&pool, ws, None, &one_task("theirs"), serde_json::json!({}))
+        .await
+        .expect("start theirs");
+    let claimed = claim(&pool, 10).await.expect("claim all");
+    assert_eq!(claimed.len(), 3);
+
+    let book = egret_workflow::worker::HeldLeases::default();
+    for c in claimed.iter().filter(|c| c.execution_id != theirs) {
+        book.hold(c.id, c.claimed_at);
+    }
+    // `lost` was reaped and re-claimed by another worker: a newer lease.
+    sqlx::query(
+        "UPDATE workflow.task_runs SET claimed_at = claimed_at + interval '1 second' \
+          WHERE execution_id = $1",
+    )
+    .bind(lost)
+    .execute(&pool)
+    .await
+    .expect("move the lease on");
+    let lost_lease = lease_of(&pool, lost, "a").await;
+    let their_lease = lease_of(&pool, theirs, "a").await;
+
+    let n = book.release(&pool).await.expect("release");
+
+    assert_eq!(n, 1, "exactly the one lease this process still holds");
+    assert!(
+        lease_of(&pool, mine, "a").await.is_none(),
+        "the held lease is cleared with no wait for the timeout"
+    );
+    assert_eq!(
+        lease_of(&pool, lost, "a").await,
+        lost_lease,
+        "**the safety direction**: a lease that moved on to another worker is not released"
+    );
+    assert_eq!(
+        lease_of(&pool, theirs, "a").await,
+        their_lease,
+        "a lease this process never held is not released"
+    );
+    assert!(book.is_empty(), "the book is emptied");
+
+    let after = claim(&pool, 10).await.expect("claim after release");
+    assert_eq!(
+        after.iter().map(|c| c.execution_id).collect::<Vec<_>>(),
+        vec![mine],
+        "only the released run is claimable again"
+    );
+}
+
 /// **Property 4 (found while writing the other three): a run whose result has
 /// committed is never claimed again.**
 ///
