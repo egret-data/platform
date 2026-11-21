@@ -69,6 +69,12 @@ pub fn s3_storage_profile(s3: &S3StorageConfig) -> serde_json::Value {
     })
 }
 
+/// The advisory lock every warehouse create holds from its overlap check to
+/// its insert, so two creates at the same moment are checked against each
+/// other (KI-316). One key for all: creating a warehouse is rare, and the
+/// overlap is decided over every warehouse the catalog holds.
+pub const WAREHOUSE_CREATE_LOCK: i64 = 0x6567_7265_745f_7768;
+
 /// Create the lakekeeper warehouse `name` backed by `s3`, using the in-process
 /// system admin principal. Returns the lakekeeper warehouse id (as a string) to
 /// record on egret's `warehouses` row.
@@ -79,6 +85,21 @@ pub async fn create_lakekeeper_warehouse(
     s3: &S3StorageConfig,
 ) -> Result<String, CatalogEngineError> {
     let metadata = system_request_metadata(system_user)?;
+    // Held (by the transaction's open connection) until this function
+    // returns, that is until lakekeeper's insert has committed; dropping the
+    // transaction rolls it back, which releases the lock.
+    let mut creating = engine_state
+        .v1_state
+        .catalog
+        .write_pool()
+        .begin()
+        .await
+        .map_err(|e| CatalogEngineError::Internal(format!("locking warehouse creation: {e}")))?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(WAREHOUSE_CREATE_LOCK)
+        .execute(&mut *creating)
+        .await
+        .map_err(|e| CatalogEngineError::Internal(format!("locking warehouse creation: {e}")))?;
     refuse_overlapping_storage(&engine_state.v1_state.catalog.read_pool(), s3).await?;
 
     // Build the storage profile + credential from JSON (the documented wire
