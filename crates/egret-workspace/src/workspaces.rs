@@ -52,6 +52,29 @@ impl WorkspaceRepo {
         Ok(row.into())
     }
 
+    /// Return the workspace with `slug`, creating it when absent. Race-safe: when
+    /// a concurrent caller creates it between the lookup and the insert, the
+    /// unique violation ([`Error::Conflict`]) is absorbed and the winner's row
+    /// is read back (KI-242, two simultaneous `egret init` runs).
+    pub async fn get_or_create(
+        &self,
+        slug: &str,
+        name: &str,
+        created_by: UserId,
+    ) -> Result<Workspace> {
+        if let Some(ws) = self.get_by_slug(slug).await? {
+            return Ok(ws);
+        }
+        match self.create(slug, name, created_by).await {
+            Ok(ws) => Ok(ws),
+            Err(Error::Conflict(_)) => self
+                .get_by_slug(slug)
+                .await?
+                .ok_or_else(|| Error::Conflict(format!("workspace slug already exists: {slug}"))),
+            Err(e) => Err(e),
+        }
+    }
+
     pub async fn list(&self, page: Pagination) -> Result<Vec<Workspace>> {
         let rows = sqlx::query_as::<_, WorkspaceRow>(
             "SELECT w.id, w.slug, w.name, w.status, w.created_at, w.created_by, \

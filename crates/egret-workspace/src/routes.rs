@@ -1339,7 +1339,7 @@ async fn list_members(
     request_body = AddMember,
     responses(
         (status = 200, description = "Member added, or (`invited`) an unknown email pre-registered for its first SSO sign-in", body = AddMemberResult),
-        (status = 400, description = "Unknown principal or role", body = ErrorBody),
+        (status = 400, description = "Unknown principal or role, or `data_api_invoker` (granted on one Data API endpoint, never workspace-wide)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing workspace permission", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1353,6 +1353,16 @@ async fn add_member(
     egret_core::authz::require(&*st.pdp, &ctx, "workspace:manage_members")
         .await
         .map_err(AuthError)?;
+    // KI-261: `data_api_invoker` is granted on ONE Data API endpoint, never
+    // workspace-wide (the pickers do not offer it). Checked before the
+    // principal is resolved, so the SSO pre-registration path is covered too.
+    if body.role == "data_api_invoker" {
+        return Err(AuthError(egret_core::Error::InvalidInput(
+            "data_api_invoker cannot be a workspace member role: grant it on a single Data API \
+             endpoint instead"
+                .into(),
+        )));
+    }
     // The picker supplies an email / group name; a role change supplies the existing
     // member's UUID. Accept a real UUID directly, else resolve email/name -> id.
     let pid: uuid::Uuid = match uuid::Uuid::parse_str(&body.principal_id) {

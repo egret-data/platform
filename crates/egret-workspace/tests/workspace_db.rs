@@ -1007,3 +1007,32 @@ async fn my_workspaces_lists_membership_and_admin_sees_all() {
         .iter()
         .any(|w| w["id"] == ws.id.to_string()));
 }
+
+/// KI-242: concurrent default-workspace creation does not hard-fail; every
+/// caller gets the same row.
+#[tokio::test]
+async fn get_or_create_is_race_safe() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let user = seed_user(&db).await;
+    let slug = uniq("race");
+    let repo = WorkspaceRepo::new(db.clone());
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let repo = repo.clone();
+            let slug = slug.clone();
+            tokio::spawn(async move { repo.get_or_create(&slug, "Race", user).await })
+        })
+        .collect();
+    let mut results = Vec::new();
+    for h in handles {
+        results.push(h.await.unwrap());
+    }
+    let ids: std::collections::HashSet<_> = results
+        .into_iter()
+        .map(|r| r.expect("no caller may fail").id.0)
+        .collect();
+    assert_eq!(ids.len(), 1, "all callers see the one workspace");
+}

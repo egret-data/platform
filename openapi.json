@@ -31664,7 +31664,7 @@
             }
           },
           "400": {
-            "description": "Unknown principal or role",
+            "description": "Unknown principal or role, or `data_api_invoker` (granted on one Data API endpoint, never workspace-wide)",
             "content": {
               "application/json": {
                 "schema": {

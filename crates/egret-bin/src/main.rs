@@ -190,17 +190,10 @@ async fn init(config: Config, force: bool) -> anyhow::Result<()> {
     // is made the workspace owner (`ws_admin`) so it can actually use it;
     // `MemberRepo::add` replaces-then-inserts, so re-running is a no-op.
     let workspaces = WorkspaceRepo::new(db.clone());
-    let default_ws = match workspaces
-        .get_by_slug("default")
+    let default_ws = workspaces
+        .get_or_create("default", "Default", user_id)
         .await
-        .context("looking up default workspace")?
-    {
-        Some(ws) => ws,
-        None => workspaces
-            .create("default", "Default", user_id)
-            .await
-            .context("creating default workspace")?,
-    };
+        .context("creating default workspace")?;
     MemberRepo::new(db.clone())
         .add(default_ws.id, "user", user_id.0, "ws_admin", user_id)
         .await
