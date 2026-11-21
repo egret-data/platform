@@ -1104,14 +1104,13 @@ async fn set_tag_service(
 ) -> Result<Json<ProfileTagService>, PolicyHttpError> {
     egret_core::authz::require(&*st.pdp, &p, "policy:update").await?;
     let svc = st.store.get_service(&service).await?;
-    let bound: Vec<String> = st
-        .engines
-        .list_engine_bindings()
-        .await?
-        .into_iter()
-        .filter(|e| e.authz_service_id == Some(svc.id))
-        .map(|e| e.name)
-        .collect();
+    let mut tx = st.store.begin().await?;
+    // The check that no engine downloads the profile runs on this transaction,
+    // under the profile's lock: an engine bind committing between a check made
+    // before it and the write below would leave an engine on a profile whose tag
+    // service changed after the bind checked it (KI-325).
+    crate::store::lock_tag_service_change_via(&mut tx, svc.id, &b.tag_service).await?;
+    let bound = crate::store::engines_bound_to_via(&mut tx, svc.id).await?;
     if !bound.is_empty() {
         return Err(PolicyHttpError::Conflict(format!(
             "profile {service} is downloaded by {}: changing its tag service would swap the \
@@ -1126,7 +1125,6 @@ async fn set_tag_service(
              rules into the tag service it names; its tag service is not changed by hand"
         )));
     }
-    let mut tx = st.store.begin().await?;
     let changed = crate::store::set_tag_service_via(&mut tx, svc.id, &b.tag_service).await?;
     let after = match changed {
         Some(change) => {

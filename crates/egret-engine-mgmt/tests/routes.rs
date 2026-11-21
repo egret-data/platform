@@ -57,6 +57,9 @@ struct RecordingProfileCompiler {
     in_tx_calls: Arc<std::sync::Mutex<Vec<i64>>>,
     /// `converge_infra` calls (governance SP2a infrastructure convergence).
     converge_calls: Arc<std::sync::Mutex<Vec<i64>>>,
+    /// `lock_profiles_in_tx` calls, one entry per call holding the ids it was
+    /// given (KI-332: a profile move must lock both profiles before its write).
+    lock_calls: Arc<std::sync::Mutex<Vec<Vec<i64>>>>,
 }
 
 #[async_trait::async_trait]
@@ -94,8 +97,9 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
     async fn lock_profiles_in_tx(
         &self,
         _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        _service_ids: &[i64],
+        service_ids: &[i64],
     ) -> Result<(), egret_perm::CompileError> {
+        self.lock_calls.lock().unwrap().push(service_ids.to_vec());
         Ok(())
     }
 
@@ -11743,6 +11747,62 @@ async fn update_with_authz_service_id_binds_and_recompiles() {
         "the newly bound profile must be recompiled, in the binding's own \
          transaction — a bound-but-uncompiled profile serves a policy set that \
          predates the binding"
+    );
+}
+
+/// KI-332: moving an engine from one profile to another bumps BOTH profiles'
+/// policy versions in one `UPDATE` (migration 0187's trigger). Two such moves
+/// locking the pair in opposite orders deadlock, so the move must lock the old
+/// and the new profile first, the way `PATCH …/external` does (#813).
+#[tokio::test]
+async fn update_moving_an_engine_locks_both_profiles_first() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_move_lock", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let old = authz_service_of(&f, &name).await.expect("auto-bound profile");
+    let other = seed_ranger_profile(&f, &format!("other-{}", Uuid::new_v4().simple()), &[]).await;
+    compiler.lock_calls.lock().unwrap().clear();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(other))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+
+    let locks = compiler.lock_calls.lock().unwrap().clone();
+    let mut expected = vec![old, other];
+    expected.sort_unstable();
+    assert!(
+        locks.iter().any(|ids| {
+            let mut ids = ids.clone();
+            ids.sort_unstable();
+            ids == expected
+        }),
+        "the move must lock the old and the new profile together before its write; \
+         lock calls: {locks:?}, expected the pair {expected:?}"
     );
 }
 

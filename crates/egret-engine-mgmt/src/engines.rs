@@ -6272,6 +6272,23 @@ async fn recompile_former_profile(st: &CpState, previous: Option<i64>, only_if_s
     }
 }
 
+/// Lock `touched` (ascending, see
+/// [`crate::profile_compiler::lock_profiles`]) on the caller's transaction, then
+/// run [`check_profile_bindable`] for `sid` again. The first check, made before
+/// the transaction, can be overtaken by a write to the profile (a tag-service
+/// change, KI-325); this one cannot, because that write takes the same lock.
+pub(crate) async fn lock_then_check_bindable(
+    st: &CpState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    touched: &[i64],
+    sid: i64,
+    engine_type: &str,
+    engine_name: &str,
+) -> Result<(), CpError> {
+    crate::profile_compiler::lock_profiles(st, tx, touched).await?;
+    check_profile_bindable(st, sid, engine_type, engine_name).await
+}
+
 /// Every refusal a profile bind makes BEFORE it writes anything, shared by
 /// `PUT /engines/{id}` ([`apply_authz_service_update`]) and external-engine
 /// registration so the two cannot drift: the profile must exist (400), its
@@ -6440,6 +6457,18 @@ async fn apply_authz_service_update(
     // profile's unit resolves, and every overlap check reads those as stored, so
     // the snapshot of the unit's pairs is taken BEFORE the bind and compared
     // after the recompile. A pair already stored is reported, not refused.
+    //
+    // **Both profiles are locked first, ascending** (KI-332): the `UPDATE` below
+    // bumps the old and the new profile through migration 0187's trigger in one
+    // statement, in no order of its own, so two moves over the same pair could
+    // lock them oppositely and deadlock. `PATCH …/external` does the same (#813).
+    // The profile is then checked for binding again, under its lock (KI-325): a
+    // tag-service change either committed before this lock, and is seen here, or
+    // waits for this transaction and finds the engine bound.
+    let touched: Vec<i64> = std::iter::once(sid)
+        .chain(engine.authz_service_id)
+        .collect();
+    lock_then_check_bindable(st, &mut tx, &touched, sid, &engine.r#type, &engine.name).await?;
     let overlaps_before =
         crate::profile_compiler::snapshot_overlaps(st, &mut tx, Some(sid)).await?;
     if !st
