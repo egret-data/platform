@@ -1357,6 +1357,7 @@ pub async fn start_claimed(
     reg: &std::sync::Arc<dyn Registry>,
     timing: WorkerTiming,
     running: &mut tokio::task::JoinSet<()>,
+    leases: &super::HeldLeases,
 ) -> Result<usize> {
     if free == 0 {
         return Ok(0);
@@ -1370,7 +1371,12 @@ pub async fn start_claimed(
     for c in claimed {
         let pool = pool.clone();
         let reg = reg.clone();
-        running.spawn(async move {
+        // KI-237: the claim is held from here until its task ends, and
+        // `renew_lease` keeps the book's `claimed_at` current, so a graceful
+        // stop can hand exactly these leases back.
+        leases.hold(c.id, c.claimed_at);
+        let book = leases.clone();
+        running.spawn(leases.clone().scoped(async move {
             match run_one(&pool, &c, &*reg, timing, leased_at).await {
                 Ok(Committed::Yes) => {}
                 Ok(Committed::LeaseLost) => {}
@@ -1382,7 +1388,8 @@ pub async fn start_claimed(
                     "workflow task run failed; it stays leased until the reaper hands it back"
                 ),
             }
-        });
+            book.forget(c.id);
+        }));
     }
     Ok(started)
 }
@@ -2438,6 +2445,11 @@ async fn renew_lease(
     .fetch_optional(pool)
     .await
     .map_err(db_err)
+    .inspect(|renewed| {
+        if let Some(at) = renewed {
+            super::HeldLeases::renewed(run, *at);
+        }
+    })
 }
 
 /// **Whether `run` is `KILLING` under the lease `held`** -- the kill check

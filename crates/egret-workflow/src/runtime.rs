@@ -246,6 +246,12 @@ use tokio_util::sync::CancellationToken;
 use crate::logs::{spawn_pruner, spawn_writer, LogLimits, LogRepo, PruneConfig, WriterConfig};
 use crate::worker::{Handlers, Registry};
 
+/// The default of [`RuntimeConfig::shutdown_drain`]. Docker's stop grace is
+/// 10 s and `egret-bin` waits 10 s for the runtime, so the claim loop gives the
+/// runs in flight 5 s to commit and keeps the rest for releasing leases and
+/// draining the log writer.
+pub const DEFAULT_SHUTDOWN_DRAIN: Duration = Duration::from_secs(5);
+
 /// What [`spawn`] needs to know, in this crate's own vocabulary.
 ///
 /// Deliberately **not** `egret_config::WorkflowConfig`: `egret-config` sits
@@ -295,6 +301,11 @@ pub struct RuntimeConfig {
     /// `egret_config::WorkflowConfig::kill_poll_ms`; see
     /// [`DEFAULT_KILL_POLL`](crate::worker::DEFAULT_KILL_POLL).
     pub kill_poll: Duration,
+    /// KI-237: after `cancel`, how long the claim loop waits for the runs in
+    /// flight before it aborts them and hands their leases back
+    /// ([`DEFAULT_SHUTDOWN_DRAIN`]). Must leave the log writer's drain and the
+    /// caller's own bound inside the orchestrator's stop grace.
+    pub shutdown_drain: Duration,
     /// **The scheduler's own gate (W12), independent of [`enabled`](Self::enabled).**
     ///
     /// When true, [`spawn`] starts a third ticker that calls
@@ -627,6 +638,7 @@ fn spawn_worker(
             // the loop; a tick claims only the slots that are free.
             let bound = cfg.max_concurrent_runs.max(1);
             let mut running = tokio::task::JoinSet::new();
+            let leases = crate::worker::HeldLeases::default();
             let mut tick = tokio::time::interval(cfg.tick_interval);
             // A replica that pauses (or a laptop that sleeps) must not then fire
             // a burst of catch-up ticks: the runnable runs are still there and
@@ -644,7 +656,7 @@ fn spawn_worker(
                         // NOT `while n > 0`: a fixed interval, see this
                         // module's doc. A tick with no free slot claims nothing.
                         let free = bound.saturating_sub(running.len()).min(cfg.batch);
-                        match crate::worker::start_claimed(&pool, free, &reg, timing, &mut running)
+                        match crate::worker::start_claimed(&pool, free, &reg, timing, &mut running, &leases)
                             .await
                         {
                             Ok(0) => {}
@@ -656,11 +668,36 @@ fn spawn_worker(
                     }
                 }
             }
-            // Graceful: nothing new is claimed, and every run in flight is
-            // waited for, so its outcome commits (or its lease is left for the
-            // reaper) before the log writer is released by `_release`.
-            while let Some(joined) = running.join_next().await {
-                log_join(joined);
+            // Graceful: nothing new is claimed, and the runs in flight get
+            // `shutdown_drain` to commit before the log writer is released by
+            // `_release`. A run still in its handler then (a long `Sleep`) is
+            // aborted exactly as a lost lease aborts it, and the leases this
+            // process holds are handed back at once rather than left for the
+            // reaper `working_timeout` later (KI-237). A run already
+            // committed has forgotten its lease; one that raced the abort
+            // fails the release's fence and stays the reaper's.
+            let drained = tokio::time::timeout(cfg.shutdown_drain, async {
+                while let Some(joined) = running.join_next().await {
+                    log_join(joined);
+                }
+            })
+            .await;
+            if drained.is_err() {
+                tracing::warn!(
+                    in_flight = running.len(),
+                    "workflow runs still in flight at shutdown; aborting them and releasing their leases"
+                );
+                running.abort_all();
+                while let Some(joined) = running.join_next().await {
+                    log_join(joined);
+                }
+            }
+            match leases.release(&pool).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(released = n, "released the leases held at shutdown"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not release the leases held at shutdown; the reaper will")
+                }
             }
             tracing::info!("workflow claim loop stopped");
         })
@@ -693,7 +730,11 @@ fn spawn_worker(
 /// (`worker::start_claimed`); a panic is logged here, and its run keeps its
 /// lease until the reaper hands it back, as a failed run's does.
 fn log_join(joined: std::result::Result<(), tokio::task::JoinError>) {
+    // An aborted task is the shutdown's own doing, not a failure.
     if let Err(e) = joined {
+        if e.is_cancelled() {
+            return;
+        }
         tracing::error!(error = %e, "a workflow task run panicked; its lease lapses and the reaper hands it back");
     }
 }
