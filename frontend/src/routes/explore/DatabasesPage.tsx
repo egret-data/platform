@@ -57,6 +57,7 @@ import { useUnsavedChangesWarning } from "@/lib/useUnsavedChangesWarning";
 import { StatusBadge, type StatusTone } from "@/components/ui/status-badge";
 import { Forbidden } from "@/routes/Forbidden";
 import { ScrollX } from "@/components/ui/scroll-cue";
+import { useWorkspacePermission } from "@/hooks/useWorkspaceFeatures";
 
 function statusTone(status: string): StatusTone {
   if (status === "ok") return "success";
@@ -82,6 +83,9 @@ export default function DatabasesPage() {
   const dbs = useDatabases(ws);
   const deleteMutation = useDeleteDatabase(ws);
   const testMutation = useTestDatabase(ws);
+  // Adding a connection is a workspace-admin action; a member who cannot add one is not shown
+  // the button and is told whom to ask (KI-243). The server stays the gate.
+  const canManage = useWorkspacePermission()("workspace:manage_members");
 
   const [addOpen, setAddOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<DatabaseConn | null>(null);
@@ -112,7 +116,7 @@ export default function DatabasesPage() {
   if (dbs.isLoading) {
     return (
       <section>
-        <SectionHeader onAdd={() => setAddOpen(true)} />
+        <SectionHeader onAdd={canManage ? () => setAddOpen(true) : undefined} />
         <div className="mt-4">
           <ListSkeleton rows={3} cols={6} />
         </div>
@@ -278,7 +282,7 @@ export default function DatabasesPage() {
 
   return (
     <section>
-      <SectionHeader onAdd={() => setAddOpen(true)} />
+      <SectionHeader onAdd={canManage ? () => setAddOpen(true) : undefined} />
 
       <div className="mt-4 space-y-8">
         {provisionedRows.length > 0 && (
@@ -325,6 +329,7 @@ export default function DatabasesPage() {
         ) : provisionedRows.length === 0 ? (
           <div className="rounded border border-dashed p-8 text-center text-muted-foreground">
             <p>No connections yet.</p>
+            {canManage ? null : <p className="mt-1 text-sm">Ask a workspace admin to add one.</p>}
           </div>
         ) : null}
       </div>
@@ -370,7 +375,7 @@ export default function DatabasesPage() {
   );
 }
 
-function SectionHeader({ onAdd }: { onAdd: () => void }) {
+function SectionHeader({ onAdd }: { onAdd?: () => void }) {
   return (
     <div className="flex items-start justify-between gap-4">
       <div>
@@ -379,10 +384,12 @@ function SectionHeader({ onAdd }: { onAdd: () => void }) {
           Connections to query engines that this workspace can use in SQL Lab and charts.
         </p>
       </div>
-      <Button onClick={onAdd}>
-        <Plus className="h-4 w-4" />
-        Add connection
-      </Button>
+      {onAdd ? (
+        <Button onClick={onAdd}>
+          <Plus className="h-4 w-4" />
+          Add connection
+        </Button>
+      ) : null}
     </div>
   );
 }

@@ -91,6 +91,11 @@ export default function ObjectPage() {
   // which the engines and egret's tags ignore; the listing's spelling is the source's.
   const siblings = level === "object" && parent.data?.status === 200 ? (parent.data.data.items ?? []) : [];
   const item = siblings.find((i) => i.name === path.object) ?? siblings.find((i) => sameName(i.name, path.object ?? ""));
+  // The schema's listing is the catalog's answer to "does this table exist": when it listed and the
+  // name is not in it and the table's own read found nothing, there is no such table (KI-344), as
+  // opposed to a read that failed on a table the catalog does have.
+  const absent =
+    level === "object" && browse.isError && parent.data?.status === 200 && !parent.data.data.notListed && !item;
   let kind: NodeKind | null = level === "object" ? null : level;
   if (item && OBJECT_KINDS.includes(item.kind)) kind = item.kind;
   // An object's kind is "loading" only while something that can still tell it is on its way.
@@ -167,7 +172,7 @@ export default function ObjectPage() {
       <ObjectTabs
         level={level}
         panels={{
-          overview: <OverviewTab path={path} kind={kind} catalog={catalog} browse={browse} tags={tags} />,
+          overview: <OverviewTab path={path} kind={kind} catalog={catalog} browse={browse} tags={tags} absent={absent} />,
           permissions: (
             <PermissionsTab
               path={path}

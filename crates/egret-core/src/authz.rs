@@ -73,6 +73,20 @@ pub trait Pdp: Send + Sync {
         action: &str,
         resource: &Resource,
     ) -> crate::Result<Decision>;
+
+    /// The same decision as [`Pdp::authorize`], for a question the caller asks only to choose
+    /// between answers it may give (an "is this reader an admin?" probe on a read the reader may
+    /// make anyway). A decorator that audits every `authorize` does not audit this: a routine
+    /// read would otherwise write a denied decision for a question the reader never asked. The
+    /// caller still enforces whatever it learns; never use it as the gate of an action.
+    async fn probe(
+        &self,
+        subject: &Subject,
+        action: &str,
+        resource: &Resource,
+    ) -> crate::Result<Decision> {
+        self.authorize(subject, action, resource).await
+    }
 }
 
 /// A request context that resolves to a PDP subject + the resource scope of the

@@ -50,3 +50,23 @@ async fn emits_a_decision_event() {
         _ => panic!("expected Decision"),
     }
 }
+
+#[tokio::test]
+async fn a_probe_returns_the_decision_without_emitting_one() {
+    let (sink, mut rx) = AuditSink::new(16);
+    let pdp = AuditingPdp::new(Arc::new(FixedPdp(false)), sink);
+    let subject = Subject {
+        user_id: UserId::new(),
+        group_ids: vec![],
+    };
+    let d = pdp
+        .probe(
+            &subject,
+            "workspace:manage_members",
+            &Resource::Workspace(WorkspaceId::new()),
+        )
+        .await
+        .unwrap();
+    assert!(!d.allow, "the probe answers as authorize does");
+    assert!(rx.try_recv().is_err(), "a probe writes no audit decision");
+}

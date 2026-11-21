@@ -283,6 +283,13 @@ describe("ObjectHeader", () => {
     }
   });
 
+  it("says the table does not exist, not that the columns failed to load, when the catalog has no such table", async () => {
+    serveData(fixture({ browse: { ...fixture().browse, "c-ice|sales|ghost": boom } }));
+    renderPage("/governance/data/ice/sales/ghost");
+    expect(await within(panel()).findByText("This table does not exist in the catalog.")).toBeInTheDocument();
+    expect(within(panel()).queryByText(/could not be loaded/)).not.toBeInTheDocument();
+  });
+
   it("shows a skeleton for the kind while the schema is being listed", async () => {
     serveData(fixture({ browse: { ...fixture().browse, "c-ice|sales": "never" } }));
     renderPage("/governance/data/ice/sales/orders");

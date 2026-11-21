@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
+import { StandaloneStatePage } from "@/components/layout/StatePage";
 import { useAuthConfig, useLogin } from "@/api/hooks";
 import { ApiError } from "@/api/client";
 
@@ -51,9 +51,8 @@ export function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-sm p-6">
-        <h1 className="mb-4 text-xl font-semibold">Sign in to Egret</h1>
+    <StandaloneStatePage title="Sign in to Egret" width="sm">
+      <div className="space-y-3 pt-2">
         {oidcEnabled && (
           <a href="/api/auth/oidc/login" className="block">
             <Button className="w-full">Sign in with SSO</Button>
@@ -80,7 +79,7 @@ export function LoginPage() {
             Admin sign-in (break-glass)
           </button>
         )}
-      </Card>
-    </div>
+      </div>
+    </StandaloneStatePage>
   );
 }

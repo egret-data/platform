@@ -110,7 +110,11 @@ async fn list(
     State(st): State<DatabaseState>,
     WsContext(ctx): WsContext,
 ) -> Result<Json<DatabaseListing>, DbApiError> {
-    let full = allows(&st, &ctx, PERM_MANAGE).await?;
+    // Whether this reader is an admin only picks which listing they get, so it is asked unaudited:
+    // a member's routine read must not write a denied `workspace:manage_members` decision (KI-245).
+    // An admin's allowed decision is still audited, by the authorize that follows the probe.
+    let full =
+        probe_allows(&st, &ctx, PERM_MANAGE).await? && allows(&st, &ctx, PERM_MANAGE).await?;
     if !full {
         let mut redacted = false;
         for perm in PERMS_LIST_REDACTED {
@@ -129,6 +133,19 @@ async fn list(
     } else {
         DatabaseListing::Summary(dbs.into_iter().map(Into::into).collect())
     }))
+}
+
+async fn probe_allows(
+    st: &DatabaseState,
+    ctx: &egret_core::WorkspaceContext,
+    action: &str,
+) -> Result<bool, DbApiError> {
+    use egret_core::authz::AuthTarget;
+    Ok(st
+        .pdp
+        .probe(&ctx.subject(), action, &ctx.resource())
+        .await?
+        .allow)
 }
 
 async fn allows(
