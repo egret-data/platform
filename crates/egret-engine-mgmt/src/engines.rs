@@ -1434,10 +1434,10 @@ async fn reapply_one(
                     .ok_or_else(|| "the engine was deleted".to_string())?;
             }
             Err(ApplyBuiltError::CredentialChanged) => {
-                return Err(RANGER_CREDENTIAL_CHANGED.to_string())
+                return Err(RANGER_CREDENTIAL_CHANGED.to_string());
             }
             Err(ApplyBuiltError::Conflict) => {
-                return Err("the engine was deleted, or is being deleted".to_string())
+                return Err("the engine was deleted, or is being deleted".to_string());
             }
             Err(ApplyBuiltError::Failed(m)) => return Err(m),
         }
@@ -3615,7 +3615,7 @@ async fn bind_profile(
                 other => {
                     return Err(CpError::BadRequest(format!(
                         "no policy profile type for engine type {other}"
-                    )))
+                    )));
                 }
             };
             let svc = match st.authz.create_service(name, engine_type, &config).await {
@@ -3623,7 +3623,7 @@ async fn bind_profile(
                 Err(egret_policy_api::PolicyError::AlreadyExists(_)) => {
                     return Err(CpError::Conflict(format!(
                         "policy profile {name} was created concurrently; retry the create"
-                    )))
+                    )));
                 }
                 Err(e) => return Err(CpError::BadRequest(format!("create policy profile: {e}"))),
             };
@@ -3732,12 +3732,12 @@ async fn resolve_primary_catalog(
         [] => {
             return Err(CpError::BadRequest(
                 "one attached catalog must be primary".into(),
-            ))
+            ));
         }
         _ => {
             return Err(CpError::BadRequest(
                 "only one attached catalog may be primary".into(),
-            ))
+            ));
         }
     };
     let registry = st.engine_mgmt.registry();
@@ -6158,6 +6158,23 @@ async fn reconverge_infra_after_rollback(st: &CpState, service_ids: &[Option<i64
     }
 }
 
+/// Run the part of a settings save that follows the stored write in a task of
+/// its own (KI-272), the way [`apply_built`] runs [`finish_apply`] (KI-263).
+/// A request whose client goes away is dropped by the server, and with it
+/// anything it awaits: the restore of the stored spec after a failed apply and
+/// the re-materialization of the assigned workspaces' connections would be
+/// skipped, leaving them behind the engine. The task is not owned by the
+/// request, so it finishes either way; a request still connected gets its
+/// result as before.
+async fn run_detached<T: Send + 'static>(
+    save: impl std::future::Future<Output = Result<T, CpError>> + Send + 'static,
+) -> Result<T, CpError> {
+    tokio::spawn(save).await.map_err(|e| {
+        tracing::error!(error = %e, "the engine settings save task stopped");
+        CpError::ClusterApplyFailed(format!("the engine settings save stopped: {e}"))
+    })?
+}
+
 /// Re-materialize every workspace assigned to `engine_id`, shared by both
 /// update paths so they can't drift on the mapping. The CR was already
 /// applied by the time this runs, so a failure here must surface loudly
@@ -6662,62 +6679,68 @@ async fn update_trino_engine(
         resolve_dockerconfigjson_secret(&st, ref_id).await?;
     }
 
-    // Snapshot what is stored so a failed build or apply can put it back — the
-    // same contract `update_catalog` keeps for a catalog row.
-    let snapshot_spec = engine.spec.clone();
-    let expected_status = engine.status.clone();
-    // Compare-and-set on the status just read. A miss means the row changed
-    // since (typically a concurrent delete) — stop here, BEFORE the
-    // provisioner is touched at all, so a lost race can never re-create the
-    // CR of an engine whose row is already gone (the orphaned-cluster class
-    // this programme closes).
-    if !st
-        .engine_mgmt
-        .update_engine(id, &spec, &expected_status)
-        .await?
-    {
-        return Err(CpError::Conflict(
-            "engine changed while the update was being applied; retry".into(),
-        ));
-    }
-    let engine = match st.engine_mgmt.get_engine(id).await {
-        Ok(Some(e)) => e,
-        Ok(None) => return Err(CpError::NotFound),
-        Err(e) => {
-            restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
-            return Err(e.into());
+    // KI-272: everything from the write on runs in its own task (see
+    // `run_detached`), so a dropped request cannot strand the restore or the
+    // re-materialization.
+    run_detached(async move {
+        // Snapshot what is stored so a failed build or apply can put it back — the
+        // same contract `update_catalog` keeps for a catalog row.
+        let snapshot_spec = engine.spec.clone();
+        let expected_status = engine.status.clone();
+        // Compare-and-set on the status just read. A miss means the row changed
+        // since (typically a concurrent delete) — stop here, BEFORE the
+        // provisioner is touched at all, so a lost race can never re-create the
+        // CR of an engine whose row is already gone (the orphaned-cluster class
+        // this programme closes).
+        if !st
+            .engine_mgmt
+            .update_engine(id, &spec, &expected_status)
+            .await?
+        {
+            return Err(CpError::Conflict(
+                "engine changed while the update was being applied; retry".into(),
+            ));
         }
-    };
-    let built = match build_provision_req(&st, &engine).await {
-        Ok(built) => built,
-        Err(e) => {
-            restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
-            return Err(e);
-        }
-    };
-    if let Err(e) = apply_built(&st, prov.clone(), &engine, &built, ApplyOp::Update).await {
-        restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
-        return Err(match e {
-            ApplyBuiltError::Conflict => apply_conflict(),
-            ApplyBuiltError::CredentialChanged => {
-                CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+        let engine = match st.engine_mgmt.get_engine(id).await {
+            Ok(Some(e)) => e,
+            Ok(None) => return Err(CpError::NotFound),
+            Err(e) => {
+                restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
+                return Err(e.into());
             }
-            ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
-        });
-    }
+        };
+        let built = match build_provision_req(&st, &engine).await {
+            Ok(built) => built,
+            Err(e) => {
+                restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
+                return Err(e);
+            }
+        };
+        if let Err(e) = apply_built(&st, prov.clone(), &engine, &built, ApplyOp::Update).await {
+            restore_engine_spec(&st, id, &snapshot_spec, &expected_status).await;
+            return Err(match e {
+                ApplyBuiltError::Conflict => apply_conflict(),
+                ApplyBuiltError::CredentialChanged => {
+                    CpError::Conflict(RANGER_CREDENTIAL_CHANGED.into())
+                }
+                ApplyBuiltError::Failed(msg) => CpError::ClusterApplyFailed(msg),
+            });
+        }
 
-    // Re-materialize every assigned workspace's connection so a delegation-mode
-    // or TLS change reaches the query path — as `update_starrocks_engine` does,
-    // and unconditionally for the same reason: a retried PUT must heal a
-    // previous partial re-materialization, which a diff against the
-    // already-persisted spec cannot see. Idempotent and cheap when unchanged.
-    rematerialize_or_400(&st, id).await?;
-    let engine = st
-        .engine_mgmt
-        .get_engine(id)
-        .await?
-        .ok_or(CpError::NotFound)?;
-    Ok(Json(EngineDto::from(engine).with_runtime(&st)))
+        // Re-materialize every assigned workspace's connection so a delegation-mode
+        // or TLS change reaches the query path — as `update_starrocks_engine` does,
+        // and unconditionally for the same reason: a retried PUT must heal a
+        // previous partial re-materialization, which a diff against the
+        // already-persisted spec cannot see. Idempotent and cheap when unchanged.
+        rematerialize_or_400(&st, id).await?;
+        let engine = st
+            .engine_mgmt
+            .get_engine(id)
+            .await?
+            .ok_or(CpError::NotFound)?;
+        Ok(Json(EngineDto::from(engine).with_runtime(&st)))
+    })
+    .await
 }
 
 /// StarRocks update path: re-persist the FE/CN spec (image/replicas/resources)
@@ -6812,107 +6835,111 @@ async fn update_starrocks_engine(
     // here, with its spec untouched and nothing to restore.
     let wh = primary_warehouse(&st, &engine).await?;
 
-    // Snapshot for restore on a failed build or apply (see `update_engine`).
-    let snapshot_spec = engine.spec.clone();
-    let expected_status = engine.status.clone();
-    let engine_id = engine.id;
-    // Compare-and-set on the status just read. A miss means the row changed
-    // since (typically a concurrent delete) — stop here, BEFORE the
-    // provisioner is touched at all (see `update_engine`'s matching guard).
-    if !st
-        .engine_mgmt
-        .update_engine(engine_id, &spec, &expected_status)
-        .await?
-    {
-        return Err(CpError::Conflict(
-            "engine changed while the update was being applied; retry".into(),
-        ));
-    }
-    let engine = match st.engine_mgmt.get_engine(engine_id).await {
-        Ok(Some(e)) => e,
-        Ok(None) => return Err(CpError::NotFound),
-        Err(e) => {
-            restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
-            return Err(e.into());
+    // KI-272: see `update_trino_engine`.
+    run_detached(async move {
+        // Snapshot for restore on a failed build or apply (see `update_engine`).
+        let snapshot_spec = engine.spec.clone();
+        let expected_status = engine.status.clone();
+        let engine_id = engine.id;
+        // Compare-and-set on the status just read. A miss means the row changed
+        // since (typically a concurrent delete) — stop here, BEFORE the
+        // provisioner is touched at all (see `update_engine`'s matching guard).
+        if !st
+            .engine_mgmt
+            .update_engine(engine_id, &spec, &expected_status)
+            .await?
+        {
+            return Err(CpError::Conflict(
+                "engine changed while the update was being applied; retry".into(),
+            ));
         }
-    };
-    let (req, bootstrap) = match build_starrocks_provision_req(&st, &engine, &wh).await {
-        Ok(v) => v,
-        Err(e) => {
+        let engine = match st.engine_mgmt.get_engine(engine_id).await {
+            Ok(Some(e)) => e,
+            Ok(None) => return Err(CpError::NotFound),
+            Err(e) => {
+                restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
+                return Err(e.into());
+            }
+        };
+        let (req, bootstrap) = match build_starrocks_provision_req(&st, &engine, &wh).await {
+            Ok(v) => v,
+            Err(e) => {
+                restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
+                return Err(e);
+            }
+        };
+        if let Err(e) = update_starrocks_cluster(&st, prov.as_ref(), &engine, &req).await {
             restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
             return Err(e);
         }
-    };
-    if let Err(e) = update_starrocks_cluster(&st, prov.as_ref(), &engine, &req).await {
-        restore_engine_spec(&st, engine_id, &snapshot_spec, &expected_status).await;
-        return Err(e);
-    }
 
-    // Two follow-up steps, deliberately DECOUPLED so a partial failure converges
-    // on a retry:
-    //
-    //   (a) FE re-bootstrap — gated on `deleg_changed`. Only a delegation/TLS
-    //       change needs the heavier JWT-integration + impersonation-service-user
-    //       DDL re-run; an image/replica-only edit must not pay for it.
-    //   (b) Re-materialize the per-workspace connections — ALWAYS run, never
-    //       gated. It's idempotent + cheap (a no-op when the options are
-    //       unchanged), and running it unconditionally is what lets a retried PUT
-    //       heal a prior partial re-materialization: `deleg_changed` diffs the
-    //       *stored* old spec against the new one, and the new spec is persisted
-    //       above BEFORE this runs, so a retry with the same body would see
-    //       `old == new` (`deleg_changed = false`). Gating (b) on that flag would
-    //       strand any workspaces the first attempt missed on stale creds with no
-    //       recovery path — hence: always re-materialize.
-    //
-    // Eventual-consistency window (mirrors create's posture): (b) updates each
-    // workspace's stored connection options synchronously so they advertise the
-    // new mode immediately, while (a) is spawned detached and runs against the FE
-    // only once it reports Ready (~1-2 min) — so briefly the connections announce
-    // a mode the FE has not finished (re)bootstrapping.
-    let mut rebootstrapped = false;
-    if deleg_changed {
-        // (a) Re-bootstrap, mirroring create's non-blocking post-Ready wire.
-        // It reads its own credentials now (SP3b Task 5: the convergence
-        // resolves each attachment's secret itself), so the primary-credential
-        // lookup this used to do — and the arm that SKIPPED the whole
-        // re-bootstrap when it found none — are gone: there is nothing left for
-        // that arm to protect, and a missing primary credential must not cost
-        // the engine its JWT integration.
-        if let Some(boot) = bootstrap {
-            spawn_starrocks_catalog_wire(
+        // Two follow-up steps, deliberately DECOUPLED so a partial failure converges
+        // on a retry:
+        //
+        //   (a) FE re-bootstrap — gated on `deleg_changed`. Only a delegation/TLS
+        //       change needs the heavier JWT-integration + impersonation-service-user
+        //       DDL re-run; an image/replica-only edit must not pay for it.
+        //   (b) Re-materialize the per-workspace connections — ALWAYS run, never
+        //       gated. It's idempotent + cheap (a no-op when the options are
+        //       unchanged), and running it unconditionally is what lets a retried PUT
+        //       heal a prior partial re-materialization: `deleg_changed` diffs the
+        //       *stored* old spec against the new one, and the new spec is persisted
+        //       above BEFORE this runs, so a retry with the same body would see
+        //       `old == new` (`deleg_changed = false`). Gating (b) on that flag would
+        //       strand any workspaces the first attempt missed on stale creds with no
+        //       recovery path — hence: always re-materialize.
+        //
+        // Eventual-consistency window (mirrors create's posture): (b) updates each
+        // workspace's stored connection options synchronously so they advertise the
+        // new mode immediately, while (a) is spawned detached and runs against the FE
+        // only once it reports Ready (~1-2 min) — so briefly the connections announce
+        // a mode the FE has not finished (re)bootstrapping.
+        let mut rebootstrapped = false;
+        if deleg_changed {
+            // (a) Re-bootstrap, mirroring create's non-blocking post-Ready wire.
+            // It reads its own credentials now (SP3b Task 5: the convergence
+            // resolves each attachment's secret itself), so the primary-credential
+            // lookup this used to do — and the arm that SKIPPED the whole
+            // re-bootstrap when it found none — are gone: there is nothing left for
+            // that arm to protect, and a missing primary credential must not cost
+            // the engine its JWT integration.
+            if let Some(boot) = bootstrap {
+                spawn_starrocks_catalog_wire(
+                    st.clone(),
+                    engine.id,
+                    engine.name.clone(),
+                    engine.namespace.clone(),
+                    Some(boot),
+                );
+                rebootstrapped = true;
+            }
+        }
+        if !rebootstrapped {
+            // An image or config change restarts the FE, and the bootstrap above
+            // (which sets up the query log too) runs only for a delegation change
+            // that leaves delegation on. Not awaited, and its failure is only
+            // logged: the apply succeeded.
+            crate::query_log::spawn_query_log_setup(
                 st.clone(),
                 engine.id,
                 engine.name.clone(),
                 engine.namespace.clone(),
-                Some(boot),
             );
-            rebootstrapped = true;
+            // The same roll loses the users of an FE without persistent
+            // metadata, and this path never reaches `finish_apply`. (A
+            // re-bootstrap runs the user sync itself, at its checkpoint 7.)
+            crate::starrocks_users::spawn_user_sync(
+                st.clone(),
+                engine.id,
+                engine.name.clone(),
+                engine.namespace.clone(),
+            );
         }
-    }
-    if !rebootstrapped {
-        // An image or config change restarts the FE, and the bootstrap above
-        // (which sets up the query log too) runs only for a delegation change
-        // that leaves delegation on. Not awaited, and its failure is only
-        // logged: the apply succeeded.
-        crate::query_log::spawn_query_log_setup(
-            st.clone(),
-            engine.id,
-            engine.name.clone(),
-            engine.namespace.clone(),
-        );
-        // The same roll loses the users of an FE without persistent
-        // metadata, and this path never reaches `finish_apply`. (A
-        // re-bootstrap runs the user sync itself, at its checkpoint 7.)
-        crate::starrocks_users::spawn_user_sync(
-            st.clone(),
-            engine.id,
-            engine.name.clone(),
-            engine.namespace.clone(),
-        );
-    }
-    // (b) Re-materialize the per-workspace connections unconditionally.
-    rematerialize_or_400(&st, engine.id).await?;
-    Ok(Json(EngineDto::from(engine).with_runtime(&st)))
+        // (b) Re-materialize the per-workspace connections unconditionally.
+        rematerialize_or_400(&st, engine.id).await?;
+        Ok(Json(EngineDto::from(engine).with_runtime(&st)))
+    })
+    .await
 }
 
 /// The full `delegation` sub-object of a StarRocks engine spec (today
@@ -9149,7 +9176,9 @@ mod tests {
     #[tokio::test]
     async fn every_provisioned_trino_engine_renders_an_authentication_type() {
         let Some(mut st) = test_state().await else {
-            eprintln!("skipping every_provisioned_trino_engine_renders_an_authentication_type: DATABASE_URL not set");
+            eprintln!(
+                "skipping every_provisioned_trino_engine_renders_an_authentication_type: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_jwks_uri = "https://idp/jwks".into();
@@ -10142,7 +10171,9 @@ mod tests {
     #[tokio::test]
     async fn compensate_failed_create_removes_everything_it_minted() {
         let Some(st) = test_state().await else {
-            eprintln!("skipping compensate_failed_create_removes_everything_it_minted: DATABASE_URL not set");
+            eprintln!(
+                "skipping compensate_failed_create_removes_everything_it_minted: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -10688,7 +10719,9 @@ mod tests {
     #[tokio::test]
     async fn a_jwt_engine_apply_seeds_the_user_baseline_and_no_delegator_grant() {
         let Some(st) = converging_state().await else {
-            eprintln!("skipping a_jwt_engine_apply_seeds_the_user_baseline_and_no_delegator_grant: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_jwt_engine_apply_seeds_the_user_baseline_and_no_delegator_grant: DATABASE_URL not set"
+            );
             return;
         };
         let (engine, sid, profile) = bound_trino_engine(
@@ -10717,7 +10750,9 @@ mod tests {
     #[tokio::test]
     async fn an_impersonate_engine_apply_seeds_the_delegator_grant_and_the_user_baseline() {
         let Some(st) = converging_state().await else {
-            eprintln!("skipping an_impersonate_engine_apply_seeds_the_delegator_grant_and_the_user_baseline: DATABASE_URL not set");
+            eprintln!(
+                "skipping an_impersonate_engine_apply_seeds_the_delegator_grant_and_the_user_baseline: DATABASE_URL not set"
+            );
             return;
         };
         let (engine, sid, profile) = bound_trino_engine(
@@ -10749,7 +10784,9 @@ mod tests {
     #[tokio::test]
     async fn applying_twice_seeds_no_duplicate_baseline_policies() {
         let Some(st) = converging_state().await else {
-            eprintln!("skipping applying_twice_seeds_no_duplicate_baseline_policies: DATABASE_URL not set");
+            eprintln!(
+                "skipping applying_twice_seeds_no_duplicate_baseline_policies: DATABASE_URL not set"
+            );
             return;
         };
         let (engine, sid, profile) = bound_trino_engine(
@@ -10794,7 +10831,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_update_reconverges_the_infra_rows_for_the_restored_spec() {
         let Some(mut st) = converging_state().await else {
-            eprintln!("skipping a_failed_update_reconverges_the_infra_rows_for_the_restored_spec: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_failed_update_reconverges_the_infra_rows_for_the_restored_spec: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(FailingUpdateProvisioner));
@@ -10854,6 +10893,72 @@ mod tests {
         assert_user_baseline(&stored_policies(sid).await, &profile);
     }
 
+    /// KI-272: a PUT whose client goes away while the apply is running must
+    /// still put the stored spec back when that apply fails. The restore ran in
+    /// the request, so a dropped request left the stored spec ahead of the
+    /// engine until the admin saved again.
+    #[tokio::test]
+    async fn a_dropped_update_request_still_restores_the_spec_after_a_failed_apply() {
+        let Some(mut st) = converging_state().await else {
+            eprintln!(
+                "skipping a_dropped_update_request_still_restores_the_spec_after_a_failed_apply: DATABASE_URL not set"
+            );
+            return;
+        };
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        st.engine_provisioner = Some(std::sync::Arc::new(GatedFailingUpdateProvisioner {
+            entered: entered.clone(),
+            release: release.clone(),
+        }));
+        let (engine, _sid, _profile) = bound_trino_engine(
+            &st,
+            serde_json::json!({ "delegationMode": "impersonate", "auth": {} }),
+        )
+        .await;
+        let body = CreateEngineBody {
+            name: engine.name.clone(),
+            warehouse_id: None,
+            catalogs: Vec::new(),
+            image_version: None,
+            coordinator_replicas: 1,
+            worker_replicas: 1,
+            cpu_min: "1".into(),
+            cpu_max: "2".into(),
+            memory: "4Gi".into(),
+            trino_config: Some(serde_json::json!({ "delegationMode": "none", "auth": {} })),
+            authz_service_id: None,
+            kind: "trino".into(),
+            starrocks: None,
+            tls_cert_secret_ref: None,
+        };
+
+        let request = tokio::spawn(update_trino_engine(st.clone(), engine.clone(), body));
+        entered.notified().await;
+        let mid = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        assert_ne!(
+            mid.spec, engine.spec,
+            "the new spec is stored while applying"
+        );
+        // The client goes away: the server drops the request future.
+        request.abort();
+        let _ = request.await;
+        release.notify_one();
+
+        let restored = async {
+            loop {
+                let now = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+                if now.spec == engine.spec {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), restored)
+            .await
+            .expect("the failed apply's restore must run although the request was dropped");
+    }
+
     /// Live finding B-F2 turned on egret's own seed: once a profile holds a
     /// compiled grant (`origin = 'generated'`), `create_policy` refuses every
     /// new policy with "compiled by the SP4a permission model". The baseline
@@ -10862,7 +10967,9 @@ mod tests {
     #[tokio::test]
     async fn a_profile_holding_a_compiled_grant_gets_and_keeps_the_user_baseline() {
         let Some(st) = converging_state().await else {
-            eprintln!("skipping a_profile_holding_a_compiled_grant_gets_and_keeps_the_user_baseline: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_profile_holding_a_compiled_grant_gets_and_keeps_the_user_baseline: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -10965,7 +11072,9 @@ mod tests {
     #[tokio::test]
     async fn the_boot_pass_converges_an_existing_engine_and_skips_open_unbound_and_external_ones() {
         let Some(st) = converging_state().await else {
-            eprintln!("skipping the_boot_pass_converges_an_existing_engine_and_skips_open_unbound_and_external_ones: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_boot_pass_converges_an_existing_engine_and_skips_open_unbound_and_external_ones: DATABASE_URL not set"
+            );
             return;
         };
         let (_jwt, jwt_sid, jwt_profile) = bound_trino_engine(
@@ -11058,7 +11167,9 @@ mod tests {
     #[tokio::test]
     async fn an_engine_switched_impersonate_to_jwt_and_reapplied_loses_the_delegator_grant() {
         let Some(st) = converging_state().await else {
-            eprintln!("skipping an_engine_switched_impersonate_to_jwt_and_reapplied_loses_the_delegator_grant: DATABASE_URL not set");
+            eprintln!(
+                "skipping an_engine_switched_impersonate_to_jwt_and_reapplied_loses_the_delegator_grant: DATABASE_URL not set"
+            );
             return;
         };
         let (engine, sid, profile) = bound_trino_engine(
@@ -11110,7 +11221,9 @@ mod tests {
     #[tokio::test]
     async fn deleting_the_last_qualifying_engine_removes_its_profiles_infra_rows() {
         let Some(st) = converging_state().await else {
-            eprintln!("skipping deleting_the_last_qualifying_engine_removes_its_profiles_infra_rows: DATABASE_URL not set");
+            eprintln!(
+                "skipping deleting_the_last_qualifying_engine_removes_its_profiles_infra_rows: DATABASE_URL not set"
+            );
             return;
         };
         let (engine, sid, profile) = bound_trino_engine(
@@ -11323,6 +11436,38 @@ mod tests {
             Ok(egret_engine_mgmt_api::EngineStatus::default())
         }
         async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Err("injected update failure".into())
+        }
+        async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn restart(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// `update` announces it has started, waits to be released, then fails —
+    /// so a test can drop the request while the apply is in flight.
+    struct GatedFailingUpdateProvisioner {
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+    #[async_trait::async_trait]
+    impl egret_engine_mgmt_api::EngineProvisioningPort for GatedFailingUpdateProvisioner {
+        async fn provision(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _kind: &str,
+            _namespace: &str,
+            _name: &str,
+        ) -> Result<egret_engine_mgmt_api::EngineStatus, String> {
+            Ok(egret_engine_mgmt_api::EngineStatus::default())
+        }
+        async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
+            self.entered.notify_one();
+            self.release.notified().await;
             Err("injected update failure".into())
         }
         async fn delete(&self, _kind: &str, _namespace: &str, _name: &str) -> Result<(), String> {
@@ -11726,7 +11871,9 @@ mod tests {
     #[tokio::test]
     async fn a_starrocks_create_refuses_a_leftover_metadata_claim() {
         let Some(mut st) = test_state().await else {
-            eprintln!("skipping a_starrocks_create_refuses_a_leftover_metadata_claim: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_starrocks_create_refuses_a_leftover_metadata_claim: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
@@ -11782,7 +11929,9 @@ mod tests {
     #[tokio::test]
     async fn a_starrocks_create_without_a_leftover_claim_proceeds() {
         let Some(mut st) = test_state().await else {
-            eprintln!("skipping a_starrocks_create_without_a_leftover_claim_proceeds: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_starrocks_create_without_a_leftover_claim_proceeds: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
@@ -11806,7 +11955,9 @@ mod tests {
     #[tokio::test]
     async fn a_starrocks_create_of_a_live_engines_name_is_the_exists_refusal() {
         let Some(mut st) = test_state().await else {
-            eprintln!("skipping a_starrocks_create_of_a_live_engines_name_is_the_exists_refusal: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_starrocks_create_of_a_live_engines_name_is_the_exists_refusal: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
@@ -12024,7 +12175,9 @@ mod tests {
     #[tokio::test]
     async fn starrocks_create_with_ranger_on_creates_and_binds_its_own_starrocks_profile() {
         let Some((st, _db, wh)) = sr_profile_state(true).await else {
-            eprintln!("skipping starrocks_create_with_ranger_on_creates_and_binds_its_own_starrocks_profile: DATABASE_URL not set");
+            eprintln!(
+                "skipping starrocks_create_with_ranger_on_creates_and_binds_its_own_starrocks_profile: DATABASE_URL not set"
+            );
             return;
         };
         let name = format!("sr-{}", Uuid::new_v4().simple());
@@ -12060,7 +12213,9 @@ mod tests {
     #[tokio::test]
     async fn starrocks_create_with_ranger_off_and_no_id_stays_unbound() {
         let Some((st, _db, wh)) = sr_profile_state(false).await else {
-            eprintln!("skipping starrocks_create_with_ranger_off_and_no_id_stays_unbound: DATABASE_URL not set");
+            eprintln!(
+                "skipping starrocks_create_with_ranger_off_and_no_id_stays_unbound: DATABASE_URL not set"
+            );
             return;
         };
         let name = format!("sr-{}", Uuid::new_v4().simple());
@@ -12101,7 +12256,9 @@ mod tests {
     #[tokio::test]
     async fn starrocks_create_with_an_id_naming_no_profile_is_still_a_400() {
         let Some((st, _db, wh)) = sr_profile_state(true).await else {
-            eprintln!("skipping starrocks_create_with_an_id_naming_no_profile_is_still_a_400: DATABASE_URL not set");
+            eprintln!(
+                "skipping starrocks_create_with_an_id_naming_no_profile_is_still_a_400: DATABASE_URL not set"
+            );
             return;
         };
         let name = format!("sr-{}", Uuid::new_v4().simple());
@@ -12121,7 +12278,9 @@ mod tests {
     #[tokio::test]
     async fn starrocks_create_refuses_a_same_name_trino_profile_with_409_not_starrocks() {
         let Some((st, db, wh)) = sr_profile_state(true).await else {
-            eprintln!("skipping starrocks_create_refuses_a_same_name_trino_profile_with_409_not_starrocks: DATABASE_URL not set");
+            eprintln!(
+                "skipping starrocks_create_refuses_a_same_name_trino_profile_with_409_not_starrocks: DATABASE_URL not set"
+            );
             return;
         };
         let name = format!("sr-{}", Uuid::new_v4().simple());
@@ -12140,7 +12299,9 @@ mod tests {
     #[tokio::test]
     async fn starrocks_create_refuses_a_same_name_profile_bound_to_another_engine() {
         let Some((st, db, wh)) = sr_profile_state(true).await else {
-            eprintln!("skipping starrocks_create_refuses_a_same_name_profile_bound_to_another_engine: DATABASE_URL not set");
+            eprintln!(
+                "skipping starrocks_create_refuses_a_same_name_profile_bound_to_another_engine: DATABASE_URL not set"
+            );
             return;
         };
         let name = format!("sr-{}", Uuid::new_v4().simple());
@@ -12174,7 +12335,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_starrocks_create_deletes_the_profile_it_made() {
         let Some((mut st, _db, wh)) = sr_profile_state(true).await else {
-            eprintln!("skipping a_failed_starrocks_create_deletes_the_profile_it_made: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_failed_starrocks_create_deletes_the_profile_it_made: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(FailingProvisionProvisioner));
@@ -12300,7 +12463,9 @@ mod tests {
     #[tokio::test]
     async fn starrocks_create_naming_a_profile_bound_elsewhere_is_a_409() {
         let Some((st, db, wh)) = sr_profile_state(true).await else {
-            eprintln!("skipping starrocks_create_naming_a_profile_bound_elsewhere_is_a_409: DATABASE_URL not set");
+            eprintln!(
+                "skipping starrocks_create_naming_a_profile_bound_elsewhere_is_a_409: DATABASE_URL not set"
+            );
             return;
         };
         let name = format!("sr-{}", Uuid::new_v4().simple());
@@ -12410,7 +12575,9 @@ mod tests {
     #[tokio::test]
     async fn not_governed_is_an_unbound_starrocks_engine_while_ranger_is_on() {
         let Some(mut st) = test_state().await else {
-            eprintln!("skipping not_governed_is_an_unbound_starrocks_engine_while_ranger_is_on: DATABASE_URL not set");
+            eprintln!(
+                "skipping not_governed_is_an_unbound_starrocks_engine_while_ranger_is_on: DATABASE_URL not set"
+            );
             return;
         };
         let flag = |st: &CpState, kind: &str, origin: &str, bound: Option<i64>| {
@@ -12512,7 +12679,9 @@ mod tests {
     #[tokio::test]
     async fn sr_create_omitted_degrades_to_impersonate_without_jwks() {
         let Some(mut st) = test_state().await else {
-            eprintln!("skipping sr_create_omitted_degrades_to_impersonate_without_jwks: DATABASE_URL not set");
+            eprintln!(
+                "skipping sr_create_omitted_degrades_to_impersonate_without_jwks: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
@@ -12534,7 +12703,9 @@ mod tests {
     #[tokio::test]
     async fn sr_create_omitted_degrades_to_impersonate_on_pre_3_5_image() {
         let Some(mut st) = test_state().await else {
-            eprintln!("skipping sr_create_omitted_degrades_to_impersonate_on_pre_3_5_image: DATABASE_URL not set");
+            eprintln!(
+                "skipping sr_create_omitted_degrades_to_impersonate_on_pre_3_5_image: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
@@ -12734,7 +12905,9 @@ mod tests {
     #[tokio::test]
     async fn trino_create_omitted_degrades_to_impersonate_without_jwks() {
         let Some(mut st) = test_state().await else {
-            eprintln!("skipping trino_create_omitted_degrades_to_impersonate_without_jwks: DATABASE_URL not set");
+            eprintln!(
+                "skipping trino_create_omitted_degrades_to_impersonate_without_jwks: DATABASE_URL not set"
+            );
             return;
         };
         st.engine_provisioner = Some(std::sync::Arc::new(NoopProvisioner));
@@ -13554,7 +13727,9 @@ mod tests {
     #[tokio::test]
     async fn the_bootstrap_converges_every_attachment_in_name_order() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_bootstrap_converges_every_attachment_in_name_order: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_bootstrap_converges_every_attachment_in_name_order: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -13692,7 +13867,9 @@ mod tests {
     #[tokio::test]
     async fn the_apply_path_scrubs_the_fe_root_password_out_of_apply_error() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_apply_path_scrubs_the_fe_root_password_out_of_apply_error: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_apply_path_scrubs_the_fe_root_password_out_of_apply_error: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -13802,7 +13979,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_compensating_drop_scrubs_the_fe_root_password_out_of_its_log() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_failed_compensating_drop_scrubs_the_fe_root_password_out_of_its_log: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_failed_compensating_drop_scrubs_the_fe_root_password_out_of_its_log: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -13889,7 +14068,9 @@ mod tests {
     #[tokio::test]
     async fn deleting_the_engine_mid_loop_stops_the_bootstrap_and_leaves_the_rest_alone() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping deleting_the_engine_mid_loop_stops_the_bootstrap_and_leaves_the_rest_alone: DATABASE_URL not set");
+            eprintln!(
+                "skipping deleting_the_engine_mid_loop_stops_the_bootstrap_and_leaves_the_rest_alone: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -13960,7 +14141,9 @@ mod tests {
     #[tokio::test]
     async fn a_catalog_whose_row_vanished_mid_bootstrap_is_dropped_again() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_catalog_whose_row_vanished_mid_bootstrap_is_dropped_again: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_catalog_whose_row_vanished_mid_bootstrap_is_dropped_again: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -14198,7 +14381,9 @@ mod tests {
     #[tokio::test]
     async fn the_root_login_checkpoint_stops_a_bootstrap_whose_engine_is_being_deleted() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_root_login_checkpoint_stops_a_bootstrap_whose_engine_is_being_deleted: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_root_login_checkpoint_stops_a_bootstrap_whose_engine_is_being_deleted: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -14253,7 +14438,9 @@ mod tests {
     #[tokio::test]
     async fn the_delegation_checkpoint_stops_before_the_security_integration() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_delegation_checkpoint_stops_before_the_security_integration: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_delegation_checkpoint_stops_before_the_security_integration: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -14389,7 +14576,9 @@ mod tests {
     #[tokio::test]
     async fn the_remaining_delegation_statements_stop_at_their_own_checkpoint() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_remaining_delegation_statements_stop_at_their_own_checkpoint: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_remaining_delegation_statements_stop_at_their_own_checkpoint: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -14465,7 +14654,9 @@ mod tests {
     #[tokio::test]
     async fn the_delegation_bootstrap_still_creates_then_repairs() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_delegation_bootstrap_still_creates_then_repairs: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_delegation_bootstrap_still_creates_then_repairs: DATABASE_URL not set"
+            );
             return;
         };
         let dsn = egret_test_db::url().await.unwrap();
@@ -15960,7 +16151,9 @@ mod tests {
     #[tokio::test]
     async fn the_setup_fails_after_the_bound_when_no_node_is_ever_alive() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_setup_fails_after_the_bound_when_no_node_is_ever_alive: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_setup_fails_after_the_bound_when_no_node_is_ever_alive: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -15996,7 +16189,9 @@ mod tests {
     #[tokio::test]
     async fn an_engine_deleted_during_the_node_wait_gets_no_audit_ddl() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping an_engine_deleted_during_the_node_wait_gets_no_audit_ddl: DATABASE_URL not set");
+            eprintln!(
+                "skipping an_engine_deleted_during_the_node_wait_gets_no_audit_ddl: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -16283,7 +16478,9 @@ mod tests {
     #[tokio::test]
     async fn the_sync_drops_who_left_and_never_touches_a_foreign_user() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_sync_drops_who_left_and_never_touches_a_foreign_user: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_sync_drops_who_left_and_never_touches_a_foreign_user: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -16333,7 +16530,9 @@ mod tests {
     #[tokio::test]
     async fn a_user_that_appears_before_the_create_is_not_adopted() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_user_that_appears_before_the_create_is_not_adopted: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_user_that_appears_before_the_create_is_not_adopted: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -16445,7 +16644,9 @@ mod tests {
     async fn a_failed_username_mint_fails_the_sync_and_drops_nothing() {
         use futures_util::FutureExt as _;
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_failed_username_mint_fails_the_sync_and_drops_nothing: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_failed_username_mint_fails_the_sync_and_drops_nothing: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -16671,7 +16872,9 @@ mod tests {
     #[tokio::test]
     async fn an_engine_without_delegation_or_records_makes_no_fe_call() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping an_engine_without_delegation_or_records_makes_no_fe_call: DATABASE_URL not set");
+            eprintln!(
+                "skipping an_engine_without_delegation_or_records_makes_no_fe_call: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -16773,7 +16976,9 @@ mod tests {
     async fn platform_admins_are_synced_where_the_engine_serves_a_workspace() {
         use futures_util::FutureExt as _;
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping platform_admins_are_synced_where_the_engine_serves_a_workspace: DATABASE_URL not set");
+            eprintln!(
+                "skipping platform_admins_are_synced_where_the_engine_serves_a_workspace: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -16990,7 +17195,9 @@ mod tests {
     #[tokio::test]
     async fn the_bootstrap_syncs_the_members_after_the_delegation_statements() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_bootstrap_syncs_the_members_after_the_delegation_statements: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_bootstrap_syncs_the_members_after_the_delegation_statements: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -17042,7 +17249,9 @@ mod tests {
     #[tokio::test]
     async fn a_deleted_engine_gets_no_user_sync_from_the_bootstrap() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_deleted_engine_gets_no_user_sync_from_the_bootstrap: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_deleted_engine_gets_no_user_sync_from_the_bootstrap: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -17089,7 +17298,9 @@ mod tests {
     #[tokio::test]
     async fn a_renamed_engine_gets_no_user_sync_from_the_bootstrap() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_renamed_engine_gets_no_user_sync_from_the_bootstrap: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_renamed_engine_gets_no_user_sync_from_the_bootstrap: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -17224,7 +17435,9 @@ mod tests {
     #[tokio::test]
     async fn an_unbound_engine_trades_all_users_for_per_user_grants() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping an_unbound_engine_trades_all_users_for_per_user_grants: DATABASE_URL not set");
+            eprintln!(
+                "skipping an_unbound_engine_trades_all_users_for_per_user_grants: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -17307,7 +17520,9 @@ mod tests {
     #[tokio::test]
     async fn a_bound_engine_gets_no_native_impersonation_statement() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_bound_engine_gets_no_native_impersonation_statement: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_bound_engine_gets_no_native_impersonation_statement: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -17360,7 +17575,9 @@ mod tests {
     #[tokio::test]
     async fn a_bound_engine_revokes_a_left_over_grant_before_the_drop() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_bound_engine_revokes_a_left_over_grant_before_the_drop: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_bound_engine_revokes_a_left_over_grant_before_the_drop: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -17677,7 +17894,9 @@ mod tests {
     #[tokio::test]
     async fn a_user_whose_grant_cannot_be_revoked_is_not_dropped() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_user_whose_grant_cannot_be_revoked_is_not_dropped: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_user_whose_grant_cannot_be_revoked_is_not_dropped: DATABASE_URL not set"
+            );
             return;
         };
         let _pass = USER_SYNC_PASS.read().await;
@@ -17933,7 +18152,9 @@ mod tests {
     #[tokio::test]
     async fn the_query_log_setup_runs_its_statements_then_show_plugins_then_install() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_query_log_setup_runs_its_statements_then_show_plugins_then_install: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_query_log_setup_runs_its_statements_then_show_plugins_then_install: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18035,7 +18256,9 @@ mod tests {
     #[tokio::test]
     async fn a_listed_audit_loader_in_error_on_an_official_image_is_not_shipped() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_listed_audit_loader_in_error_on_an_official_image_is_not_shipped: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_listed_audit_loader_in_error_on_an_official_image_is_not_shipped: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18083,7 +18306,9 @@ mod tests {
     #[tokio::test]
     async fn an_image_without_the_plugin_gets_the_table_and_user_but_no_install() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping an_image_without_the_plugin_gets_the_table_and_user_but_no_install: DATABASE_URL not set");
+            eprintln!(
+                "skipping an_image_without_the_plugin_gets_the_table_and_user_but_no_install: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18113,7 +18338,9 @@ mod tests {
     #[tokio::test]
     async fn an_fe_error_is_failed_with_the_loader_password_scrubbed() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping an_fe_error_is_failed_with_the_loader_password_scrubbed: DATABASE_URL not set");
+            eprintln!(
+                "skipping an_fe_error_is_failed_with_the_loader_password_scrubbed: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18173,7 +18400,9 @@ mod tests {
     #[tokio::test]
     async fn a_missing_plugin_zip_is_failed_with_the_fes_diagnosis() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_missing_plugin_zip_is_failed_with_the_fes_diagnosis: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_missing_plugin_zip_is_failed_with_the_fes_diagnosis: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18199,7 +18428,9 @@ mod tests {
     #[tokio::test]
     async fn a_taken_loader_name_fails_before_anything_is_created() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_taken_loader_name_fails_before_anything_is_created: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_taken_loader_name_fails_before_anything_is_created: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18276,7 +18507,9 @@ mod tests {
     #[tokio::test]
     async fn the_wait_for_events_sends_a_probe_and_reads_it_back_only_when_asked() {
         let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_wait_for_events_sends_a_probe_and_reads_it_back_only_when_asked: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_wait_for_events_sends_a_probe_and_reads_it_back_only_when_asked: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18326,7 +18559,9 @@ mod tests {
     #[tokio::test]
     async fn the_bootstrap_stops_before_the_query_log_after_the_delegation_statements() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_bootstrap_stops_before_the_query_log_after_the_delegation_statements: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_bootstrap_stops_before_the_query_log_after_the_delegation_statements: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18393,7 +18628,9 @@ mod tests {
     #[tokio::test]
     async fn the_delegation_statements_are_sent_while_no_node_is_alive() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_delegation_statements_are_sent_while_no_node_is_alive: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_delegation_statements_are_sent_while_no_node_is_alive: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18466,7 +18703,9 @@ mod tests {
     #[tokio::test]
     async fn the_bootstrap_stops_before_the_query_log_when_the_engine_is_deleted() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_bootstrap_stops_before_the_query_log_when_the_engine_is_deleted: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_bootstrap_stops_before_the_query_log_when_the_engine_is_deleted: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18512,7 +18751,9 @@ mod tests {
     #[tokio::test]
     async fn the_bootstrap_sets_the_query_log_up_after_the_catalogs() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_bootstrap_sets_the_query_log_up_after_the_catalogs: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_bootstrap_sets_the_query_log_up_after_the_catalogs: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18606,7 +18847,9 @@ mod tests {
     #[tokio::test]
     async fn the_bootstrap_gives_up_on_the_query_log_after_five_tries() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_bootstrap_gives_up_on_the_query_log_after_five_tries: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_bootstrap_gives_up_on_the_query_log_after_five_tries: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18681,7 +18924,9 @@ mod tests {
     #[tokio::test]
     async fn the_boot_pass_skips_deleting_failed_external_and_trino_engines() {
         let Some((st, _fake, _prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping the_boot_pass_skips_deleting_failed_external_and_trino_engines: DATABASE_URL not set");
+            eprintln!(
+                "skipping the_boot_pass_skips_deleting_failed_external_and_trino_engines: DATABASE_URL not set"
+            );
             return;
         };
         let live = seed_sr_engine(&st).await;
@@ -18716,7 +18961,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_query_log_setup_is_tried_again_until_it_is_ready() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_failed_query_log_setup_is_tried_again_until_it_is_ready: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_failed_query_log_setup_is_tried_again_until_it_is_ready: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18765,7 +19012,9 @@ mod tests {
     #[tokio::test]
     async fn a_query_log_setup_that_keeps_failing_gives_up_after_five_tries() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping a_query_log_setup_that_keeps_failing_gives_up_after_five_tries: DATABASE_URL not set");
+            eprintln!(
+                "skipping a_query_log_setup_that_keeps_failing_gives_up_after_five_tries: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
@@ -18798,7 +19047,9 @@ mod tests {
     #[tokio::test]
     async fn query_log_retries_stop_when_the_engine_is_being_deleted() {
         let Some((st, fake, prov)) = test_state_with_fake_fe().await else {
-            eprintln!("skipping query_log_retries_stop_when_the_engine_is_being_deleted: DATABASE_URL not set");
+            eprintln!(
+                "skipping query_log_retries_stop_when_the_engine_is_being_deleted: DATABASE_URL not set"
+            );
             return;
         };
         let _guard = QUERY_LOG_USERNAME.lock().await;
