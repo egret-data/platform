@@ -9,6 +9,7 @@ import {
   getStorage,
 } from "@/api/controlPlane";
 import { ApiError } from "@/api/client";
+import { useAuth } from "@/auth/useAuth";
 import { Badge } from "@/components/ui/badge";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 
@@ -25,6 +26,8 @@ function fmtSize(n: number): string {
  * up one folder). Rendered inside the storage detail's Browse tab.
  */
 export function StorageObjectBrowser({ storageId }: { storageId: string }) {
+  const { me } = useAuth();
+  const canDownload = me?.platform_roles.includes("platform_admin") ?? false;
   const [sp, setSp] = useSearchParams();
   const prefix = sp.get("prefix") ?? "";
   const setPrefix = (next: string) =>
@@ -108,15 +111,28 @@ export function StorageObjectBrowser({ storageId }: { storageId: string }) {
               <File className="h-4 w-4 shrink-0 text-muted-foreground" />
               <span className="flex-1 truncate font-mono text-xs">{o.key.slice(prefix.length)}</span>
               <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{fmtSize(o.size)}</span>
-              <a
-                href={`/api/control-plane/storage/${storageId}/download?key=${encodeURIComponent(o.key)}`}
-                download
-                className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:text-primary"
-                aria-label={`Download ${o.key}`}
-                title="Download"
-              >
-                <Download className="h-4 w-4" />
-              </a>
+              {canDownload ? (
+                <a
+                  href={`/api/control-plane/storage/${storageId}/download?key=${encodeURIComponent(o.key)}`}
+                  download
+                  className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:text-primary"
+                  aria-label={`Download ${o.key}`}
+                  title="Download"
+                >
+                  <Download className="h-4 w-4" />
+                </a>
+              ) : (
+                // KI-271: the server refuses table data and metadata files to anyone but a
+                // platform admin (403), which the browser shows as a silently cancelled download.
+                <span
+                  role="img"
+                  aria-label={`Download ${o.key} unavailable: only a platform admin can download table data files`}
+                  title="Only a platform admin can download table data files"
+                  className="shrink-0 cursor-not-allowed rounded p-1 text-muted-foreground/40"
+                >
+                  <Download className="h-4 w-4" />
+                </span>
+              )}
             </div>
           ))}
           {hidden.length > 0 && (

@@ -5,17 +5,25 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { StorageObjectBrowser } from "@/routes/control-plane/StorageBrowser";
 import * as api from "@/api/controlPlane";
+import { AuthContext } from "@/auth/useAuth";
+import type { Me } from "@/api/hooks";
 
 vi.mock("@/api/controlPlane");
 
 const CONN = { id: "c1", name: "sandbox-lake", bucket: "warehouse", key_prefix: "sandbox/" } as api.Storage;
 
-function renderBrowser() {
+function meWith(platform_roles: string[]): Me {
+  return { platform_roles, permissions: [] } as unknown as Me;
+}
+
+function renderBrowser(roles: string[] = ["platform_admin"]) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
-        <StorageObjectBrowser storageId="c1" />
+        <AuthContext.Provider value={{ me: meWith(roles), isLoading: false }}>
+          <StorageObjectBrowser storageId="c1" />
+        </AuthContext.Provider>
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -53,5 +61,18 @@ describe("StorageObjectBrowser", () => {
       /apps, query-results are not shown: .*Only a platform admin can open them\./,
     );
     expect(screen.queryByRole("button", { name: /query-results/ })).not.toBeInTheDocument();
+  });
+
+  test("a non-platform-admin gets no Download link, with the reason (KI-271)", async () => {
+    vi.mocked(api.browseStorageObjects).mockResolvedValue({
+      root: "sandbox/",
+      folders: [],
+      objects: [{ key: "s.csv", size: 12, lastModified: null }],
+      hiddenSystemFolders: [],
+    });
+    renderBrowser(["data_steward"]);
+    expect(await screen.findByText("s.csv")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Download/ })).toBeNull();
+    expect(screen.getByTitle(/only a platform admin can download/i)).toBeInTheDocument();
   });
 });

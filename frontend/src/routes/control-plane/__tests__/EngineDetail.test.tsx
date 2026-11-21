@@ -289,9 +289,19 @@ describe("EngineDetail — an engine Docker runs", () => {
     expect(screen.queryByText(/analytics-trino-coordinator/)).not.toBeInTheDocument();
   });
 
+  test("Docker shows no Ingress exposure section, which it refuses (KI-264)", async () => {
+    mockRuntime("docker", JWT_ONLY);
+    renderDetail(`/control-plane/engines/${ENGINE.id}?tab=settings&section=security`);
+    await screen.findByRole("heading", { name: "analytics-trino" });
+    await screen.findByText(/delegation/i, undefined, { timeout: 3000 }).catch(() => undefined);
+    expect(screen.queryByRole("switch", { name: /expose via ingress/i })).not.toBeInTheDocument();
+    expect(screen.queryByText("Ingress exposure")).not.toBeInTheDocument();
+  });
+
+  // Ingress is a Kubernetes-only control (KI-264), so the ingress flows run on Kubernetes.
   test("an ingress with no host is refused beside the field, and Save waits for one (KI-200)", async () => {
     const user = userEvent.setup();
-    mockRuntime("docker", JWT_ONLY);
+    mockRuntime("kubernetes", JWT_ONLY);
     renderDetail(`/control-plane/engines/${ENGINE.id}?tab=settings&section=security`);
     await screen.findByRole("heading", { name: "analytics-trino" });
 
@@ -308,7 +318,7 @@ describe("EngineDetail — an engine Docker runs", () => {
   test("Save changes lists only the real changes and saves only once confirmed (KI-198)", async () => {
     const user = userEvent.setup();
     vi.mocked(api.updateEngine).mockResolvedValue(ENGINE);
-    mockRuntime("docker", JWT_ONLY);
+    mockRuntime("kubernetes", JWT_ONLY);
     renderDetail(`/control-plane/engines/${ENGINE.id}?tab=settings&section=security`);
     await screen.findByRole("heading", { name: "analytics-trino" });
 
@@ -321,7 +331,7 @@ describe("EngineDetail — an engine Docker runs", () => {
     expect(dialog).toHaveTextContent("1 field will change.");
     expect(dialog).toHaveTextContent(/b6\.example\.com/);
     expect(dialog).not.toHaveTextContent(/passwordUsers/);
-    expect(dialog).toHaveTextContent(/recreates the engine's containers/i);
+    expect(dialog).toHaveTextContent(/re-provisions \(rolls\) the engine pods/i);
     expect(api.updateEngine).not.toHaveBeenCalled();
 
     await user.click(within(dialog).getByRole("button", { name: "Cancel" }));

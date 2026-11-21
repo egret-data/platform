@@ -51,7 +51,13 @@ function engineWithStoredMode(
  * and render `EngineSecurity` against it, so the `storedDelegationMode` ratchet
  * is exercised end-to-end from the stored spec.
  */
-function Harness({ engine }: { engine: Omit<Engine, "status"> }) {
+function Harness({
+  engine,
+  showIngress,
+}: {
+  engine: Omit<Engine, "status">;
+  showIngress?: boolean;
+}) {
   const cfg = useEngineConfigForm(engine);
   return (
     <EngineSecurity
@@ -78,17 +84,18 @@ function Harness({ engine }: { engine: Omit<Engine, "status"> }) {
       setIngressTlsCertSecretRef={cfg.setIngressTlsCertSecretRef}
       ingressAnnotations={cfg.ingressAnnotations}
       setIngressAnnotations={cfg.setIngressAnnotations}
+      showIngress={showIngress}
     />
   );
 }
 
-function renderSecurity(engine: Omit<Engine, "status">) {
+function renderSecurity(engine: Omit<Engine, "status">, showIngress?: boolean) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
         <TooltipProvider>
-          <Harness engine={engine} />
+          <Harness engine={engine} showIngress={showIngress} />
         </TooltipProvider>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -139,5 +146,18 @@ describe("EngineSecurity — Trino delegation None ratchet", () => {
     expect(
       screen.getByRole("radio", { name: /None \(open engine\)/ }),
     ).not.toBeDisabled();
+  });
+});
+
+describe("EngineSecurity — Ingress exposure (KI-264)", () => {
+  test("shown by default (Kubernetes)", () => {
+    renderSecurity(engineWithStoredMode(undefined));
+    expect(screen.getByText("Ingress exposure")).toBeInTheDocument();
+  });
+
+  test("hidden when the engine runs on Docker, which refuses any ingress", () => {
+    renderSecurity(engineWithStoredMode(undefined), false);
+    expect(screen.queryByText("Ingress exposure")).not.toBeInTheDocument();
+    expect(screen.queryByText("Expose via ingress")).not.toBeInTheDocument();
   });
 });

@@ -399,7 +399,7 @@ export default function Apps() {
           )}
         </>
       }
-      action={canCreate ? <Button onClick={() => setCreating(true)}>+ App</Button> : undefined}
+      action={!showTrash && canCreate ? <Button onClick={() => setCreating(true)}>+ App</Button> : undefined}
     >
       <ListStates
         isLoading={isLoading}
@@ -420,7 +420,7 @@ export default function Apps() {
                   ? "Create one to build a dashboard in code that queries your data as each viewer."
                   : "Apps shared with you will appear here."
               }
-              action={canCreate ? <Button onClick={() => setCreating(true)}>Create your first app</Button> : undefined}
+              action={!showTrash && canCreate ? <Button onClick={() => setCreating(true)}>Create your first app</Button> : undefined}
             />
           )
         }

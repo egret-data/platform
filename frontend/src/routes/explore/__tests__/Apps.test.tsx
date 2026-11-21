@@ -379,10 +379,13 @@ describe("Apps list — trash view", () => {
     renderApps();
     expect(useAppsMock).toHaveBeenLastCalledWith("acme", { trashed: false });
     expect(screen.getByText("Live one")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "+ App" })).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Trash" }));
 
     expect(useAppsMock).toHaveBeenLastCalledWith("acme", { trashed: true });
+    // KI-300: like Charts / Dashboards / Alerts, the bin offers no create button.
+    expect(screen.queryByRole("button", { name: "+ App" })).toBeNull();
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Trash");
     expect(screen.getByText("Binned one")).toBeTruthy();
     expect(screen.queryByText("Live one")).toBeNull();

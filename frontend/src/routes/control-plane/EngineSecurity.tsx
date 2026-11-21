@@ -59,6 +59,8 @@ export function EngineSecurity(props: {
   setIngressTlsCertSecretRef: (v: string) => void;
   ingressAnnotations: Kv[];
   setIngressAnnotations: React.Dispatch<React.SetStateAction<Kv[]>>;
+  /** `false` on Docker, which refuses any ingress: the section is not shown (KI-264). Default `true`. */
+  showIngress?: boolean;
 }) {
   const {
     passwordUsers,
@@ -86,6 +88,7 @@ export function EngineSecurity(props: {
     ingressAnnotations,
     setIngressAnnotations,
   } = props;
+  const showIngress = props.showIngress ?? true;
 
   const secrets = useQuery<Secret[], ApiError>({
     queryKey: ["cp", "secrets"],
@@ -342,120 +345,122 @@ export function EngineSecurity(props: {
       </ConfigSection>
 
       {/* Ingress */}
-      <ConfigSection
-        title="Ingress exposure"
-        description="Create a Kubernetes Ingress for the coordinator. TLS terminates at the ingress."
-        docsUrl="https://kubernetes.io/docs/concepts/services-networking/ingress/"
-      >
-        <ConfigTable>
-          <ConfigTableRow
-            label="Expose via ingress"
-            fieldKey="ingressEnabled"
-            htmlFor="ced-ing-enabled"
-          >
-            <Switch
-              id="ced-ing-enabled"
-              checked={ingressEnabled}
-              onCheckedChange={setIngressEnabled}
-            />
-          </ConfigTableRow>
-          {ingressEnabled && (
-            <>
-              <ConfigTableRow
-                label="Host"
-                fieldKey="ingress.host"
-                htmlFor="ced-ing-host"
-              >
-                <Input
-                  id="ced-ing-host"
-                  className="w-full"
-                  value={ingressHost}
-                  placeholder="trino-demo.example.com"
-                  onChange={(e) => setIngressHost(e.target.value)}
-                  aria-invalid={props.ingressHostMissing || undefined}
-                  aria-describedby={
-                    props.ingressHostMissing ? "ced-ing-host-error" : undefined
-                  }
-                />
-                {props.ingressHostMissing && (
-                  <p
-                    id="ced-ing-host-error"
-                    role="alert"
-                    className="mt-1 text-xs text-destructive"
-                  >
-                    Enter the host the ingress serves, or turn off Expose via
-                    ingress.
-                  </p>
-                )}
-              </ConfigTableRow>
-              <ConfigTableRow
-                label="Ingress class"
-                fieldKey="ingress.className"
-                htmlFor="ced-ing-class"
-              >
-                <Input
-                  id="ced-ing-class"
-                  className="w-full"
-                  value={ingressClassName}
-                  placeholder="nginx"
-                  onChange={(e) => setIngressClassName(e.target.value)}
-                />
-              </ConfigTableRow>
-              <ConfigTableRow
-                label="Ingress TLS cert"
-                fieldKey="ingress.tlsCertSecretRef"
-                htmlFor="es-ingress-tls-cert"
-                details="Pick a kubernetes.io/tls secret to back the ingress cert, or keep the default."
-              >
-                <Select
-                  value={ingressTlsCertSecretRef || "__none__"}
-                  onValueChange={(v) =>
-                    setIngressTlsCertSecretRef(v === "__none__" ? "" : v)
-                  }
-                >
-                  <SelectTrigger id="es-ingress-tls-cert" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__none__">None (default)</SelectItem>
-                    {pickable
-                      .filter((s) => s.type === "kubernetes.io/tls")
-                      .map((s) => (
-                        <SelectItem key={s.id} value={s.id}>
-                          {s.name}
-                        </SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
-              </ConfigTableRow>
-            </>
-          )}
-        </ConfigTable>
-        {ingressEnabled && (
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <Label>Annotations</Label>
-              <p className="text-xs text-muted-foreground">
-                Extra ingress annotations (e.g. controller tuning).
-              </p>
-              <KeyValueEditor
-                rows={ingressAnnotations}
-                onChange={setIngressAnnotations}
-                keyPlaceholder="nginx.ingress.kubernetes.io/proxy-read-timeout"
-                valuePlaceholder="300"
-                addLabel="Add annotation"
+      {showIngress && (
+        <ConfigSection
+          title="Ingress exposure"
+          description="Create a Kubernetes Ingress for the coordinator. TLS terminates at the ingress."
+          docsUrl="https://kubernetes.io/docs/concepts/services-networking/ingress/"
+        >
+          <ConfigTable>
+            <ConfigTableRow
+              label="Expose via ingress"
+              fieldKey="ingressEnabled"
+              htmlFor="ced-ing-enabled"
+            >
+              <Switch
+                id="ced-ing-enabled"
+                checked={ingressEnabled}
+                onCheckedChange={setIngressEnabled}
               />
-            </div>
-            {ingressHost.trim() && (
-              <p className="text-xs text-muted-foreground">
-                Clients connect to{" "}
-                <code>https://{ingressHost.trim()}</code> with their
-                username + password (or an egret JWT).
-              </p>
+            </ConfigTableRow>
+            {ingressEnabled && (
+              <>
+                <ConfigTableRow
+                  label="Host"
+                  fieldKey="ingress.host"
+                  htmlFor="ced-ing-host"
+                >
+                  <Input
+                    id="ced-ing-host"
+                    className="w-full"
+                    value={ingressHost}
+                    placeholder="trino-demo.example.com"
+                    onChange={(e) => setIngressHost(e.target.value)}
+                    aria-invalid={props.ingressHostMissing || undefined}
+                    aria-describedby={
+                      props.ingressHostMissing ? "ced-ing-host-error" : undefined
+                    }
+                  />
+                  {props.ingressHostMissing && (
+                    <p
+                      id="ced-ing-host-error"
+                      role="alert"
+                      className="mt-1 text-xs text-destructive"
+                    >
+                      Enter the host the ingress serves, or turn off Expose via
+                      ingress.
+                    </p>
+                  )}
+                </ConfigTableRow>
+                <ConfigTableRow
+                  label="Ingress class"
+                  fieldKey="ingress.className"
+                  htmlFor="ced-ing-class"
+                >
+                  <Input
+                    id="ced-ing-class"
+                    className="w-full"
+                    value={ingressClassName}
+                    placeholder="nginx"
+                    onChange={(e) => setIngressClassName(e.target.value)}
+                  />
+                </ConfigTableRow>
+                <ConfigTableRow
+                  label="Ingress TLS cert"
+                  fieldKey="ingress.tlsCertSecretRef"
+                  htmlFor="es-ingress-tls-cert"
+                  details="Pick a kubernetes.io/tls secret to back the ingress cert, or keep the default."
+                >
+                  <Select
+                    value={ingressTlsCertSecretRef || "__none__"}
+                    onValueChange={(v) =>
+                      setIngressTlsCertSecretRef(v === "__none__" ? "" : v)
+                    }
+                  >
+                    <SelectTrigger id="es-ingress-tls-cert" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">None (default)</SelectItem>
+                      {pickable
+                        .filter((s) => s.type === "kubernetes.io/tls")
+                        .map((s) => (
+                          <SelectItem key={s.id} value={s.id}>
+                            {s.name}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </ConfigTableRow>
+              </>
             )}
-          </div>
-        )}
-      </ConfigSection>
+          </ConfigTable>
+          {ingressEnabled && (
+            <div className="space-y-4">
+              <div className="space-y-1.5">
+                <Label>Annotations</Label>
+                <p className="text-xs text-muted-foreground">
+                  Extra ingress annotations (e.g. controller tuning).
+                </p>
+                <KeyValueEditor
+                  rows={ingressAnnotations}
+                  onChange={setIngressAnnotations}
+                  keyPlaceholder="nginx.ingress.kubernetes.io/proxy-read-timeout"
+                  valuePlaceholder="300"
+                  addLabel="Add annotation"
+                />
+              </div>
+              {ingressHost.trim() && (
+                <p className="text-xs text-muted-foreground">
+                  Clients connect to{" "}
+                  <code>https://{ingressHost.trim()}</code> with their
+                  username + password (or an egret JWT).
+                </p>
+              )}
+            </div>
+          )}
+        </ConfigSection>
+      )}
     </div>
   );
 }
