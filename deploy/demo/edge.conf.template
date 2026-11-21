@@ -56,7 +56,7 @@ server {
     # Resolved per request: egret is not up yet when the edge starts.
     location / {
         resolver 127.0.0.11 valid=5s;
-        set $apps_upstream http://egret:8081;
+        set $apps_upstream http://egret:8083;
         proxy_pass $apps_upstream;
     }
 }

@@ -213,6 +213,11 @@ export type workspaceMembersApproveAccessRequestResponse200 = {
   status: 200
 }
 
+export type workspaceMembersApproveAccessRequestResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type workspaceMembersApproveAccessRequestResponse401 = {
   data: ErrorBody
   status: 401
@@ -241,7 +246,7 @@ export type workspaceMembersApproveAccessRequestResponse500 = {
 export type workspaceMembersApproveAccessRequestResponseSuccess = (workspaceMembersApproveAccessRequestResponse200) & {
   headers: Headers;
 };
-export type workspaceMembersApproveAccessRequestResponseError = (workspaceMembersApproveAccessRequestResponse401 | workspaceMembersApproveAccessRequestResponse403 | workspaceMembersApproveAccessRequestResponse404 | workspaceMembersApproveAccessRequestResponse409 | workspaceMembersApproveAccessRequestResponse500) & {
+export type workspaceMembersApproveAccessRequestResponseError = (workspaceMembersApproveAccessRequestResponse400 | workspaceMembersApproveAccessRequestResponse401 | workspaceMembersApproveAccessRequestResponse403 | workspaceMembersApproveAccessRequestResponse404 | workspaceMembersApproveAccessRequestResponse409 | workspaceMembersApproveAccessRequestResponse500) & {
   headers: Headers;
 };
 

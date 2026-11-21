@@ -25,6 +25,22 @@ use uuid::Uuid;
 use crate::model::WorkspaceMember;
 use crate::workspaces::db_err;
 
+/// KI-261: `data_api_invoker` is granted on ONE Data API endpoint, never as a
+/// workspace membership role (through the workspace-to-object cascade it would
+/// mean "invoke every endpoint"). Every path that names a workspace role
+/// (members route, access-request submission and approval, the shared
+/// [`MemberRepo::add_with_expiry`]) calls this.
+pub fn reject_data_api_invoker(role: &str) -> Result<()> {
+    if role == "data_api_invoker" {
+        return Err(Error::InvalidInput(
+            "data_api_invoker cannot be a workspace member role; grant it on a single Data API \
+             endpoint"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct MemberRepo {
     db: Db,
@@ -61,6 +77,7 @@ impl MemberRepo {
         if ptype != "user" && ptype != "group" {
             return Err(Error::InvalidInput(format!("bad principal_type: {ptype}")));
         }
+        reject_data_api_invoker(role)?;
         let role_ok: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM roles WHERE scope = 'workspace' AND name = $1)",
         )

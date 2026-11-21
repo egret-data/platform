@@ -88,7 +88,7 @@
             }
           },
           "400": {
-            "description": "Already a member or workspace not joinable",
+            "description": "The requested role is `data_api_invoker` (granted on one Data API endpoint, never workspace-wide)",
             "content": {
               "application/json": {
                 "schema": {
@@ -19616,6 +19616,16 @@
               }
             }
           },
+          "400": {
+            "description": "The role to grant is `data_api_invoker` (granted on one Data API endpoint, never workspace-wide); the request stays pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Not authenticated",
             "content": {
@@ -31664,7 +31674,7 @@
             }
           },
           "400": {
-            "description": "Unknown principal or role",
+            "description": "Unknown principal or role, or `data_api_invoker` (granted on one Data API endpoint, never workspace-wide)",
             "content": {
               "application/json": {
                 "schema": {

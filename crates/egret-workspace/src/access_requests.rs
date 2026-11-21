@@ -76,6 +76,7 @@ impl AccessRequestRepo {
         role: &str,
         reason: &str,
     ) -> Result<AccessRequest> {
+        crate::members::reject_data_api_invoker(role)?;
         sqlx::query_as::<_, AccessRequest>(sqlx::AssertSqlSafe(format!(
             "INSERT INTO access_requests (requester_id, workspace_id, requested_role, reason) \
              VALUES ($1, $2, $3, $4) RETURNING {REQUEST_COLS}"

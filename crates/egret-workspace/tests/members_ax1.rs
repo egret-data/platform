@@ -487,3 +487,56 @@ async fn add_member_resolves_email_to_id() {
         resp.status()
     );
 }
+
+/// KI-261: `data_api_invoker` is object-scoped; a direct POST (existing
+/// principal or an SSO pre-registration email) is refused with 400 and nothing
+/// is stored.
+#[tokio::test]
+async fn add_member_rejects_data_api_invoker() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let st = ws_state(&db).await;
+    let admin = seed_user_email(
+        &db,
+        &format!("adm-{}@t.local", uuid::Uuid::new_v4().simple()),
+    )
+    .await;
+    let ws = st.workspaces.create(&uniq("ws"), "W", admin).await.unwrap();
+    st.members
+        .add(ws.id, "user", admin.0, "ws_admin", admin)
+        .await
+        .unwrap();
+    let target_email = format!("tgt-{}@t.local", uuid::Uuid::new_v4().simple());
+    let target = seed_user_email(&db, &target_email).await;
+    let app = axum::Router::new()
+        .nest("/api/ws", ws_member_router())
+        .with_state(st.clone());
+    let cookie = login_cookie(admin, &st.sessions).await;
+
+    for principal in [target_email.as_str(), "nobody@nowhere.test"] {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "principal_type": "user", "principal_id": principal, "role": "data_api_invoker"
+        }))
+        .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(format!("/api/ws/{}/members", ws.slug))
+                    .header("cookie", cookie.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{principal}");
+    }
+    assert_eq!(
+        st.members.role_of(ws.id, "user", target.0).await.unwrap(),
+        None
+    );
+}

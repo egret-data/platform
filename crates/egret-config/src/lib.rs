@@ -49,6 +49,9 @@ pub struct OidcConfig {
     pub issuer_url: String,
     pub client_id: String,
     pub client_secret: String,
+    /// The OIDC callback URL. Blank (the default) means [`Config::load`]
+    /// derives `http://localhost:<server.port>/api/auth/oidc/callback`, so
+    /// moving `server.port` moves it (KI-240, as `catalog.public_url`).
     pub redirect_url: String,
     pub scopes: Vec<String>,
     pub groups_claim: String,
@@ -385,7 +388,7 @@ impl Default for AppsConfig {
             ticket_ttl_secs: 30,
             egret_origin: String::new(),
             cookie_ttl_secs: 28_800,
-            listen: "0.0.0.0:8081".into(),
+            listen: "0.0.0.0:8083".into(),
             pod: AppPodConfig::default(),
             storage: AppsStorageConfig::default(),
         }
@@ -2216,7 +2219,7 @@ impl Default for Config {
                 issuer_url: String::new(),
                 client_id: String::new(),
                 client_secret: String::new(),
-                redirect_url: "http://localhost:8080/api/auth/oidc/callback".into(),
+                redirect_url: String::new(), // derived from `server.port` in `Config::load` (KI-240)
                 // Groups come from the IdP's group protocol-mapper (emitted on the
                 // `groups_claim`), so a `groups` *scope* is NOT requested by default —
                 // Keycloak rejects an undefined scope with `invalid_scope`. Add "groups"
@@ -2302,9 +2305,10 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Fill the URLs whose default depends on another key. Today one:
-    /// `catalog.public_url`, unset or blank, becomes this server on
-    /// `localhost` at `server.port` (see [`CatalogSettings::public_url`]).
+    /// Fill the URLs whose default depends on another key: `catalog.public_url`,
+    /// unset or blank, becomes this server on `localhost` at `server.port` (see
+    /// [`CatalogSettings::public_url`]), and a blank `oidc.redirect_url`
+    /// becomes that origin plus `/api/auth/oidc/callback` (KI-240).
     fn derive_unset_urls(&mut self) {
         let unset = self
             .catalog
@@ -2313,6 +2317,12 @@ impl Config {
             .is_none_or(|u| u.trim().is_empty());
         if unset {
             self.catalog.public_url = Some(format!("http://localhost:{}", self.server.port));
+        }
+        if self.oidc.redirect_url.trim().is_empty() {
+            self.oidc.redirect_url = format!(
+                "http://localhost:{}/api/auth/oidc/callback",
+                self.server.port
+            );
         }
     }
 
@@ -2867,6 +2877,35 @@ mod tests {
         });
     }
 
+    /// KI-240: `oidc.redirect_url` follows `server.port`, an explicit one is kept.
+    #[test]
+    fn oidc_redirect_url_follows_server_port() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+            assert_eq!(
+                Config::load()?.oidc.redirect_url,
+                "http://localhost:8080/api/auth/oidc/callback"
+            );
+            jail.set_env("EGRET_SERVER__PORT", "9090");
+            assert_eq!(
+                Config::load()?.oidc.redirect_url,
+                "http://localhost:9090/api/auth/oidc/callback"
+            );
+            jail.set_env("EGRET_OIDC__REDIRECT_URL", "https://x.example.com/cb");
+            assert_eq!(
+                Config::load()?.oidc.redirect_url,
+                "https://x.example.com/cb"
+            );
+            Ok(())
+        });
+    }
+
+    /// KI-241: the default `apps.listen` clears Keycloak (8081) and OPA (8082).
+    #[test]
+    fn apps_listen_default_avoids_dev_keycloak_and_opa() {
+        assert_eq!(Config::default().apps.listen, "0.0.0.0:8083");
+    }
+
     /// KI-141: the default port still gives today's value.
     #[test]
     fn catalog_public_url_defaults_to_port_8080() {
@@ -3066,7 +3105,7 @@ mod tests {
                     ticket_ttl_secs: 30,
                     egret_origin: String::new(),
                     cookie_ttl_secs: 28_800,
-                    listen: "0.0.0.0:8081".into(),
+                    listen: "0.0.0.0:8083".into(),
                     pod: AppPodConfig::default(),
                     storage: AppsStorageConfig::default(),
                 }

@@ -1,5 +1,5 @@
 {{- /*
-Who may connect to egret's pod. The API (8080) and the apps host (8081, only when
+Who may connect to egret's pod. The API (8080) and the apps host (8083, only when
 `apps.origin` is set) stay open to every peer, as before this policy existed: the
 frontend, the ingresses, app pods, task pods and the kubelet all use them. Those are
 the only ports the backend serves (`server.port`, `apps.listen`) besides the OPA one.
@@ -18,7 +18,7 @@ spec:
     - ports:
         - { protocol: TCP, port: 8080 }
         {{- if .Values.apps.origin }}
-        - { protocol: TCP, port: 8081 }
+        - { protocol: TCP, port: 8083 }
         {{- end }}
     {{- if and .Values.opa.enabled .Values.ranger.enabled }}
     - from:
