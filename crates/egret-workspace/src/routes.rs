@@ -798,7 +798,7 @@ async fn list_joinable(
     request_body = CreateAccessRequest,
     responses(
         (status = 201, description = "Join request filed", body = AccessRequestDto),
-        (status = 400, description = "Already a member or workspace not joinable", body = ErrorBody),
+        (status = 400, description = "The requested role is `data_api_invoker` (granted on one Data API endpoint, never workspace-wide)", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 409, description = "A pending request for this workspace already exists", body = ErrorBody),
         (status = 500, description = "Internal error", body = ErrorBody),
@@ -1356,13 +1356,7 @@ async fn add_member(
     // KI-261: `data_api_invoker` is granted on ONE Data API endpoint, never
     // workspace-wide (the pickers do not offer it). Checked before the
     // principal is resolved, so the SSO pre-registration path is covered too.
-    if body.role == "data_api_invoker" {
-        return Err(AuthError(egret_core::Error::InvalidInput(
-            "data_api_invoker cannot be a workspace member role: grant it on a single Data API \
-             endpoint instead"
-                .into(),
-        )));
-    }
+    crate::members::reject_data_api_invoker(&body.role).map_err(AuthError)?;
     // The picker supplies an email / group name; a role change supplies the existing
     // member's UUID. Accept a real UUID directly, else resolve email/name -> id.
     let pid: uuid::Uuid = match uuid::Uuid::parse_str(&body.principal_id) {
@@ -1825,6 +1819,7 @@ async fn list_workspace_access_requests(
     request_body = ApproveAccessRequest,
     responses(
         (status = 200, description = "Request approved and member added", body = Ack),
+        (status = 400, description = "The role to grant is `data_api_invoker` (granted on one Data API endpoint, never workspace-wide); the request stays pending", body = ErrorBody),
         (status = 401, description = "Not authenticated", body = ErrorBody),
         (status = 403, description = "Missing workspace permission", body = ErrorBody),
         (status = 404, description = "No such request in this workspace", body = ErrorBody),

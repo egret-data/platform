@@ -478,3 +478,67 @@ async fn approver_endpoints_flow() {
     assert_eq!(denied.status, "denied", "request must be denied");
     assert_eq!(denied.decision_note.as_deref(), Some("nope"), "note stored");
 }
+
+/// KI-261: `data_api_invoker` can neither be requested (400 at submission) nor
+/// granted by approving a crafted request (the row stays pending, no membership).
+#[tokio::test]
+async fn data_api_invoker_cannot_be_requested_or_granted_by_approval() {
+    let Some(db) = connect().await else {
+        eprintln!("skip");
+        return;
+    };
+    let st = ws_state(&db).await;
+    let app = axum::Router::new()
+        .nest("/api", access_request_router())
+        .with_state(st.clone());
+    let caller = seed_user_email(&db, &format!("req-{}@t.local", Uuid::new_v4().simple())).await;
+    let owner = seed_user_email(&db, &format!("own-{}@t.local", Uuid::new_v4().simple())).await;
+    let cookie = login_cookie(caller, &st.sessions).await;
+    let ws = st.workspaces.create(&uniq("ws"), "W", owner).await.unwrap();
+
+    // Submission is refused.
+    let body = serde_json::to_vec(&serde_json::json!({
+        "workspace_id": ws.id.to_string(), "role": "data_api_invoker"
+    }))
+    .unwrap();
+    let resp = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/api/access-requests")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // A pre-existing / crafted pending row cannot be approved into the role.
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO access_requests (requester_id, workspace_id, requested_role, reason) \
+         VALUES ($1, $2, 'data_api_invoker', '') RETURNING id",
+    )
+    .bind(caller.0)
+    .bind(ws.id.0)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let err = st
+        .access_requests
+        .approve(id, ws.id, None, None, owner)
+        .await
+        .expect_err("approval must refuse data_api_invoker");
+    assert!(matches!(err, egret_core::Error::InvalidInput(_)), "{err:?}");
+    let status: String = sqlx::query_scalar("SELECT status FROM access_requests WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "pending");
+    assert_eq!(
+        st.members.role_of(ws.id, "user", caller.0).await.unwrap(),
+        None
+    );
+}
