@@ -103,7 +103,7 @@ pub use view_hold::{
 pub use warehouse::create_memory_warehouse;
 pub use warehouse::{
     apply_vended_credential_lifetime, create_lakekeeper_warehouse, s3_storage_profile,
-    S3StorageConfig,
+    S3StorageConfig, WAREHOUSE_CREATE_LOCK,
 };
 pub use warehouse_admin::{
     catalog_admin_router, BrowseColumn, BrowseDeletedTabular, BrowseNamespace, BrowsePartition,

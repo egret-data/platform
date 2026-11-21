@@ -28,14 +28,10 @@ fn unique(prefix: &str) -> String {
     )
 }
 
-/// The engine state, and the name of a held warehouse on `bucket` at
-/// `http://rustfs:9000`, region `us-east-1`, key prefix `wh`.
-async fn held_warehouse(
-    bucket: &str,
-) -> Option<(
-    egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>,
-    String,
-)> {
+type State = egret_catalog_engine::ApiContext<egret_catalog_engine::EngineState>;
+
+/// A bootstrapped engine state, and a pool on the same database.
+async fn engine() -> Option<(State, sqlx::PgPool)> {
     let dsn = egret_test_db::url().await?;
     let db = egret_metastore::Db::connect(&dsn, 5)
         .await
@@ -53,11 +49,13 @@ async fn held_warehouse(
         })
         .await;
     let (state, _) = build_state(&dsn, SYSTEM_USER).await.expect("state");
-    let name = unique("held");
-    let id = create_memory_warehouse(state.clone(), SYSTEM_USER, &name)
-        .await
-        .expect("held warehouse");
-    // The profile as lakekeeper stores it once it has normalised it.
+    Some((state, db.pool))
+}
+
+/// Give the in-memory warehouse `id` an S3 storage profile on `bucket` at
+/// `http://rustfs:9000`, region `us-east-1`, key prefix `wh`, as lakekeeper
+/// stores it once it has normalised it.
+async fn give_s3_profile(pool: &sqlx::PgPool, id: &str, bucket: &str) {
     let profile = json!({
         "type": "s3",
         "bucket": bucket,
@@ -72,11 +70,21 @@ async fn held_warehouse(
     sqlx::query(
         "UPDATE lakekeeper.warehouse SET storage_profile = $2 WHERE warehouse_id = $1::uuid",
     )
-    .bind(&id)
+    .bind(id)
     .bind(&profile)
-    .execute(&db.pool)
+    .execute(pool)
     .await
     .expect("storage profile");
+}
+
+/// The engine state, and the name of a held warehouse on `bucket`.
+async fn held_warehouse(bucket: &str) -> Option<(State, String)> {
+    let (state, pool) = engine().await?;
+    let name = unique("held");
+    let id = create_memory_warehouse(state.clone(), SYSTEM_USER, &name)
+        .await
+        .expect("held warehouse");
+    give_s3_profile(&pool, &id, bucket).await;
     Some((state, name))
 }
 
@@ -180,5 +188,57 @@ async fn storage_that_does_not_overlap_reaches_the_catalog() {
             !matches!(got, Err(CatalogEngineError::Conflict(_)) | Ok(_)),
             "{what}: not refused as an overlap, and lakekeeper cannot reach a store: {got:?}"
         );
+    }
+}
+
+/// Two warehouses created at the same moment are checked against each other:
+/// a create holds the warehouse-creation lock from its overlap check to its
+/// insert, so it waits for a create in flight and then sees its warehouse.
+///
+/// Deterministic, with no race to win: the test holds the lock as a create in
+/// flight would, starts a create, shows it waits, then lets the "other create"
+/// land an overlapping warehouse and release the lock. The waiting create must
+/// then refuse.
+#[tokio::test]
+async fn a_create_waits_for_one_in_flight_and_then_sees_its_warehouse() {
+    let Some((state, pool)) = engine().await else {
+        eprintln!("SKIPPED, asserted nothing — no DATABASE_URL, EGRET_ALLOW_DB_SKIP is set");
+        return;
+    };
+    let bucket = unique("lake");
+    let in_flight = unique("inflight");
+    let id = create_memory_warehouse(state.clone(), SYSTEM_USER, &in_flight)
+        .await
+        .expect("the warehouse the create in flight lands");
+
+    let mut lock = pool.begin().await.expect("begin");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(egret_catalog_engine::WAREHOUSE_CREATE_LOCK)
+        .execute(&mut *lock)
+        .await
+        .expect("take the warehouse-creation lock");
+
+    let cfg = s3(&bucket, "http://rustfs:9000", "us-east-1", Some("wh"));
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        async move { create_lakekeeper_warehouse(state, SYSTEM_USER, &unique("new"), &cfg).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !waiting.is_finished(),
+        "a create must wait while another holds the warehouse-creation lock"
+    );
+
+    give_s3_profile(&pool, &id, &bucket).await;
+    lock.commit().await.expect("release the lock");
+
+    match waiting.await.expect("join") {
+        Err(CatalogEngineError::Conflict(m)) => {
+            assert!(
+                m.contains(&in_flight),
+                "names the warehouse that landed: {m}"
+            )
+        }
+        other => panic!("the waiting create must see the overlap, got {other:?}"),
     }
 }
