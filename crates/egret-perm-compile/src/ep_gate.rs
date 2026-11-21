@@ -437,8 +437,16 @@ mod tests {
             .refusals
             .iter()
             .any(|r| matches!(r, GateRefusal::ClearanceTags { tags } if tags.contains(&tag_key))));
+        // The verdict carries installation-wide refusals that concurrent tests
+        // can change at any moment, so comparing two READ COMMITTED reads is a
+        // race. Pin one snapshot and compute both paths inside it.
         let mut tx = pool.begin().await.expect("tx");
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await
+            .expect("pin snapshot");
+        let v_snapshot = ep_gate_via(&mut tx, service.id).await.expect("gate");
         let vt = ep_gate_via_tx(&mut tx, service.id).await.expect("gate tx");
-        assert_eq!(vt, v);
+        assert_eq!(vt, v_snapshot);
     }
 }
