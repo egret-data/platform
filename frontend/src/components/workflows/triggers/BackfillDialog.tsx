@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { LocalDateTimeField } from "@/components/ui/date-time-picker";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ApiError } from "@/api/client";
@@ -6,7 +7,6 @@ import { useWorkflowCreateTriggerBackfill, useWorkflowGetFlow } from "@/api/gene
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { Enablement } from "@/components/workflows/draftState";
 import { DisabledReasons, ReasonButton } from "@/components/workflows/ReasonButton";
@@ -171,15 +171,14 @@ export default function BackfillDialog({
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-1">
               <Label htmlFor={`${triggerId}-backfill-start`}>Start</Label>
-              <Input
+              <LocalDateTimeField
                 id={`${triggerId}-backfill-start`}
-                type="datetime-local"
-                step={1}
+                precision="second"
                 max={maxLocal}
                 value={start}
                 aria-invalid={refusal?.field === "start" ? true : undefined}
                 aria-describedby={refusal?.field === "start" ? `${triggerId}-backfill-start-error` : undefined}
-                onChange={(e) => setStart(e.target.value)}
+                onChange={setStart}
               />
               {refusal?.field === "start" ? (
                 <p id={`${triggerId}-backfill-start-error`} className="text-sm text-destructive">
@@ -189,16 +188,15 @@ export default function BackfillDialog({
             </div>
             <div className="grid gap-1">
               <Label htmlFor={`${triggerId}-backfill-end`}>End</Label>
-              <Input
+              <LocalDateTimeField
                 id={`${triggerId}-backfill-end`}
-                type="datetime-local"
-                step={1}
+                precision="second"
                 max={maxLocal}
                 value={end}
                 placeholder="Leave empty to end now"
                 aria-invalid={refusal?.field === "end" ? true : undefined}
                 aria-describedby={refusal?.field === "end" ? `${triggerId}-backfill-end-error` : undefined}
-                onChange={(e) => setEnd(e.target.value)}
+                onChange={setEnd}
               />
               {refusal?.field === "end" ? (
                 <p id={`${triggerId}-backfill-end-error`} className="text-sm text-destructive">

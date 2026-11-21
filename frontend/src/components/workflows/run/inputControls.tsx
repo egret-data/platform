@@ -1,4 +1,5 @@
 import { Plus, Trash2 } from "lucide-react";
+import { DateField, LocalDateTimeField, TimeField } from "@/components/ui/date-time-picker";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { IconButton } from "@/components/ui/icon-button";
@@ -31,9 +32,6 @@ export interface InputFieldProps {
   /** Unique to the form, so two forms on a page never share an id. */
   idPrefix: string;
 }
-
-/** `datetime-local`/`time` carry seconds only with a step under a minute. */
-const SECONDS = 1;
 
 export function InputField({ input, value, onChange, error, inactive, idPrefix }: InputFieldProps) {
   const id = `${idPrefix}-${input.id}`;
@@ -154,11 +152,11 @@ function ScalarControl({
     case "BOOL":
       return <Switch id={id} checked={value === true} onCheckedChange={(c) => onChange(c)} {...aria} />;
     case "DATETIME":
-      return <Input id={id} type="datetime-local" step={SECONDS} className="tabular-nums" value={text} onChange={onText} {...aria} />;
+      return <LocalDateTimeField id={id} precision="second" value={text} onChange={onChange} {...aria} />;
     case "DATE":
-      return <Input id={id} type="date" className="tabular-nums" value={text} onChange={onText} {...aria} />;
+      return <DateField id={id} value={text} onChange={onChange} {...aria} />;
     case "TIME":
-      return <Input id={id} type="time" step={SECONDS} className="tabular-nums" value={text} onChange={onText} {...aria} />;
+      return <TimeField id={id} seconds value={text} onChange={onChange} {...aria} />;
     case "DURATION":
       return <Input id={id} placeholder="PT1H" value={text} onChange={onText} {...aria} />;
     case "SECRET":

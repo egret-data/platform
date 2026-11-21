@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { DateField, MonthField } from "@/components/ui/date-time-picker";
 import { Calendar, Clock, Hash, MapPin, Tag, ToggleLeft, Type, X } from "lucide-react";
 import type { DashboardParameter } from "@/api/dashboards";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -143,8 +144,8 @@ export function FilterControl({ param, value, options, onChange }: Props) {
 
   // month-year
   if (param.type === "date" && param.operator === "month-year") {
-    return <input aria-label={`${param.name} value`} type="month" className={input}
-      value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />;
+    return <MonthField aria-label={`${param.name} value`} className="h-8 text-sm"
+      value={String(value ?? "")} onChange={onChange} />;
   }
 
   // quarter-year: year input + quarter select, encoded as "YYYY-Q"
@@ -155,7 +156,7 @@ export function FilterControl({ param, value, options, onChange }: Props) {
     };
     return (
       <div className="flex items-center gap-1">
-        <input aria-label={`${param.name} year`} type="number" placeholder="Year" className={input}
+        <Input aria-label={`${param.name} year`} type="number" placeholder="Year" className={input}
           value={qy.y} onChange={(e) => emit(e.target.value, qy.q)} />
         <Select value={qy.q || "1"} onValueChange={(v) => emit(qy.y || String(new Date().getUTCFullYear()), v)}>
           <SelectTrigger size="sm" className="w-full" aria-label={`${param.name} quarter`}><SelectValue /></SelectTrigger>
@@ -223,23 +224,23 @@ export function FilterControl({ param, value, options, onChange }: Props) {
     const num = (s: string) => (s === "" ? null : Number(s));
     return (
       <div className="flex items-center gap-1">
-        <input aria-label={`${param.name} min`} type="number" className={input} value={min ?? ""} onChange={(e) => onChange([num(e.target.value), max ?? null])} />
+        <Input aria-label={`${param.name} min`} type="number" className={input} value={min ?? ""} onChange={(e) => onChange([num(e.target.value), max ?? null])} />
         <span className="text-muted-foreground">–</span>
-        <input aria-label={`${param.name} max`} type="number" className={input} value={max ?? ""} onChange={(e) => onChange([min ?? null, num(e.target.value)])} />
+        <Input aria-label={`${param.name} max`} type="number" className={input} value={max ?? ""} onChange={(e) => onChange([min ?? null, num(e.target.value)])} />
       </div>
     );
   }
   if (param.type === "number") {
-    return <input aria-label={`${param.name} value`} type="number" className={input} value={String(value ?? "")} onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))} />;
+    return <Input aria-label={`${param.name} value`} type="number" className={input} value={String(value ?? "")} onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))} />;
   }
 
   if (param.type === "date" && param.operator === "range") {
     const [start, end] = Array.isArray(value) ? (value as string[]) : ["", ""];
     return (
       <div className="flex items-center gap-1">
-        <input aria-label={`${param.name} min`} type="date" className={input} value={start ?? ""} onChange={(e) => onChange([e.target.value, end ?? ""])} />
+        <DateField aria-label={`${param.name} min`} className="h-8 text-sm" value={start ?? ""} onChange={(v) => onChange([v, end ?? ""])} />
         <span className="text-muted-foreground">–</span>
-        <input aria-label={`${param.name} max`} type="date" className={input} value={end ?? ""} onChange={(e) => onChange([start ?? "", e.target.value])} />
+        <DateField aria-label={`${param.name} max`} className="h-8 text-sm" value={end ?? ""} onChange={(v) => onChange([start ?? "", v])} />
       </div>
     );
   }
@@ -253,7 +254,7 @@ export function FilterControl({ param, value, options, onChange }: Props) {
     );
   }
   if (param.type === "date") {
-    return <input aria-label={`${param.name} value`} type="date" className={input} value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />;
+    return <DateField aria-label={`${param.name} value`} className="h-8 text-sm" value={String(value ?? "")} onChange={onChange} />;
   }
 
   return <Input aria-label={`${param.name} value`} className={input} value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />;

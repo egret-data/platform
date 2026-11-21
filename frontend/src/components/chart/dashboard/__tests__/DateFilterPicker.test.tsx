@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { beforeAll, describe, it, expect, vi } from "vitest";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 /** Opens the shared select named `name` and picks the item named `option`. */
@@ -9,6 +9,24 @@ async function pick(name: string, option: string) {
   await user.click(await screen.findByRole("option", { name: option }));
 }
 import { DateFilterPicker } from "../DateFilterPicker";
+
+// The date boxes are the app's calendar (KI-276); its month grid loads lazily, so load it once here.
+beforeAll(async () => {
+  await import("@/components/ui/calendar");
+}, 30_000);
+
+const pad = (n: number) => String(n).padStart(2, "0");
+const now = new Date();
+const YM = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+
+/** Opens the date picker named `name` and picks the `day`th of this month. */
+async function pickDay(name: string, day: "1st" | "15th") {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name }));
+  const grid = await screen.findByRole("grid");
+  // The grid also shows the next month's first days, so the first match is this month's.
+  await user.click(within(grid).getAllByRole("button", { name: new RegExp(`\\b${day}\\b`) })[0]);
+}
 
 describe("DateFilterPicker", () => {
   it("relative tab emits a relative value", async () => {
@@ -26,10 +44,10 @@ describe("DateFilterPicker", () => {
     render(<DateFilterPicker value={undefined} onChange={onChange} />);
     fireEvent.click(screen.getByRole("button", { name: "Specific" }));
     await pick("specific op", "Between");
-    fireEvent.change(screen.getByLabelText("specific from"), { target: { value: "2026-01-01" } });
-    fireEvent.change(screen.getByLabelText("specific to"), { target: { value: "2026-03-31" } });
+    await pickDay("specific from", "1st");
+    await pickDay("specific to", "15th");
     expect(onChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ mode: "specific", op: "between", from: "2026-01-01", to: "2026-03-31" }),
+      expect.objectContaining({ mode: "specific", op: "between", from: `${YM}-01`, to: `${YM}-15` }),
     );
   });
   it("accumulates: editing one field preserves the others (seeded value)", async () => {
@@ -47,6 +65,6 @@ describe("DateFilterPicker", () => {
     expect(screen.getByRole("combobox", { name: "relative unit" })).toHaveTextContent("days");
     // parent feeds a new value → control reflects it
     rerender(<DateFilterPicker value={{ mode: "specific", op: "after", from: "2026-05-05" }} onChange={onChange} />);
-    expect((screen.getByLabelText("specific from") as HTMLInputElement).value).toBe("2026-05-05");
+    expect(screen.getByRole("button", { name: "specific from" })).toHaveTextContent("2026-05-05");
   });
 });

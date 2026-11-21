@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -161,6 +161,11 @@ afterEach(() => {
   setVisibility("visible");
 });
 
+// The picker loads its month grid lazily; load it once so no test pays for it.
+beforeAll(async () => {
+  await import("@/components/ui/calendar");
+}, 30_000);
+
 describe("ExecutionsList: columns", () => {
   it("shows id, flow, namespace, state, start, duration and trigger, in that order", async () => {
     serve(() => page(ROWS));
@@ -316,9 +321,13 @@ describe("ExecutionsList: filters in the URL", () => {
     const lists = serve(() => page(ROWS));
     renderList(`/explore/${WS}/workflows/executions?time=custom`);
     await screen.findByTestId("executions-table");
-    // A change event: jsdom drops a datetime-local value typed one key at a time.
-    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-10-01T08:00" } });
-    const expected = new Date("2026-10-01T08:00").toISOString();
+    // KI-276: From is the app's calendar; the 15th exists in every month.
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "From" }));
+    const grid = await screen.findByRole("grid");
+    await user.click(within(grid).getByRole("button", { name: /\b15th\b/ }));
+    const now = new Date();
+    const expected = new Date(now.getFullYear(), now.getMonth(), 15, 0, 0).toISOString();
     await waitFor(() => expect(search().get("since")).toBe(expected));
     await waitFor(() => expect(lists.at(-1)!.get("since")).toBe(expected));
   });

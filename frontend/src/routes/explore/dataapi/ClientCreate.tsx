@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { DateField } from "@/components/ui/date-time-picker";
 import { Link, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -344,12 +345,7 @@ export default function ClientCreate() {
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="new-client-expiry">Expires (optional)</Label>
-            <Input
-              id="new-client-expiry"
-              type="date"
-              value={expiresAt}
-              onChange={(e) => setExpiresAt(e.target.value)}
-            />
+            <DateField id="new-client-expiry" value={expiresAt} onChange={setExpiresAt} />
             <p className="text-xs text-muted-foreground">Leave blank for a client that lives until revoked.</p>
           </div>
         </div>

@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { Input } from "@/components/ui/input";
+import { DateField } from "@/components/ui/date-time-picker";
 import type { DateAllOptionsValue, DateUnit } from "./params";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
@@ -67,7 +69,7 @@ export function DateFilterPicker({ value, onChange }: Props) {
             </SelectContent>
           </Select>
           {rel.dir !== "current" && (
-            <input
+            <Input
               aria-label="relative n"
               type="number"
               min={1}
@@ -98,20 +100,18 @@ export function DateFilterPicker({ value, onChange }: Props) {
               <SelectItem value="between">Between</SelectItem>
             </SelectContent>
           </Select>
-          <input
+          <DateField
             aria-label="specific from"
-            type="date"
-            className={input}
+            className="h-8 text-sm"
             value={spec.from}
-            onChange={(e) => emit({ ...spec, from: e.target.value })}
+            onChange={(v) => emit({ ...spec, from: v })}
           />
           {spec.op === "between" && (
-            <input
+            <DateField
               aria-label="specific to"
-              type="date"
-              className={input}
+              className="h-8 text-sm"
               value={spec.to ?? ""}
-              onChange={(e) => emit({ ...spec, to: e.target.value })}
+              onChange={(v) => emit({ ...spec, to: v })}
             />
           )}
         </div>

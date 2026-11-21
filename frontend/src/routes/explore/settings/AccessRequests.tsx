@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { DateField } from "@/components/ui/date-time-picker";
 import { useParams } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -21,7 +22,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -244,13 +244,7 @@ function ApproveDialog({
 
           <div className="space-y-1.5">
             <Label htmlFor="approve-expires">Access expires</Label>
-            <Input
-              id="approve-expires"
-              type="date"
-              min={today}
-              value={expiresDate}
-              onChange={(e) => setExpiresDate(e.target.value)}
-            />
+            <DateField id="approve-expires" min={today} value={expiresDate} onChange={setExpiresDate} />
             <p className="text-xs text-muted-foreground">Optional — leave blank for no expiry.</p>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { useId, useMemo, type ReactNode } from "react";
+import { LocalDateTimeField } from "@/components/ui/date-time-picker";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronLeft, ChevronRight, History, RotateCw } from "lucide-react";
@@ -16,7 +17,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -541,24 +541,22 @@ function FilterBar({
             <Label htmlFor={`${id}-since`} className="text-sm font-normal">
               From
             </Label>
-            <Input
+            <LocalDateTimeField
               id={`${id}-since`}
-              type="datetime-local"
               className="h-9 w-auto"
               value={toLocalInput(filters.since)}
-              onChange={(e) => setFilters({ since: fromLocalInput(e.target.value), until: filters.until, time: "custom" }, true)}
+              onChange={(v) => setFilters({ since: fromLocalInput(v), until: filters.until, time: "custom" }, true)}
             />
           </div>
           <div className="flex items-center gap-1.5">
             <Label htmlFor={`${id}-until`} className="text-sm font-normal">
               To
             </Label>
-            <Input
+            <LocalDateTimeField
               id={`${id}-until`}
-              type="datetime-local"
               className="h-9 w-auto"
               value={toLocalInput(filters.until)}
-              onChange={(e) => setFilters({ until: fromLocalInput(e.target.value), since: filters.since, time: "custom" }, true)}
+              onChange={(v) => setFilters({ until: fromLocalInput(v), since: filters.since, time: "custom" }, true)}
             />
           </div>
         </>

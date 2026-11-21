@@ -1,14 +1,36 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
 vi.mock("sonner", () => ({ toast }));
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import BackfillDialog from "@/components/workflows/triggers/BackfillDialog";
 import { FakeWorkflowServer, FLOW_ID, WS } from "@/routes/workflows/__tests__/fakeWorkflowServer";
 import { flowTriggers, scheduleEntry } from "./triggerFixtures";
+
+// Start and End are the app's calendar (KI-276); its month grid loads lazily, so load it once here.
+beforeAll(async () => {
+  await import("@/components/ui/calendar");
+}, 30_000);
+
+/** The 1st of this month, local, at `time`: always in the past, so under the picker's `max` (now). */
+const first = (time: string) => {
+  const n = new Date();
+  return new Date(`${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, "0")}-01T${time}`);
+};
+
+/** Opens the picker labelled `label`, picks the 1st of this month, and types `time` (HH:mm:ss). */
+async function pickFirst(label: string, time: string) {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: label }));
+  // The grid also shows the next month's first days, so the first match is this month's.
+  await user.click(within(await screen.findByRole("grid")).getAllByRole("button", { name: /\b1st\b/ })[0]);
+  const field = screen.getByLabelText("Time");
+  await user.clear(field);
+  await user.type(field, `${time}{Enter}`);
+}
 
 const SOURCE = `id: hello
 namespace: company.team
@@ -61,13 +83,14 @@ function renderDialog(source = SOURCE, onClose = vi.fn()) {
 }
 
 const createPath = `/api/ws/${WS}/workflows/flows/${FLOW_ID}/triggers/daily/backfill`;
-const dialog = () => screen.getByRole("dialog");
+// A picker left open is a second `dialog` (its popover), mounted after the backfill dialog.
+const dialog = () => screen.getAllByRole("dialog")[0];
 
 describe("BackfillDialog (W7f §4.3)", () => {
   it("sends the window in UTC, the inputs the form holds, and the labels in order", async () => {
     const { onClose } = renderDialog();
-    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "2020-01-01T00:00:00" } });
-    fireEvent.change(screen.getByLabelText("End"), { target: { value: "2020-01-01T01:00:00" } });
+    await pickFirst("Start", "00:00:00");
+    await pickFirst("End", "01:00:00");
     await userEvent.type(screen.getByRole("textbox", { name: /^req/ }), "x");
     await userEvent.click(screen.getByRole("button", { name: "Add label" }));
     await userEvent.type(screen.getByLabelText("Key"), "team");
@@ -77,8 +100,8 @@ describe("BackfillDialog (W7f §4.3)", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     const [post] = server.callsTo("POST", createPath);
     expect(post.body).toEqual({
-      start: new Date("2020-01-01T00:00:00").toISOString(),
-      end: new Date("2020-01-01T01:00:00").toISOString(),
+      start: first("00:00:00").toISOString(),
+      end: first("01:00:00").toISOString(),
       inputs: { region: "eu", req: "x" },
       labels: [{ key: "team", value: "ops" }],
     });
@@ -86,7 +109,7 @@ describe("BackfillDialog (W7f §4.3)", () => {
 
   it("keeps the submit off with its reason until the required input is filled", async () => {
     renderDialog();
-    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "2020-01-01T00:00:00" } });
+    await pickFirst("Start", "00:00:00");
     const submit = screen.getByRole("button", { name: "Start backfill" });
     expect(submit).toBeDisabled();
     expect(within(dialog()).getByText("Fix the inputs")).toBeInTheDocument();
@@ -98,12 +121,12 @@ describe("BackfillDialog (W7f §4.3)", () => {
       body: { error: "The start is more than ten years back; check the year", code: "backfill_start_too_early" },
     };
     const { onClose } = renderDialog();
-    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "1990-01-01T00:00:00" } });
+    await pickFirst("Start", "00:00:00");
     await userEvent.type(screen.getByRole("textbox", { name: /^req/ }), "x");
     await userEvent.click(screen.getByRole("button", { name: "Start backfill" }));
 
     expect(await within(dialog()).findByText("The start is more than ten years back; check the year")).toBeInTheDocument();
-    expect(screen.getByLabelText("Start")).toHaveValue("1990-01-01T00:00");
+    expect(screen.getByRole("button", { name: "Start" })).toHaveTextContent(/-01 00:00:00$/);
     expect(screen.getByRole("textbox", { name: /^req/ })).toHaveValue("x");
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -114,7 +137,7 @@ describe("BackfillDialog (W7f §4.3)", () => {
       body: { error: "This trigger already has a backfill; pause or delete it first", code: "backfill_exists" },
     };
     const { onClose } = renderDialog();
-    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "2020-01-01T00:00:00" } });
+    await pickFirst("Start", "00:00:00");
     await userEvent.type(screen.getByRole("textbox", { name: /^req/ }), "x");
     await userEvent.click(screen.getByRole("button", { name: "Start backfill" }));
 
@@ -131,7 +154,7 @@ describe("BackfillDialog (W7f §4.3)", () => {
     // `loud` has no default, so only the schedule can turn it on; `quiet`'s default is on, so only the schedule can turn it off.
     expect(screen.getByRole("switch", { name: /^loud/ })).toBeChecked();
     expect(screen.getByRole("switch", { name: /^quiet/ })).not.toBeChecked();
-    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "2020-01-01T00:00:00" } });
+    await pickFirst("Start", "00:00:00");
     await userEvent.type(screen.getByRole("textbox", { name: /^req/ }), "x");
     await userEvent.click(screen.getByRole("button", { name: "Start backfill" }));
 

@@ -215,9 +215,10 @@ describe("RunFlow: the controls", () => {
     renderRun(flowWith(EVERY_TYPE));
     const dialog = await screen.findByRole("dialog");
     // Radix adds hidden native inputs inside a form for its switch, checkbox and select; they are
-    // `aria-hidden` and take no focus, so they are not controls a person labels or reaches.
+    // `aria-hidden` and take no focus, so they are not controls a person labels or reaches. The
+    // date and date-time pickers are buttons that open the app's calendar, so `button[id]` counts them.
     const controls = [
-      ...dialog.querySelectorAll<HTMLElement>("input, textarea, select, [role=switch], [role=combobox], [role=checkbox]"),
+      ...dialog.querySelectorAll<HTMLElement>("input, textarea, select, button[id], [role=switch], [role=combobox], [role=checkbox]"),
     ].filter((el) => !el.closest("[aria-hidden=true]"));
     // One per scalar input, two MULTISELECT boxes and one ARRAY row: a count that misses a type fails.
     expect(controls.length).toBe(17 - 2 + 2 + 1);
