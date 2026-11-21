@@ -91,6 +91,7 @@ mod labels;
 mod pause;
 mod reaper;
 mod registry;
+mod release;
 mod render;
 mod replay;
 mod restart;
@@ -158,6 +159,7 @@ pub use labels::{set_execution_labels, LabelsRefused, LabelsSet};
 pub use pause::{pause_by_hand, resume_with, Paused, ResumeRefused, ResumeRequest};
 pub use reaper::reap;
 pub use registry::Handlers;
+pub use release::HeldLeases;
 pub use render::execution_render_context;
 pub use restart::{
     restart_execution, set_execution_status, set_task_run_state, RestartRefused, Restarted,
