@@ -95,11 +95,14 @@ export function DeleteUserDialog({
 /** KI-209: disabling signs the user out at once, so it asks first. */
 export function DisableUserDialog({
   user,
+  count,
   open,
   onOpenChange,
   onConfirm,
 }: {
   user: AccessUser | null;
+  /** KI-262: set for the bulk action on the Users list; names the count instead of one user. */
+  count?: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
@@ -108,11 +111,17 @@ export function DisableUserDialog({
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>{user ? `Disable ${user.email}?` : "Disable user?"}</AlertDialogTitle>
+          <AlertDialogTitle>
+            {count !== undefined
+              ? `Disable ${count} ${count === 1 ? "user" : "users"}?`
+              : user
+                ? `Disable ${user.email}?`
+                : "Disable user?"}
+          </AlertDialogTitle>
           <AlertDialogDescription>
             They are signed out at once and cannot sign in until the account is enabled again.
             Their memberships and role grants are kept. Their engine username stays theirs.
-            {user && holdsPlatformAdmin(user) &&
+            {count === undefined && user && holdsPlatformAdmin(user) &&
               " While disabled they lose all-access on engines."}
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -122,7 +131,7 @@ export function DisableUserDialog({
             onClick={onConfirm}
             className="bg-destructive text-white hover:bg-destructive/90"
           >
-            Disable user
+            {count !== undefined ? "Disable users" : "Disable user"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

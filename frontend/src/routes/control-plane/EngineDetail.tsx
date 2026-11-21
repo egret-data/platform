@@ -1096,10 +1096,13 @@ export function TrinoConfigEditor({
   imageVersion,
   onInvalidChange,
   engineId,
+  docker = false,
 }: {
   cfg: EngineConfigForm;
   imageVersion: string;
   onInvalidChange?: (invalid: boolean) => void;
+  /** Docker runs the engine: it refuses any ingress, so that section is not shown (KI-264). */
+  docker?: boolean;
   /**
    * The saved engine's id. Present on the detail Settings tab (enables Rotate
    * secrets); absent in the create wizard, which has nothing to rotate yet.
@@ -1207,7 +1210,7 @@ export function TrinoConfigEditor({
             />
           )}
           {section === "security" && (
-            <SecuritySection cfg={cfg} engineId={engineId} />
+            <SecuritySection cfg={cfg} engineId={engineId} docker={docker} />
           )}
         </div>
       </ValidityProvider>
@@ -1244,6 +1247,7 @@ function ConfigurationTab({
           imageVersion={imageVersion}
           onInvalidChange={setRawInvalid}
           engineId={engineId}
+          docker={docker}
         />
         <SaveBar
           cfg={cfg}
@@ -1265,9 +1269,11 @@ function ConfigurationTab({
 function SecuritySection({
   cfg,
   engineId,
+  docker = false,
 }: {
   cfg: EngineConfigForm;
   engineId?: string;
+  docker?: boolean;
 }) {
   const {
     passwordUsers,
@@ -1322,6 +1328,7 @@ function SecuritySection({
         setIngressTlsCertSecretRef={setIngressTlsCertSecretRef}
         ingressAnnotations={ingressAnnotations}
         setIngressAnnotations={setIngressAnnotations}
+        showIngress={!docker}
       />
       {engineId && <RotateSecretsSection engineId={engineId} />}
     </div>

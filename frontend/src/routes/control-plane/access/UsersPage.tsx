@@ -378,6 +378,8 @@ export default function UsersPage() {
     return drawnRows.filter((u) => chosen.has(u.id));
   };
   const [bulkRoleOpen, setBulkRoleOpen] = useState(false);
+  // KI-262: bulk Disable signs people out at once, so it asks first like the single-user action.
+  const [bulkDisableOpen, setBulkDisableOpen] = useState(false);
 
   async function bulkSetStatus(status: "active" | "disabled") {
     const targets = selectedUsers();
@@ -445,7 +447,7 @@ export default function UsersPage() {
           {bulk.bulkMode && bulk.someSelected && (
             <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2 text-sm">
               <span className="font-medium">{bulk.selectedIds.length} selected</span>
-              <Button size="sm" variant="outline" onClick={() => bulkSetStatus("disabled")}>
+              <Button size="sm" variant="outline" onClick={() => setBulkDisableOpen(true)}>
                 Disable
               </Button>
               <Button size="sm" variant="outline" onClick={() => bulkSetStatus("active")}>
@@ -568,6 +570,16 @@ export default function UsersPage() {
         }}
         canDisable={isAdmin}
         disableBlockedReason={lastActiveAdminReason(deleteTarget, users.data ?? [])}
+      />
+      <DisableUserDialog
+        user={null}
+        count={bulk.selectedIds.length}
+        open={bulkDisableOpen}
+        onOpenChange={setBulkDisableOpen}
+        onConfirm={() => {
+          setBulkDisableOpen(false);
+          void bulkSetStatus("disabled");
+        }}
       />
       <DisableUserDialog
         user={disableTarget}

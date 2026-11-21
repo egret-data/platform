@@ -34,7 +34,7 @@ const LIST_CLASS: Record<TabsVariant, string> = {
   // still 40px (`min-h-10`). The Governance pages already did this by hand.
   pill: "inline-flex h-auto min-h-10 max-w-full flex-wrap items-center justify-start rounded-md bg-muted p-1 text-muted-foreground",
   underline:
-    "flex h-auto w-full items-end justify-start gap-4 overflow-x-auto border-b border-border bg-transparent p-0 text-muted-foreground",
+    "flex h-auto w-full items-end justify-start gap-4 overflow-x-auto border-b border-border bg-transparent p-0 pb-px text-muted-foreground",
 }
 
 const TRIGGER_BASE =

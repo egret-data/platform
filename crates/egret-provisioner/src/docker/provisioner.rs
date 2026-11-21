@@ -10,7 +10,8 @@ use super::plan::{plan_trino, ContainerPlan, PlanOptions};
 use crate::spec::{EngineKind, EngineSpec, EngineStatus, PodStatus, RangerRollout};
 use egret_engine_mgmt_api::EngineProvisioningPort;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 const LOG_LINES: usize = 20;
 
@@ -19,6 +20,23 @@ pub struct DockerEngineProvisioner {
     network: String,
     project: String,
     allowed_images: Vec<String>,
+    /// Engines whose containers `update` is replacing right now, as `(namespace, name)`.
+    /// While one is in the set its stopped containers are the swap, not a failure (KI-273).
+    updating: Arc<Mutex<BTreeSet<(String, String)>>>,
+}
+
+/// Marks an engine as being swapped for as long as it lives, on every exit path.
+struct UpdatingGuard {
+    set: Arc<Mutex<BTreeSet<(String, String)>>>,
+    key: (String, String),
+}
+
+impl Drop for UpdatingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.set.lock() {
+            s.remove(&self.key);
+        }
+    }
 }
 
 impl DockerEngineProvisioner {
@@ -33,7 +51,15 @@ impl DockerEngineProvisioner {
             network,
             project,
             allowed_images,
+            updating: Arc::default(),
         }
+    }
+
+    fn is_updating(&self, namespace: &str, name: &str) -> bool {
+        self.updating
+            .lock()
+            .map(|s| s.contains(&(namespace.to_string(), name.to_string())))
+            .unwrap_or(false)
     }
 
     fn require_trino(kind: &str) -> Result<(), String> {
@@ -201,6 +227,16 @@ impl EngineProvisioningPort for DockerEngineProvisioner {
         Self::require_trino(kind)?;
         let containers = self.engine_containers(namespace, name).await?;
         let pods: Vec<PodStatus> = containers.iter().map(pod_of).collect();
+        // KI-273: during a settings swap the old containers are stopped (a stopped container
+        // reports Exited) before the new ones exist. That is an update in progress, not a
+        // failure; a container that dies outside a swap still reads Failed.
+        if self.is_updating(namespace, name) {
+            return Ok(EngineStatus {
+                phase: "provisioning".into(),
+                message: Some("updating: replacing the engine's containers".into()),
+                pods,
+            });
+        }
         let failed = containers.iter().find(|c| {
             matches!(
                 c.state,
@@ -233,6 +269,16 @@ impl EngineProvisioningPort for DockerEngineProvisioner {
         // the running engine. Pulling first keeps a registry outage from doing so.
         let plans = self.plan(spec)?;
         self.ensure_images(&plans).await?;
+        let _swapping = {
+            let key = (spec.namespace.clone(), spec.name.clone());
+            if let Ok(mut s) = self.updating.lock() {
+                s.insert(key.clone());
+            }
+            UpdatingGuard {
+                set: self.updating.clone(),
+                key,
+            }
+        };
         let current = self.engine_containers(&spec.namespace, &spec.name).await?;
         let had = current.len();
         self.remove_all(current.into_iter().map(|c| c.name)).await?;
@@ -492,6 +538,37 @@ mod tests {
             assert_eq!(s.pods[0].phase, pod_phase, "{state:?}");
             assert_eq!(s.pods[0].ready, ready, "{state:?}");
         }
+    }
+
+    /// KI-273: a settings swap stops the old containers (they report Exited) before the new
+    /// ones exist; that window reads "provisioning", and a genuine crash outside it still
+    /// reads "failed".
+    #[tokio::test]
+    async fn status_during_a_swap_is_provisioning_not_failed() {
+        let (fake, p) = setup();
+        p.provision(&spec_with("e1", 0)).await.unwrap();
+        fake.set_state(&coord("e1"), ContainerState::Exited { code: 143 });
+
+        p.updating
+            .lock()
+            .unwrap()
+            .insert((NS.to_string(), "e1".to_string()));
+        let during = p.status("trino", NS, "e1").await.unwrap();
+        assert_eq!(during.phase, "provisioning");
+        assert!(during.message.as_deref().unwrap_or("").contains("updating"));
+
+        p.updating.lock().unwrap().clear();
+        let after = p.status("trino", NS, "e1").await.unwrap();
+        assert_eq!(after.phase, "failed");
+    }
+
+    #[tokio::test]
+    async fn update_clears_its_swap_marker_when_done() {
+        let (_fake, p) = setup();
+        p.provision(&spec_with("e1", 0)).await.unwrap();
+        p.update(&spec_with("e1", 0)).await.unwrap();
+        assert!(!p.is_updating(NS, "e1"));
+        assert_eq!(p.status("trino", NS, "e1").await.unwrap().phase, "running");
     }
 
     #[tokio::test]

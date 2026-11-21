@@ -262,6 +262,11 @@ describe("UsersPage", () => {
     expect(screen.getByText("2 selected")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /^Disable$/ }));
 
+    // KI-262: nothing is disabled until the confirmation is accepted.
+    expect(await screen.findByText("Disable 2 users?")).toBeInTheDocument();
+    expect(api.updateUser).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /^Disable users$/ }));
+
     await waitFor(() =>
       expect(api.updateUser).toHaveBeenCalledWith("u1", { status: "disabled" }),
     );
@@ -308,6 +313,7 @@ describe("UsersPage", () => {
     vi.mocked(api.updateUser).mockClear();
 
     await user.click(screen.getByRole("button", { name: /^Disable$/ }));
+    await user.click(await screen.findByRole("button", { name: /^Disable users$/ }));
 
     await waitFor(() =>
       expect(api.updateUser).toHaveBeenCalledWith("u1", { status: "disabled" }),
