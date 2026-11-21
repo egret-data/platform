@@ -1262,6 +1262,67 @@ pub struct TagServiceChange {
     pub after: Option<String>,
 }
 
+/// Lock the rows a tag-service change of the profile `profile_id` to
+/// `tag_service` touches, in ascending id order: the profile, the tag service
+/// it names now and the one it will name (KI-325).
+///
+/// An engine bind locks a profile's expanded set (the profile and its tag
+/// service, `egret_perm_compile::lock_services_in_tx`) ascending before it
+/// checks and writes. A tag service's id can be lower than its profile's, so
+/// taking the profile first here and the tag services after would be the
+/// opposed order two transactions deadlock on. The names are read without a
+/// lock to know which rows to take; [`set_tag_service_via`] re-reads the profile
+/// under its lock afterwards.
+pub async fn lock_tag_service_change_via(
+    conn: &mut sqlx::PgConnection,
+    profile_id: i64,
+    tag_service: &Value,
+) -> Result<(), PolicyStoreError> {
+    let current: Option<Value> =
+        sqlx::query_scalar("SELECT config_jsonb FROM policy.authz_services WHERE id = $1")
+            .bind(profile_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(config) = current else {
+        return Err(PolicyStoreError::NotFound(format!(
+            "service id {profile_id}"
+        )));
+    };
+    let names: Vec<&str> = [
+        config.get(TAG_SERVICE_CONFIG_KEY).and_then(Value::as_str),
+        tag_service.as_str(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM policy.authz_services WHERE id = $1 OR name = ANY($2)")
+            .bind(profile_id)
+            .bind(&names)
+            .fetch_all(&mut *conn)
+            .await?;
+    ids.sort_unstable();
+    ids.dedup();
+    lock_service_rows_via(conn, &ids).await
+}
+
+/// The names of the engines that download the profile `profile_id`, read on the
+/// caller's transaction (KI-325). Call it after [`lock_tag_service_change_via`]:
+/// an engine bind locks the profile before it checks and writes, so under the
+/// lock a bind either committed (and is listed here) or waits for this
+/// transaction and re-checks the profile it then finds.
+pub async fn engines_bound_to_via(
+    conn: &mut sqlx::PgConnection,
+    profile_id: i64,
+) -> Result<Vec<String>, PolicyStoreError> {
+    Ok(sqlx::query_scalar(
+        "SELECT name FROM engine_mgmt.engines WHERE authz_service_id = $1 ORDER BY name",
+    )
+    .bind(profile_id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
 /// **The `UPDATE` writer of [`TAG_SERVICE_CONFIG_KEY`]** (#786): set, change or
 /// remove (JSON `null`) the tag service of the profile `profile_id`, on the caller's
 /// transaction. `Ok(None)` when the profile already says that (nothing written).

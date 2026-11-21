@@ -440,7 +440,23 @@ async fn update_external_engine(
     // both through migration 0187's trigger, and the recompile of the second
     // would otherwise lock it after the first one's pre-mint took the
     // compile-mint lock (refused as `ProfileSetChanged`, #792).
-    crate::profile_compiler::lock_profiles(&st, &mut tx, &touched).await?;
+    match new_profile {
+        // A move re-checks the profile under the lock (KI-325): a tag-service
+        // change either committed before it, and is seen, or waits for this
+        // transaction and finds the engine bound.
+        Some(sid) if Some(sid) != old_profile => {
+            crate::engines::lock_then_check_bindable(
+                &st,
+                &mut tx,
+                &touched,
+                sid,
+                &engine.r#type,
+                &engine.name,
+            )
+            .await?
+        }
+        _ => crate::profile_compiler::lock_profiles(&st, &mut tx, &touched).await?,
+    }
     let before = crate::profile_compiler::snapshot_overlaps_of(&st, &mut tx, &touched).await?;
     let updated = sqlx::query_as::<_, Engine>(
         "UPDATE engine_mgmt.engines \
@@ -604,6 +620,19 @@ async fn register_in_tx(
     // Taken after the row exists and BEFORE the bind and the attachments: they
     // are what change which catalogs, hence which tag assignments, the profile's
     // unit resolves, so a pair they complete must not read as already stored.
+    if let Some(sid) = b.authz_service_id {
+        // Under the profile's lock, so a tag-service change cannot slip between
+        // the check made before this transaction and the bind (KI-325).
+        crate::engines::lock_then_check_bindable(
+            st,
+            &mut tx,
+            &[sid],
+            sid,
+            &engine.r#type,
+            &engine.name,
+        )
+        .await?;
+    }
     let before =
         crate::profile_compiler::snapshot_overlaps(st, &mut tx, b.authz_service_id).await?;
     if let Some(sid) = b.authz_service_id {

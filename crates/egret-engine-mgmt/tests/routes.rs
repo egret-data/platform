@@ -57,6 +57,9 @@ struct RecordingProfileCompiler {
     in_tx_calls: Arc<std::sync::Mutex<Vec<i64>>>,
     /// `converge_infra` calls (governance SP2a infrastructure convergence).
     converge_calls: Arc<std::sync::Mutex<Vec<i64>>>,
+    /// `lock_profiles_in_tx` calls, one entry per call holding the ids it was
+    /// given (KI-332: a profile move must lock both profiles before its write).
+    lock_calls: Arc<std::sync::Mutex<Vec<Vec<i64>>>>,
 }
 
 #[async_trait::async_trait]
@@ -94,8 +97,9 @@ impl egret_engine_mgmt::ProfileCompilerPort for RecordingProfileCompiler {
     async fn lock_profiles_in_tx(
         &self,
         _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        _service_ids: &[i64],
+        service_ids: &[i64],
     ) -> Result<(), egret_perm::CompileError> {
+        self.lock_calls.lock().unwrap().push(service_ids.to_vec());
         Ok(())
     }
 
@@ -11746,6 +11750,64 @@ async fn update_with_authz_service_id_binds_and_recompiles() {
     );
 }
 
+/// KI-332: moving an engine from one profile to another bumps BOTH profiles'
+/// policy versions in one `UPDATE` (migration 0187's trigger). Two such moves
+/// locking the pair in opposite orders deadlock, so the move must lock the old
+/// and the new profile first, the way `PATCH …/external` does (#813).
+#[tokio::test]
+async fn update_moving_an_engine_locks_both_profiles_first() {
+    let compiler = RecordingProfileCompiler::default();
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(Arc::new(compiler.clone())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_move_lock", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let engine_id = j["id"].as_str().unwrap().to_string();
+    let old = authz_service_of(&f, &name)
+        .await
+        .expect("auto-bound profile");
+    let other = seed_ranger_profile(&f, &format!("other-{}", Uuid::new_v4().simple()), &[]).await;
+    compiler.lock_calls.lock().unwrap().clear();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}"),
+            &token,
+            Some(rebind_body(&name, wh_id, serde_json::json!(other))),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "update; body={j}");
+
+    let locks = compiler.lock_calls.lock().unwrap().clone();
+    let mut expected = vec![old, other];
+    expected.sort_unstable();
+    assert!(
+        locks.iter().any(|ids| {
+            let mut ids = ids.clone();
+            ids.sort_unstable();
+            ids == expected
+        }),
+        "the move must lock the old and the new profile together before its write; \
+         lock calls: {locks:?}, expected the pair {expected:?}"
+    );
+}
+
 /// **The discriminating test.** An `authz_service_id` naming no profile is
 /// REFUSED, and the refusal NAMES the id. Silence is the defect: before this,
 /// the field was accepted and dropped, so a caller who mistyped an id got a
@@ -13832,6 +13894,124 @@ impl egret_engine_mgmt::ProfileCompilerPort for ConflictAfterDryRun {
     ) -> Result<(), egret_perm::CompileError> {
         self.inner.refuse_created_overlaps_in_tx(tx, snapshot).await
     }
+}
+
+/// The real compiler, plus the effect the first compile of a new engine's profile
+/// has when a grant reaches it: after the bind's compile, a compiler-owned
+/// policy (`perm-grant-…`) sits in the profile (KI-343).
+struct PolicyAfterBindCompile {
+    inner: RealProfileCompiler,
+}
+
+#[async_trait::async_trait]
+impl egret_engine_mgmt::ProfileCompilerPort for PolicyAfterBindCompile {
+    async fn recompile_profile(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        self.inner.recompile_profile(service_id).await
+    }
+    async fn converge_infra(&self, service_id: i64) -> Result<(), egret_perm::CompileError> {
+        self.inner.converge_infra(service_id).await
+    }
+    async fn recompile_catalog_assignment_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        catalog_id: Uuid,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner
+            .recompile_catalog_assignment_in_tx(tx, catalog_id)
+            .await
+    }
+    async fn recompile_profile_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_id: i64,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.recompile_profile_in_tx(tx, service_id).await?;
+        sqlx::query(
+            "INSERT INTO policy.authz_policies (service_id, name, policy_jsonb) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(service_id)
+        .bind(format!("perm-grant-{}", Uuid::new_v4()))
+        .bind(serde_json::json!({ "policyItems": [], "denyPolicyItems": [] }))
+        .execute(&mut **tx)
+        .await
+        .map_err(egret_perm::CompileError::from_db)?;
+        Ok(())
+    }
+    async fn lock_profiles_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.lock_profiles_in_tx(tx, service_ids).await
+    }
+    async fn overlap_snapshot_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        service_ids: &[i64],
+    ) -> Result<egret_engine_mgmt::OverlapSnapshot, egret_perm::CompileError> {
+        self.inner.overlap_snapshot_in_tx(tx, service_ids).await
+    }
+    async fn refuse_created_overlaps_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        snapshot: &egret_engine_mgmt::OverlapSnapshot,
+    ) -> Result<(), egret_perm::CompileError> {
+        self.inner.refuse_created_overlaps_in_tx(tx, snapshot).await
+    }
+}
+
+/// KI-343: an Add engine that fails after the first compile wrote a policy into
+/// the new Trino engine's profile leaves no profile and no tag service behind.
+/// The compensation's delete of the profile is refused while a compiler-owned
+/// policy remains, so it must reap that policy first.
+#[tokio::test]
+async fn a_failed_create_after_the_first_compile_leaves_no_profile_behind() {
+    let port = FakeEnginePort::default();
+    port.set_fail_provision(true);
+    let dsn = egret_test_db::url().await;
+    let Some(dsn) = dsn else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let db = Db::connect(&dsn, 5).await.expect("connect");
+    let compiler = Arc::new(PolicyAfterBindCompile {
+        inner: RealProfileCompiler {
+            perm: egret_perm::PermStore::new(db.pool.clone()),
+            policy: egret_policy::PolicyStore::new(db.clone()),
+        },
+    });
+    let Some(f) = setup_with_ranger_and_compiler(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+        true,
+        Some(compiler),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "ki343_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert!(
+        status.is_server_error() || status.is_client_error(),
+        "the create must fail; status={status} body={j}"
+    );
+
+    let left: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM policy.authz_services WHERE name = $1 OR name = $2")
+            .bind(&name)
+            .bind(format!("{name}_tag"))
+            .fetch_all(&f.db.pool)
+            .await
+            .unwrap();
+    assert!(
+        left.is_empty(),
+        "the failed create left policy profiles behind: {left:?}"
+    );
 }
 
 /// I2: a pair created by a write that commits between the attach's dry run and

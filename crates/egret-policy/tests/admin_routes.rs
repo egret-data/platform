@@ -4851,29 +4851,33 @@ async fn set_tag_service_refuses_a_bound_or_generated_profile() {
     let token = session_for(&f, "set_tag_bound", true).await;
     let (svc_name, svc_id) = seed_service(&f).await;
     let (tag_name, tag_id) = tag_profile(&f, "bound").await;
-    let reader = Arc::new(MockEngineReader {
-        bindings: vec![EngineBinding {
-            id: Uuid::new_v4(),
-            name: "trino-ext".into(),
-            status: "Running".into(),
-            authz_service_id: Some(svc_id),
-            warehouse_ids: Vec::new(),
-            image: None,
-            origin: "external".into(),
-            r#type: "trino".into(),
-        }],
-        ..Default::default()
-    });
+    // The check reads the engines table on the write's own transaction (KI-325),
+    // so the binding is a real row, not the reader's.
+    let engine_name = format!("trino-ext-{}", Uuid::new_v4().simple());
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(&engine_name)
+    .bind(svc_id)
+    .fetch_one(&f.db.pool)
+    .await
+    .expect("engine");
     let (status, body) = put_tag_service(
-        f.app(reader),
+        f.app_empty(),
         &token,
         &svc_name,
         serde_json::json!(tag_name),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "body={body}");
-    assert!(body.to_string().contains("trino-ext"), "body={body}");
+    assert!(body.to_string().contains(&engine_name), "body={body}");
     assert_eq!(f.store.usable_tag_service(svc_id).await.unwrap(), None);
+    sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = $1")
+        .bind(engine_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("drop engine");
 
     let (gen_name, gen_id) = seed_service(&f).await;
     sqlx::query("UPDATE policy.authz_services SET origin = 'generated' WHERE id = $1")
@@ -4895,6 +4899,81 @@ async fn set_tag_service_refuses_a_bound_or_generated_profile() {
     for id in [svc_id, gen_id, tag_id] {
         f.store.delete_service(id).await.expect("cleanup");
     }
+}
+
+/// KI-325: an engine bind that holds the profile's lock when a tag-service change
+/// arrives must be seen by the change. The bind below is a transaction that has
+/// locked the profile and bound an engine to it but not committed; the change
+/// queues on the profile's lock, and once the bind commits it must refuse (409)
+/// and leave the tag service alone. Before the fix the engine check ran before
+/// the transaction, found no engine, and the change then committed over the bind.
+#[tokio::test]
+async fn a_tag_service_change_queued_behind_an_engine_bind_sees_the_bind() {
+    let Some(f) = setup().await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "set_tag_race", true).await;
+    let (svc_name, svc_id) = seed_service(&f).await;
+    let (tag_name, tag_id) = tag_profile(&f, "race").await;
+
+    let mut bind = f.db.pool.begin().await.expect("begin bind");
+    sqlx::query("SELECT id FROM policy.authz_services WHERE id = $1 FOR UPDATE")
+        .bind(svc_id)
+        .execute(&mut *bind)
+        .await
+        .expect("bind locks the profile");
+    let engine_name = format!("trino-race-{}", Uuid::new_v4().simple());
+    let engine_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
+         VALUES ($1,'trino','egret','{}'::jsonb,$2) RETURNING id",
+    )
+    .bind(&engine_name)
+    .bind(svc_id)
+    .fetch_one(&mut *bind)
+    .await
+    .expect("bind writes the engine");
+
+    let app = f.app_empty();
+    let change = tokio::spawn({
+        let (token, svc_name, tag_name) = (token.clone(), svc_name.clone(), tag_name.clone());
+        async move { put_tag_service(app, &token, &svc_name, serde_json::json!(tag_name)).await }
+    });
+    // Wait until the change is queued on a lock, not for a fixed time.
+    let mut queued = false;
+    for _ in 0..200 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE wait_event_type = 'Lock' AND query ILIKE '%authz_services%FOR UPDATE%'",
+        )
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("pg_stat_activity");
+        if waiting > 0 {
+            queued = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        queued,
+        "the tag-service change never queued on the profile lock"
+    );
+    bind.commit().await.expect("commit bind");
+
+    let (status, body) = change.await.expect("join");
+    let tag_after = f.store.usable_tag_service(svc_id).await.unwrap();
+    sqlx::query("DELETE FROM engine_mgmt.engines WHERE id = $1")
+        .bind(engine_id)
+        .execute(&f.db.pool)
+        .await
+        .expect("drop engine");
+    for id in [svc_id, tag_id] {
+        f.store.delete_service(id).await.expect("cleanup");
+    }
+    assert_eq!(status, StatusCode::CONFLICT, "body={body}");
+    assert!(body.to_string().contains(&engine_name), "body={body}");
+    assert_eq!(tag_after, None, "the refused change must write nothing");
 }
 
 /// `policy:update` gates the route: `policy:read` alone (and `policy:create`)
