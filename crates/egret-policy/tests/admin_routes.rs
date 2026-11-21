@@ -4955,7 +4955,10 @@ async fn a_tag_service_change_queued_behind_an_engine_bind_sees_the_bind() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    assert!(queued, "the tag-service change never queued on the profile lock");
+    assert!(
+        queued,
+        "the tag-service change never queued on the profile lock"
+    );
     bind.commit().await.expect("commit bind");
 
     let (status, body) = change.await.expect("join");

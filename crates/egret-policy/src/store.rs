@@ -1295,13 +1295,12 @@ pub async fn lock_tag_service_change_via(
     .into_iter()
     .flatten()
     .collect();
-    let mut ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM policy.authz_services WHERE id = $1 OR name = ANY($2)",
-    )
-    .bind(profile_id)
-    .bind(&names)
-    .fetch_all(&mut *conn)
-    .await?;
+    let mut ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM policy.authz_services WHERE id = $1 OR name = ANY($2)")
+            .bind(profile_id)
+            .bind(&names)
+            .fetch_all(&mut *conn)
+            .await?;
     ids.sort_unstable();
     ids.dedup();
     lock_service_rows_via(conn, &ids).await

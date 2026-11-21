@@ -3283,7 +3283,8 @@ fn engine_ranger_secret_ids(engine: &Engine) -> Vec<Uuid> {
 /// cluster delete errors, touching nothing else). Order: cluster, row (then
 /// the secrets it referenced — a row that cannot be deleted keeps its secrets
 /// and is marked `failed`), profiles this create made (their policies
-/// cascade), catalog client. Policies seeded into a PRE-EXISTING profile are
+/// cascade, after a recompile has reaped what the first compile wrote into them),
+/// catalog client. Policies seeded into a PRE-EXISTING profile are
 /// left alone: other engines may be bound to it.
 ///
 /// Deleting `engine_owned_secret_ids(&engine)` here is safe under the standing
@@ -3385,6 +3386,17 @@ async fn compensate_failed_create(st: &CpState, undo: CreateUndo) {
         ("tag service", undo.created_tag_service_id),
     ] {
         if let Some(id) = id {
+            // The first compile may have filed a grant's policy into the profile,
+            // and the delete is refused while a compiler-owned policy remains
+            // (KI-343). The engine row is gone, so a recompile reaps what nothing
+            // produces any more; a failed one is logged and the delete still tried.
+            // The tag service is swept with its profile, so only the profile is compiled.
+            if let (Some(compiler), "policy profile") = (st.perm_compiler.as_ref(), what) {
+                if let Err(e) = compiler.recompile_profile(id).await {
+                    tracing::error!(service_id = id, error = %e,
+                        "create compensation: policy profile recompile (reap) failed");
+                }
+            }
             if let Err(e) = st.authz.delete_service(id).await {
                 tracing::error!(service_id = id, error = %e,
                     "create compensation: {what} delete failed");
