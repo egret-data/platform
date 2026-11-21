@@ -309,9 +309,9 @@ export function SqlTab({ ws, tab, active = true, patch, onOpenSaved, onOpenPrevi
                         <SelectItem value="boolean">bool</SelectItem>
                       </SelectContent>
                     </Select>
-                    <input value={pv.value} onChange={(e) => set({ value: e.target.value })}
+                    <Input value={pv.value} onChange={(e) => set({ value: e.target.value })}
                       aria-label={`Value of ${n}`} placeholder="value"
-                      className="w-24 rounded-r-md border-l bg-transparent px-1.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                      className="h-7 w-28 text-xs" />
                   </span>
                 );
               })}

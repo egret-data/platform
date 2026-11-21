@@ -1,7 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, expect, test, vi } from "vitest";
+import { beforeAll, beforeEach, expect, test, vi } from "vitest";
 
 // ---- Mocks for the generated shares hooks ----------------------------------
 // useSharesGrantList is called twice by the dialog: once for the object's own
@@ -32,6 +32,11 @@ vi.mock("@/api/policies", () => ({
 }));
 
 import { ShareDialog } from "@/components/sharing/ShareDialog";
+
+// The expiry is the app's calendar, whose month grid loads lazily; load it once here.
+beforeAll(async () => {
+  await import("@/components/ui/calendar");
+}, 30_000);
 
 const ok = (grants: unknown[]): QResult => ({
   data: { data: grants },
@@ -184,13 +189,17 @@ test("calls the DELETE hook when removing a direct grant", async () => {
 test("calls the PUT hook with an RFC3339 expires_at when an expiry date is chosen", async () => {
   renderDialog();
   await userEvent.type(screen.getByLabelText("User email"), "dana@egret.local");
-  await userEvent.type(screen.getByLabelText("Access expires"), "2030-01-15");
+  // KI-276: the expiry is the app's calendar; the 15th exists in every month.
+  await userEvent.click(screen.getByRole("button", { name: "Access expires" }));
+  await userEvent.click(within(await screen.findByRole("grid")).getByRole("button", { name: /\b15th\b/ }));
   await userEvent.click(screen.getByRole("button", { name: "Add" }));
 
   expect(putMutate).toHaveBeenCalledTimes(1);
   const body = putMutate.mock.calls[0][0].data;
   expect(body.principal_id).toBe("dana@egret.local");
-  expect(body.expires_at).toBe(new Date("2030-01-15T23:59:59").toISOString());
+  const now = new Date();
+  const picked = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-15`;
+  expect(body.expires_at).toBe(new Date(`${picked}T23:59:59`).toISOString());
 });
 
 test("sends no expires_at when the expiry date is left blank", async () => {

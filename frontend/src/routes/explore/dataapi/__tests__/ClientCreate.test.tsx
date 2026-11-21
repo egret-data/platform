@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -112,6 +112,24 @@ beforeEach(() => {
     token_endpoint: "https://egret.local/oauth/token",
   });
 });
+
+/** The 15th of this month, as the picker shows it and as the page sends it. */
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const now = new Date();
+const PICKED_DAY = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-15`;
+
+/** Opens the app's calendar on the expiry field and picks the 15th (KI-276). */
+async function pickExpiry() {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Expires (optional)" }));
+  const grid = await screen.findByRole("grid");
+  await user.click(within(grid).getByRole("button", { name: /\b15th\b/ }));
+}
+
+// The picker loads its month grid lazily; load it once so no test pays for it.
+beforeAll(async () => {
+  await import("@/components/ui/calendar");
+}, 30_000);
 
 describe("ClientCreate", () => {
   /**
@@ -241,7 +259,7 @@ describe("ClientCreate", () => {
     renderCreate();
 
     await userEvent.type(screen.getByLabelText("Name"), "half-typed-etl");
-    await userEvent.type(screen.getByLabelText("Expires (optional)"), "2027-03-04");
+    await pickExpiry();
     await userEvent.click(screen.getByRole("button", { name: /create client/i }));
 
     // In a live region, so it is announced and not merely painted.
@@ -250,7 +268,7 @@ describe("ClientCreate", () => {
     // A dialog could be dismissed and retried; a page that clears itself loses
     // work the author cannot get back.
     expect(screen.getByLabelText("Name")).toHaveValue("half-typed-etl");
-    expect(screen.getByLabelText("Expires (optional)")).toHaveValue("2027-03-04");
+    expect(screen.getByRole("button", { name: "Expires (optional)" })).toHaveTextContent(PICKED_DAY);
     expect(screen.queryByTestId("client-secret")).not.toBeInTheDocument();
   });
 
@@ -295,13 +313,13 @@ describe("ClientCreate", () => {
     renderCreate();
 
     await userEvent.type(screen.getByLabelText("Name"), "etl-expiring");
-    await userEvent.type(screen.getByLabelText("Expires (optional)"), "2027-03-04");
+    await pickExpiry();
     await userEvent.click(screen.getByRole("button", { name: /create client/i }));
 
     await waitFor(() => expect(issueMutateAsync).toHaveBeenCalledTimes(1));
     expect(issueMutateAsync.mock.calls[0][0].data).toEqual({
       name: "etl-expiring",
-      expires_at: new Date("2027-03-04").toISOString(),
+      expires_at: new Date(PICKED_DAY).toISOString(),
     });
   });
 

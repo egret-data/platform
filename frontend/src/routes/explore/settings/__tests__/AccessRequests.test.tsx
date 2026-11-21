@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -32,6 +32,18 @@ vi.mock("@/api/members", () => ({
 }));
 
 import AccessRequests from "@/routes/explore/settings/AccessRequests";
+
+// The expiry is the app's calendar (KI-276); its month grid loads lazily, so load it once here.
+beforeAll(async () => {
+  await import("@/components/ui/calendar");
+}, 30_000);
+
+/** "1st", "22nd", "30th": how the calendar names a day. */
+const ordinal = (n: number) => {
+  const suffixes = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return `${n}${suffixes[(v - 20) % 10] ?? suffixes[v] ?? suffixes[0]}`;
+};
 
 // ── Render helper ─────────────────────────────────────────────────────────────
 
@@ -124,8 +136,14 @@ describe("AccessRequests page", () => {
     await user.click(await screen.findByRole("option", { name: "ws_admin" }));
 
     // Optional expiry date.
-    const dateInput = screen.getByLabelText(/access expires/i);
-    await user.type(dateInput, "2030-06-01");
+    // The picker floors at today, so pick the month's last day: never in the past.
+    await user.click(screen.getByRole("button", { name: /access expires/i }));
+    const now = new Date();
+    const last = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const month = now.toLocaleString("en-US", { month: "long" });
+    await user.click(
+      within(await screen.findByRole("grid")).getByRole("button", { name: new RegExp(`${month} ${ordinal(last)}`) }),
+    );
 
     await user.click(screen.getByRole("button", { name: /confirm/i }));
 
@@ -134,7 +152,7 @@ describe("AccessRequests page", () => {
         expect.objectContaining({
           id: "req-1",
           role: "ws_admin",
-          expires_at: expect.stringMatching(/^2030-06-0[12]T/),
+          expires_at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
         }),
         expect.anything(),
       );

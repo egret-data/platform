@@ -154,7 +154,7 @@ Mọi input có một `Label` gắn qua `htmlFor`/`id`.
 **Làm thế này:** `<Label htmlFor="name">Name</Label><Input id="name" />` (`frontend/src/components/ui/label.tsx`). **Kiểm bằng:** lint (phía label: `jsx-a11y/label-has-associated-control` đòi `Label` có `htmlFor` hoặc chứa control bên trong) và review (mọi input có label với `htmlFor` khớp `id` của nó; lint bỏ sót input không có label và id không khớp).
 
 #### FE-FORM-3 — Giá trị đã biết thì dùng picker · PHẢI
-Khi tập giá trị hợp lệ đã biết, control là picker hoặc combobox (chọn hoặc gõ) có trợ giúp, không bao giờ là ô nhập chữ trơn, và không bao giờ là `<select>` của trình duyệt: picker là `Select` của `ui/select`. Ngày hoặc giờ được chọn bằng `DateTimePicker`, không bao giờ bằng `datetime-local` của trình duyệt.
+Khi tập giá trị hợp lệ đã biết, control là picker hoặc combobox (chọn hoặc gõ) có trợ giúp, không bao giờ là ô nhập chữ trơn, và không bao giờ là `<select>` của trình duyệt: picker là `Select` của `ui/select`. Ngày hoặc giờ được chọn bằng `DateTimePicker`, không bao giờ bằng `datetime-local` của trình duyệt. Nơi giữ giá trị dạng chuỗi (`YYYY-MM-DD`, `YYYY-MM`, giá trị `datetime-local`) dùng `DateField`, `MonthField` hoặc `LocalDateTimeField` trong cùng file; giờ trong ngày là `TimeField`, tức `Input` dùng chung. Ô giá trị là `Input` dùng chung, không bao giờ là `<input>` trần.
 **Làm thế này:** `frontend/src/components/ui/select.tsx`, `frontend/src/components/ui/tag-combobox.tsx`, `frontend/src/components/ui/date-time-picker.tsx`; ví dụ: `frontend/src/routes/control-plane/config/PropertyPicker.tsx`. **Kiểm bằng:** lint (`egret/no-native-select` báo lỗi mọi `<select>`) và review (tập giá trị đã biết mà lại gõ vào ô chữ; lint không phân biệt được ô chữ tự do với ô có tập giá trị đã biết). **Vì sao:** KI-217: 15 file vẽ select của trình duyệt bên cạnh select dùng chung, khác chiều cao, viền, bo góc và mũi tên.
 
 #### FE-FORM-4 — Lỗi nằm cạnh field của nó · PHẢI
@@ -367,7 +367,7 @@ Mỗi dòng là một danh sách legacy trong `frontend/eslint-rules/legacy.js`:
 | FE-STATE-3 | chữ rỗng "No X" tự viết, và khối rỗng viền đứt | (5) 6 dòng dạng `"No <từ> yet\|found`; (6) 12 dòng `border-dashed` |
 | FE-DATA-2 | hai tiền tố key `cp` và `control-plane` cho cùng một domain | (7) 30 dòng `["cp"`; (8) 52 dòng `["control-plane"` |
 | FE-ROUTE-2 | chỉ khu vực Workflows trong `App.tsx` được lazy-load; các khu vực có trước nó vẫn eager | (9) 1 `lazy(` trong `App.tsx` (Workflows, W7a) |
-| FE-FORM-3 | ô ngày và giờ của trình duyệt (`type="date"`, `datetime-local`, `time`) mà `DateTimePicker` chưa thay (đếm ngày 2026-10-23 sau U2, gói đã thay ô của nhật ký kiểm toán) | (11) 17 dòng |
+| FE-FORM-3 | ô ngày và giờ của trình duyệt (`type="date"`, `datetime-local`, `time`, `month`) mà các picker dùng chung chưa thay (17 ngày 2026-10-23 sau U2; đã xóa hết bởi KI-275/276) | (11) 0 dòng |
 | tài liệu | `docs/vi/ui-conventions.md` đã lệch so với `docs/en/ui-conventions.md` | (10) 664 dòng so với 2.227 |
 
 ```bash
@@ -381,7 +381,7 @@ grep -rn "\[\"cp\"\|\['cp'" src --include='*.ts*' | grep -v __tests__ | wc -l   
 grep -rn "\[\"control-plane\"" src --include='*.ts*' | grep -v __tests__ | wc -l                                # (8)
 grep -c "lazy(" src/App.tsx                                                                                    # (9)
 wc -l ../docs/vi/ui-conventions.md ../docs/en/ui-conventions.md                                               # (10)
-grep -rn 'type="\(date\|datetime-local\|time\)"' src --include='*.tsx' | grep -v __tests__ | wc -l            # (11)
+grep -rn 'type="\(date\|datetime-local\|time\|month\)"' src --include='*.tsx' | grep -v __tests__ | wc -l            # (11)
 ```
 
 **Lệnh grep đã thu hẹp (2026-10-10, final review của W7a).** Lệnh (3) và (5) từng đếm cả code đúng rule, nên các phần W7a thêm vào dù đúng rule vẫn trông như nợ mới (FE-PAGE-4 từ 19 lên 21, FE-STATE-3 từ 20 lên 22). Giờ chúng bỏ qua dòng comment, và (5) bỏ qua dòng `title=`, tức tiêu đề của `EmptyState` (dạng đúng rule). Với cùng lệnh đã thu hẹp, số đếm trước W7a là 16 và 6. Dòng duy nhất của W7a mà (3) còn đếm là đúng rule: `<table>` nhóm theo namespace trong `src/routes/workflows/FlowsList.tsx`, một grid đặc thù được phép, có comment FE-PAGE-4.

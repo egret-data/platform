@@ -1,4 +1,5 @@
 import { useId, useMemo, useState } from "react";
+import { DateField } from "@/components/ui/date-time-picker";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
@@ -450,12 +451,11 @@ function AddGrantRow({
       </div>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <label htmlFor={expiresAtId}>Access expires</label>
-        <Input
+        <DateField
           id={expiresAtId}
-          type="date"
           className="h-8 w-40"
           value={expiresAt}
-          onChange={(e) => setExpiresAt(e.target.value)}
+          onChange={setExpiresAt}
         />
         <span>optional — leave blank for no expiry</span>
       </div>

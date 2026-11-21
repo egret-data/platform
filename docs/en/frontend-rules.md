@@ -152,7 +152,7 @@ Every input has a `Label` tied by `htmlFor`/`id`.
 **Do this:** `<Label htmlFor="name">Name</Label><Input id="name" />` (`frontend/src/components/ui/label.tsx`). **Checked by:** lint (the label side: `jsx-a11y/label-has-associated-control` requires a `Label` to have `htmlFor` or a nested control) and review (every input has a label whose `htmlFor` matches its `id`; lint misses an unlabelled input and a mismatched id).
 
 #### FE-FORM-3 — Known values get a picker · MUST
-When the set of valid values is known, the control is a picker or a combobox (pick or type) with help. It is never a bare text input, and never the browser's own `<select>`: a picker is `Select` from `ui/select`. A date or a time is picked with `DateTimePicker`, never with the browser's `datetime-local`.
+When the set of valid values is known, the control is a picker or a combobox (pick or type) with help. It is never a bare text input, and never the browser's own `<select>`: a picker is `Select` from `ui/select`. A date or a time is picked with `DateTimePicker`, never with the browser's `datetime-local`. A consumer that holds a string (`YYYY-MM-DD`, `YYYY-MM`, a `datetime-local` value) uses `DateField`, `MonthField` or `LocalDateTimeField` from the same file; a time of day is `TimeField`, the shared `Input`. A value box is the shared `Input`, never a bare `<input>`.
 **Do this:** `frontend/src/components/ui/select.tsx`, `frontend/src/components/ui/tag-combobox.tsx`, `frontend/src/components/ui/date-time-picker.tsx`; example: `frontend/src/routes/control-plane/config/PropertyPicker.tsx`. **Checked by:** lint (`egret/no-native-select` fails a `<select>`) and review (a known set typed into a text input; lint cannot tell a free text field from a known one). **Why:** KI-217: 15 files drew the browser's select beside the shared one, with another height, border, radius and chevron.
 
 #### FE-FORM-4 — Errors sit beside their field · MUST
@@ -365,7 +365,7 @@ Counted on 2026-10-10. These are **grep counts, not an inventory**: each is a ro
 | FE-STATE-3 | hand-written "No X" empty texts, and dashed empty blocks | (5) 6 lines of the form `"No <word> yet\|found`; (6) 12 `border-dashed` lines |
 | FE-DATA-2 | the `cp` and `control-plane` key prefixes for one domain | (7) 30 `["cp"` lines; (8) 52 `["control-plane"` lines |
 | FE-ROUTE-2 | only the Workflows area in `App.tsx` is lazy; the areas before it are eager | (9) 1 `lazy(` in `App.tsx` (Workflows, W7a) |
-| FE-FORM-3 | the browser's own date and time inputs (`type="date"`, `datetime-local`, `time`) that `DateTimePicker` has not replaced yet (counted 2026-10-23 after U2, which replaced the audit log's) | (11) 17 lines |
+| FE-FORM-3 | the browser's own date and time inputs (`type="date"`, `datetime-local`, `time`, `month`) that the shared pickers have not replaced yet (17 on 2026-10-23 after U2; cleared by KI-275/276) | (11) 0 lines |
 | docs | `docs/vi/ui-conventions.md` has drifted from `docs/en/ui-conventions.md` | (10) 664 lines against 2,227 |
 
 ```bash
@@ -379,7 +379,7 @@ grep -rn "\[\"cp\"\|\['cp'" src --include='*.ts*' | grep -v __tests__ | wc -l   
 grep -rn "\[\"control-plane\"" src --include='*.ts*' | grep -v __tests__ | wc -l                                # (8)
 grep -c "lazy(" src/App.tsx                                                                                    # (9)
 wc -l ../docs/vi/ui-conventions.md ../docs/en/ui-conventions.md                                               # (10)
-grep -rn 'type="\(date\|datetime-local\|time\)"' src --include='*.tsx' | grep -v __tests__ | wc -l            # (11)
+grep -rn 'type="\(date\|datetime-local\|time\|month\)"' src --include='*.tsx' | grep -v __tests__ | wc -l            # (11)
 ```
 
 **Narrowed greps (2026-10-10, W7a final review).** Greps (3) and (5) used to count compliant code, so W7a's compliant additions read as new debt (FE-PAGE-4 from 19 to 21, FE-STATE-3 from 20 to 22). They now skip comment lines, and (5) skips `title=` lines, which are `EmptyState` titles (the compliant form). On the same narrowed greps the counts before W7a were 16 and 6. The one W7a line still counted by (3) is compliant: the namespace-grouped `<table>` in `src/routes/workflows/FlowsList.tsx`, an allowed specialised grid with its FE-PAGE-4 comment.

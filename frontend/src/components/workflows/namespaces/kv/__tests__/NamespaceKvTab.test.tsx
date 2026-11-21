@@ -18,9 +18,11 @@ vi.mock("sonner", () => ({ toast }));
  * here to one with an offset.
  */
 const savedTz = process.env.TZ;
-beforeAll(() => {
+beforeAll(async () => {
   process.env.TZ = "Asia/Ho_Chi_Minh";
-});
+  // The picker loads its month grid lazily; load it once so no test pays for it.
+  await import("@/components/ui/calendar");
+}, 30_000);
 afterAll(() => {
   process.env.TZ = savedTz;
 });
@@ -284,8 +286,8 @@ describe("row actions", () => {
     const user = await openRowMenu("when");
     await user.click(screen.getByRole("menuitem", { name: "Edit" }));
     const sheet = await screen.findByRole("dialog", { name: "Edit when" });
-    // The form shows milliseconds at most (datetime-local), in the viewer's zone.
-    expect(await within(sheet).findByLabelText("Value")).toHaveValue("2026-10-14T09:30:00.123");
+    // The form shows milliseconds at most (the picker keeps to the millisecond), in the viewer's zone.
+    expect(await within(sheet).findByLabelText("Value")).toHaveTextContent("2026-10-14 09:30:00.123");
     await user.type(within(sheet).getByLabelText("Description"), " later");
     await user.click(within(sheet).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(puts()).toHaveLength(1));
@@ -481,6 +483,23 @@ const typeValue = (text: string) => async (user: ReturnType<typeof userEvent.set
   if (text) await user.type(field, text.replace(/[{[]/g, (c) => c + c));
 };
 
+/** The 14th of this month, in the viewer's zone: the calendar opens on it with no value. */
+const PAD = (n: number) => String(n).padStart(2, "0");
+const NOW = new Date();
+const PICKED_YMD = `${NOW.getFullYear()}-${PAD(NOW.getMonth() + 1)}-14`;
+
+/** Picks the 14th in the app's calendar (KI-276), then types a time when one is given. */
+const pickDay = (time?: string) => async (user: ReturnType<typeof userEvent.setup>, sheet: HTMLElement) => {
+  await user.click(within(sheet).getByRole("button", { name: "Value" }));
+  const grid = await screen.findByRole("grid");
+  await user.click(within(grid).getByRole("button", { name: /\b14th\b/ }));
+  if (time) {
+    const field = screen.getByLabelText("Time");
+    await user.clear(field);
+    await user.type(field, `${time}{Enter}`);
+  }
+};
+
 describe("the create drawer, for each type", () => {
   it.each([
     ["STRING", typeValue('say "hi"'), '"say \\"hi\\""'],
@@ -493,8 +512,8 @@ describe("the create drawer, for each type", () => {
       },
       "false",
     ],
-    ["DATETIME", typeValue("2026-10-14T09:30"), "2026-10-14T02:30:00.000Z"],
-    ["DATE", typeValue("2026-10-14"), "2026-10-14"],
+    ["DATETIME", pickDay("09:30"), `${PICKED_YMD}T02:30:00.000Z`],
+    ["DATE", pickDay(), PICKED_YMD],
     ["DURATION", typeValue("PT1H30M"), '"PT1H30M"'],
     ["NUMBER", typeValue("6.02e23"), "6.02d23"],
     ["JSON", typeValue('{"a": [1, 2.50, 1.2345678901234567890e5]}'), '{"a":[1,2.50,1.2345678901234567890d5]}'],
@@ -519,8 +538,8 @@ describe("the create drawer, for each type", () => {
     ["STRING", typeValue("PT1H"), /reads as a duration.*Choose the DURATION type/],
     ["NUMBER", typeValue("1,5"), /Enter a number/],
     ["BOOLEAN", async () => {}, /Choose true or false/],
-    ["DATETIME", typeValue(""), /Enter a date and a time/],
-    ["DATE", typeValue(""), /Enter a date/],
+    ["DATETIME", async () => {}, /Enter a date and a time/],
+    ["DATE", async () => {}, /Enter a date/],
     ["DURATION", typeValue("PT1.5S"), /Enter a duration/],
     ["JSON", typeValue("42"), /object.*or an array/],
   ])("refuses an invalid %s beside the field, and sends nothing", async (type, fill, message) => {

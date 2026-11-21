@@ -74,11 +74,14 @@ describe("FilterPill tier2d", () => {
     expect(onChange).toHaveBeenCalledWith(["US"]);
   });
 
-  it("month-year renders an <input type=month>", () => {
-    const onChange = openPill(p({ type: "date", operator: "month-year" }), "", []);
-    const input = screen.getByLabelText("F value") as HTMLInputElement;
-    expect(input.type).toBe("month");
-    fireEvent.change(input, { target: { value: "2024-03" } });
+  it("month-year renders the app's month picker and writes YYYY-MM", async () => {
+    const user = userEvent.setup();
+    const onChange = openPill(p({ type: "date", operator: "month-year" }), "2024-01", []);
+    // The value box is the shared picker's button, not a native `type=month` input.
+    const box = screen.getByRole("button", { name: "F value" });
+    expect(box).toHaveTextContent("2024-01");
+    await user.click(box);
+    await user.click(screen.getByRole("button", { name: "Mar" }));
     expect(onChange).toHaveBeenCalledWith("2024-03");
   });
 

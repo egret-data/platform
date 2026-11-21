@@ -1,4 +1,5 @@
 import { useEffect, useId, useState } from "react";
+import { DateField, LocalDateTimeField } from "@/components/ui/date-time-picker";
 import MonacoEditor from "@/components/monaco/MonacoEditor";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,7 +10,7 @@ import { encodeValue, KV_TYPE_HELP, type KvType } from "./kvValue";
 
 /**
  * The value's control for its type (W7d spec §4.4): text for a STRING, a
- * number field that keeps every digit, a true/false picker, the browser's
+ * number field that keeps every digit, a true/false picker, the app's
  * date-time and date pickers, a duration field, and Monaco for JSON. The
  * label is "Value" for each, the type's help under it, and the error (from
  * `encodeValue`, the server's rules) beside it (FE-FORM-4).
@@ -62,14 +63,14 @@ export function KvValueControl({
       const utc = encodeValue("DATETIME", value);
       control = (
         <>
-          <Input {...common} type="datetime-local" step="0.001" className="w-64" value={value} onChange={(e) => onChange(e.target.value)} />
+          <LocalDateTimeField {...common} precision="millisecond" className="w-64" value={value} onChange={onChange} />
           {utc.ok ? <p className="text-xs text-muted-foreground tabular-nums">Stored as {utc.body} (UTC).</p> : null}
         </>
       );
       break;
     }
     case "DATE":
-      control = <Input {...common} type="date" className="w-48" value={value} onChange={(e) => onChange(e.target.value)} />;
+      control = <DateField {...common} className="w-48" value={value} onChange={onChange} />;
       break;
     case "DURATION":
       control = (
