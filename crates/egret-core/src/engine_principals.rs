@@ -25,6 +25,10 @@ pub const LINEAGE_PRINCIPAL: &str = "egret-lineage";
 /// minted it (username-takeover spec §4.1; engine grants spec E21).
 pub const DELEGATOR_PRINCIPAL: &str = "egret_delegator";
 
+/// The Trino user egret'"'"'s native monitor signs in as on every coordinator that
+/// is not JWT-only (`egret_core::engine_delegation::is_jwt_only_coordinator`).
+pub const MONITOR_PRINCIPAL: &str = "egret-monitor";
+
 /// The StarRocks user the AuditLoader plugin stream-loads audit events as.
 /// Reserved by migration 0218's `username_ledger` row, like [`DELEGATOR_PRINCIPAL`].
 pub const QUERY_LOG_LOADER_PRINCIPAL: &str = "egret_query_log";

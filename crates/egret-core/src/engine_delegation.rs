@@ -57,6 +57,23 @@ pub fn delegation_mode<'a>(engine_type: &str, spec: &'a Value) -> &'a str {
     }
 }
 
+/// Whether the coordinator is JWT-only for egret's own callers: jwt delegation
+/// mode AND an `auth.jwt` object. The native monitor signs in as the viewer on
+/// such an engine and as `egret-monitor` on every other one. A jwt-mode spec
+/// with no jwt block renders PASSWORD auth like any other engine, so it keeps
+/// its `egret-monitor` user.
+pub fn is_jwt_only_coordinator(engine_type: &str, spec: &Value) -> bool {
+    delegation_mode(engine_type, spec) == "jwt" && supports_jwt_delegation(engine_type, spec)
+}
+
+/// Whether egret's native monitor signs in as `egret-monitor` on this bound
+/// engine, so its profile must let that user view and kill every user's
+/// queries: a Trino engine egret provisioned ([`needs_user_baseline`]) whose
+/// coordinator is not JWT-only.
+pub fn monitor_signs_in_as_service_user(engine_type: &str, origin: &str, spec: &Value) -> bool {
+    needs_user_baseline(engine_type, origin) && !is_jwt_only_coordinator(engine_type, spec)
+}
+
 /// Whether the engine can back a delegated (per-user) connection at all.
 /// Impersonate mode always can; jwt mode requires JWT auth enabled.
 pub fn supports_delegation(engine_type: &str, spec: &Value) -> bool {
@@ -113,6 +130,34 @@ mod tests {
         assert_eq!(delegation_mode("trino", &json!({})), "impersonate");
         assert_eq!(delegation_mode("starrocks", &json!({})), "none");
         assert!(!supports_delegation("starrocks", &json!({})));
+    }
+
+    #[test]
+    fn the_monitor_uses_the_service_user_unless_the_coordinator_is_jwt_only() {
+        let jwt = json!({"trinoConfig": {"delegationMode": "jwt", "auth": {"jwt": {}}}});
+        let jwt_no_block = json!({"trinoConfig": {"delegationMode": "jwt", "auth": {}}});
+        let imp = json!({"trinoConfig": {"delegationMode": "impersonate", "auth": {}}});
+        let open = json!({});
+        assert!(is_jwt_only_coordinator("trino", &jwt));
+        assert!(!is_jwt_only_coordinator("trino", &jwt_no_block));
+        for spec in [&imp, &open, &jwt_no_block] {
+            assert!(monitor_signs_in_as_service_user(
+                "trino",
+                "provisioned",
+                spec
+            ));
+        }
+        assert!(!monitor_signs_in_as_service_user(
+            "trino",
+            "provisioned",
+            &jwt
+        ));
+        assert!(!monitor_signs_in_as_service_user("trino", "external", &imp));
+        assert!(!monitor_signs_in_as_service_user(
+            "starrocks",
+            "provisioned",
+            &imp
+        ));
     }
 
     #[test]

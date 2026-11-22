@@ -282,6 +282,45 @@
         "version": 1
       },
       {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 3,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-monitor-view-queries",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "egret-monitor"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g02.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
         "additionalResources": [],
         "allowExceptions": [],
         "denyExceptions": [
@@ -317,7 +356,7 @@
           }
         ],
         "description": "",
-        "id": 3,
+        "id": 4,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-grant-{g02.deny}",
@@ -395,7 +434,7 @@
           }
         ],
         "description": "",
-        "id": 4,
+        "id": 5,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-meta-perm-grant-{g02.deny}",

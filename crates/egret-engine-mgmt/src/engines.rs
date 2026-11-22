@@ -11220,10 +11220,21 @@ mod tests {
         assert_user_baseline(&stored_policies(jwt_sid).await, &jwt_profile);
         let open_rows = stored_policies(open_sid).await;
         assert_user_baseline(&open_rows, &open_profile);
+        // The native monitor signs in as `egret-monitor` on an open engine, so
+        // its profile also carries that user's view-queries grant.
         assert_eq!(
             open_rows.len(),
-            3,
-            "an open engine's profile gets the baseline and nothing else: {open_rows:#?}"
+            4,
+            "an open engine's profile gets the baseline and the monitor grant, nothing else: \
+             {open_rows:#?}"
+        );
+        let monitor = open_rows
+            .iter()
+            .find(|(n, _, _)| n == egret_policy_api::infra_names::MONITOR_VIEW_QUERIES_POLICY_NAME)
+            .unwrap_or_else(|| panic!("no monitor grant: {open_rows:#?}"));
+        assert_eq!(
+            monitor.1,
+            egret_policy_api::infra_bodies::monitor_view_queries_policy(&open_profile)
         );
         assert!(
             stored_policies(unbound_sid).await.is_empty(),

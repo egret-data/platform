@@ -71,6 +71,12 @@ pub const SELF_IMPERSONATE_POLICY_NAME: &str = "egret-user-impersonate-self";
 /// `execute`, users `{USER}`) — Trino's `checkCanExecuteQuery`.
 pub const EXECUTE_QUERY_POLICY_NAME: &str = "egret-user-execute-query";
 
+/// The native monitor's allow: `egret-monitor` may `impersonate` any
+/// `trinouser`, which is how Trino's Ranger plugin authorises viewing
+/// (`checkCanViewQueryOwnedBy`) and killing (`checkCanKillQueryOwnedBy`) a
+/// query owned by that user. Trino profiles only.
+pub const MONITOR_VIEW_QUERIES_POLICY_NAME: &str = "egret-monitor-view-queries";
+
 /// The StarRocks AuditLoader's allow: `insert` on the query-log table for
 /// `egret_core::engine_principals::QUERY_LOG_LOADER_PRINCIPAL`
 /// (`infra_bodies::query_log_loader_policy`). StarRocks profiles only.
@@ -122,6 +128,7 @@ pub fn is_egret_infrastructure_policy(service_type: &str, name: &str) -> bool {
         || name == QUERY_TIMEOUT_POLICY_NAME
         || name == SELF_IMPERSONATE_POLICY_NAME
         || name == EXECUTE_QUERY_POLICY_NAME
+        || name == MONITOR_VIEW_QUERIES_POLICY_NAME
         || is_seeded_hierarchy_name(name, ADMIN_ALL_ACCESS_NAME_PREFIX)
         || (service_type == DEFAULT_ALL_ACCESS_SERVICE_TYPE
             && is_seeded_hierarchy_name(name, DEFAULT_ALL_ACCESS_NAME_PREFIX))
@@ -165,6 +172,7 @@ pub fn is_ir_infra_name(service_type: &str, name: &str) -> bool {
         || name == SELF_IMPERSONATE_POLICY_NAME
         || name == EXECUTE_QUERY_POLICY_NAME
         || name == QUERY_TIMEOUT_POLICY_NAME
+        || name == MONITOR_VIEW_QUERIES_POLICY_NAME
         || (service_type == QUERY_LOG_SERVICE_TYPE && is_query_log_name(name))
 }
 
@@ -198,6 +206,7 @@ mod tests {
             SELF_IMPERSONATE_POLICY_NAME,
             EXECUTE_QUERY_POLICY_NAME,
             QUERY_TIMEOUT_POLICY_NAME,
+            MONITOR_VIEW_QUERIES_POLICY_NAME,
         ] {
             assert!(is_ir_infra_name("starrocks", fixed), "{fixed} is IR-owned");
         }

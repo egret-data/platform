@@ -20,7 +20,8 @@ use egret_perm_compile::{converge_infra_policies, converge_infra_policy, recompi
 use egret_policy::default_policies::{admin_all_access_bodies, query_log_guard_bodies};
 use egret_policy::infra_names::{
     is_ir_infra_name, EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME,
-    QUERY_LOG_LOADER_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME, SELF_IMPERSONATE_POLICY_NAME,
+    MONITOR_VIEW_QUERIES_POLICY_NAME, QUERY_LOG_LOADER_POLICY_NAME, QUERY_TIMEOUT_POLICY_NAME,
+    SELF_IMPERSONATE_POLICY_NAME,
 };
 use egret_policy::PolicyStore;
 use serde_json::{json, Value};
@@ -28,11 +29,12 @@ use uuid::Uuid;
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-const FIXED: [&str; 4] = [
+const FIXED: [&str; 5] = [
     IMPERSONATE_POLICY_NAME,
     SELF_IMPERSONATE_POLICY_NAME,
     EXECUTE_QUERY_POLICY_NAME,
     QUERY_TIMEOUT_POLICY_NAME,
+    MONITOR_VIEW_QUERIES_POLICY_NAME,
 ];
 
 async fn test_db() -> Option<Db> {
@@ -225,7 +227,7 @@ fn users_of(body: &Value) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn an_impersonate_trino_engine_gets_all_seventeen_rows() {
+async fn an_impersonate_trino_engine_gets_all_eighteen_rows() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
     let admin = one_admin(&db).await;
@@ -246,7 +248,7 @@ async fn an_impersonate_trino_engine_gets_all_seventeen_rows() {
     assert_eq!(
         rows.keys().cloned().collect::<Vec<_>>(),
         want,
-        "13 egret-admin rows plus the four fixed names"
+        "13 egret-admin rows plus the five fixed names"
     );
     for (row_name, row) in &rows {
         assert_eq!(
@@ -263,7 +265,7 @@ async fn an_impersonate_trino_engine_gets_all_seventeen_rows() {
         );
     }
     assert!(sync.changed, "the first convergence wrote");
-    assert_eq!(sync.added.len(), 17, "every row was inserted: {sync:?}");
+    assert_eq!(sync.added.len(), 18, "every row was inserted: {sync:?}");
     assert!(sync.removed.is_empty(), "nothing was deleted: {sync:?}");
     assert_eq!(
         policy_version(&db, svc).await,
@@ -284,7 +286,7 @@ async fn converging_twice_writes_nothing_the_second_time() {
         .expect("first convergence");
     let rows = infra_rows(&db, svc).await;
     let v1 = policy_version(&db, svc).await;
-    assert_eq!(rows.len(), 17, "the arrangement");
+    assert_eq!(rows.len(), 18, "the arrangement");
 
     let sync = converge_infra_policy(&db.pool, svc)
         .await
@@ -331,8 +333,21 @@ async fn impersonate_to_jwt_removes_the_delegator_grant_and_keeps_the_other_ids(
         !after.contains_key(IMPERSONATE_POLICY_NAME),
         "a jwt engine still carries the delegator's impersonation grant"
     );
-    assert_eq!(sync.removed, vec![IMPERSONATE_POLICY_NAME.to_string()]);
-    assert_eq!(after.len(), before.len() - 1, "only the delegator row went");
+    // A jwt-only coordinator signs the monitor in as the viewer, so the
+    // `egret-monitor` grant goes with the delegator's.
+    let mut removed = sync.removed.clone();
+    removed.sort();
+    let mut gone = vec![
+        IMPERSONATE_POLICY_NAME.to_string(),
+        MONITOR_VIEW_QUERIES_POLICY_NAME.to_string(),
+    ];
+    gone.sort();
+    assert_eq!(removed, gone);
+    assert_eq!(
+        after.len(),
+        before.len() - 2,
+        "only the delegator and monitor rows went"
+    );
     for (row_name, row) in &after {
         assert_eq!(
             row, &before[row_name],
@@ -357,7 +372,7 @@ async fn unbinding_the_last_qualifying_engine_removes_every_ir_infra_row_but_not
     converge_infra_policy(&db.pool, svc)
         .await
         .expect("first convergence");
-    assert_eq!(infra_rows(&db, svc).await.len(), 17, "the arrangement");
+    assert_eq!(infra_rows(&db, svc).await.len(), 18, "the arrangement");
     let defaults_before: BTreeMap<String, Row> = all_rows(&db, svc)
         .await
         .into_iter()
@@ -382,7 +397,7 @@ async fn unbinding_the_last_qualifying_engine_removes_every_ir_infra_row_but_not
         infra_rows(&db, svc).await.is_empty(),
         "a profile with no qualifying engine keeps IR-owned infra rows"
     );
-    assert_eq!(sync.removed.len(), 17, "{sync:?}");
+    assert_eq!(sync.removed.len(), 18, "{sync:?}");
     let defaults_after: BTreeMap<String, Row> = all_rows(&db, svc)
         .await
         .into_iter()
@@ -601,10 +616,11 @@ async fn an_external_engine_does_not_qualify() {
 }
 
 /// KI-333: an open engine's sessions are checked like any other, so its
-/// profile gets the per-user baseline, and neither the delegator grant nor
+/// profile gets the per-user baseline plus the native monitor's view-queries
+/// grant (it signs in as `egret-monitor`), and neither the delegator grant nor
 /// admin all-access.
 #[tokio::test]
-async fn an_open_engine_gets_the_per_user_baseline_only() {
+async fn an_open_engine_gets_the_per_user_baseline_and_the_monitor_grant() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
     one_admin(&db).await;
@@ -627,11 +643,15 @@ async fn an_open_engine_gets_the_per_user_baseline_only() {
         .into_iter()
         .map(|(n, r)| (n, r.body))
         .collect();
-    let want: BTreeMap<String, Value> =
+    let mut want: BTreeMap<String, Value> =
         egret_policy_api::infra_bodies::user_baseline_policies(&name)
             .into_iter()
             .map(|(n, b)| (n.to_string(), b))
             .collect();
+    want.insert(
+        MONITOR_VIEW_QUERIES_POLICY_NAME.to_string(),
+        egret_policy_api::infra_bodies::monitor_view_queries_policy(&name),
+    );
     assert_eq!(got, want);
 }
 
@@ -654,7 +674,7 @@ async fn a_hand_written_profile_stays_manual() {
     .await
     .expect("recompile");
 
-    assert_eq!(infra_rows(&db, svc).await.len(), 17, "the arrangement");
+    assert_eq!(infra_rows(&db, svc).await.len(), 18, "the arrangement");
     let origin: String =
         sqlx::query_scalar("SELECT origin FROM policy.authz_services WHERE id = $1")
             .bind(svc)
@@ -700,7 +720,7 @@ async fn an_existing_row_is_adopted_in_place() {
         !sync.added.contains(&EXECUTE_QUERY_POLICY_NAME.to_string()),
         "the existing row was inserted again: {sync:?}"
     );
-    assert_eq!(after.len(), 17, "the other rows were added around it");
+    assert_eq!(after.len(), 18, "the other rows were added around it");
 }
 
 /// Fix round 1, Important 1: the query-log names are reserved on StarRocks

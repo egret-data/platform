@@ -920,6 +920,45 @@
         "version": 1
       },
       {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 4,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-monitor-view-queries",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "egret-monitor"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g14.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
         "additionalResources": [],
         "allowExceptions": [],
         "denyExceptions": [],
@@ -940,7 +979,7 @@
           }
         ],
         "description": "",
-        "id": 4,
+        "id": 5,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-grant-{g14.deny}",
@@ -1003,7 +1042,7 @@
           }
         ],
         "description": "",
-        "id": 5,
+        "id": 6,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-meta-g14 hand deny",
@@ -1081,7 +1120,7 @@
           }
         ],
         "description": "",
-        "id": 6,
+        "id": 7,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-meta-perm-clearance-{g14.secret}-gold_g14_cat.hr.staff",
@@ -1144,7 +1183,7 @@
           }
         ],
         "description": "",
-        "id": 7,
+        "id": 8,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-meta-perm-grant-{g14.deny}",
@@ -1222,7 +1261,7 @@
           }
         ],
         "description": "",
-        "id": 8,
+        "id": 9,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-meta-perm-rule-{g14.mask}",
@@ -1285,7 +1324,7 @@
           }
         ],
         "description": "",
-        "id": 9,
+        "id": 10,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-meta-perm-rule-{g14.filter}",
@@ -1348,7 +1387,7 @@
           }
         ],
         "description": "",
-        "id": 10,
+        "id": 11,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-meta-perm-rule-{g14.tagmask}-gold_g14_cat.sales.leads",
@@ -1427,7 +1466,7 @@
         ],
         "denyPolicyItems": [],
         "description": "",
-        "id": 11,
+        "id": 12,
         "isEnabled": true,
         "name": "perm-rule-{g14.mask}",
         "policyItems": [],
@@ -1471,7 +1510,7 @@
       {
         "denyPolicyItems": [],
         "description": "",
-        "id": 12,
+        "id": 13,
         "isEnabled": true,
         "name": "perm-rule-{g14.filter}",
         "policyItems": [],

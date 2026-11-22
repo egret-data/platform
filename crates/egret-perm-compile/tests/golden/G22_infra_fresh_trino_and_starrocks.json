@@ -973,6 +973,45 @@
         "service": "{g22.trino}",
         "serviceType": "trino",
         "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 17,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-monitor-view-queries",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "egret-monitor"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g22.trino}",
+        "serviceType": "trino",
+        "version": 1
       }
     ]
   },

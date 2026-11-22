@@ -202,8 +202,7 @@ impl Engine {
     /// is not delegation-capable and renders PASSWORD auth like any other engine,
     /// so it keeps its `egret-monitor` basic-auth user.
     pub fn is_jwt_only_coordinator(&self) -> bool {
-        self.is_jwt_delegation()
-            && egret_core::engine_delegation::supports_jwt_delegation(&self.r#type, &self.spec)
+        egret_core::engine_delegation::is_jwt_only_coordinator(&self.r#type, &self.spec)
     }
 
     /// True when the engine can back a delegated (per-user) connection at all.
