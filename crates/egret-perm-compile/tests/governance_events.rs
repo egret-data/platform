@@ -88,8 +88,11 @@ async fn setup() -> Option<Fixture> {
         .await
         .expect("profile");
     let engine: Uuid = sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\",\"trinoConfig\":{\"delegationMode\":\"open\"}}'::jsonb,$2) RETURNING id",
+        "INSERT INTO engine_mgmt.engines \
+           (name, type, namespace, spec, authz_service_id, origin, external_host, external_port, \
+            ranger_plugin_version) \
+         VALUES ($1,'trino','','{}'::jsonb,$2,'external','trino.example.com',8080,'2.8.0') \
+         RETURNING id",
     )
     .bind(unique("gov-eng"))
     .bind(svc.id)

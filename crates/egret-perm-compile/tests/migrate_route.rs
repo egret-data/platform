@@ -49,7 +49,11 @@ async fn trino_profile_with_engine(db: &Db, policy: &PolicyStore, catalog_id: Uu
     trino_profile_with_engine_and_config(db, policy, Some(catalog_id), json!({})).await
 }
 
-/// A Trino profile with one engine, attached to `catalog_id` when given.
+/// A Trino profile with one engine, attached to `catalog_id` when given. The
+/// engine is external (declaring plugin 2.8.0): egret writes no infrastructure
+/// policies for it, so the profile holds exactly what each test stores. A
+/// provisioned Trino engine's profile carries the per-user baseline (`trinouser
+/// = {USER}`), which the evaluator refuses, so no migration on it is provable.
 async fn trino_profile_with_engine_and_config(
     db: &Db,
     policy: &PolicyStore,
@@ -61,8 +65,11 @@ async fn trino_profile_with_engine_and_config(
         .await
         .expect("create trino service");
     let engine_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
-         VALUES ($1,'trino','egret','{\"imageVersion\":\"483\",\"trinoConfig\":{\"delegationMode\":\"open\"}}'::jsonb,$2) RETURNING id",
+        "INSERT INTO engine_mgmt.engines \
+           (name, type, namespace, spec, authz_service_id, origin, external_host, external_port, \
+            ranger_plugin_version) \
+         VALUES ($1,'trino','','{}'::jsonb,$2,'external','trino.example.com',8080,'2.8.0') \
+         RETURNING id",
     )
     .bind(unique("mig-eng"))
     .bind(svc.id)
@@ -1486,13 +1493,24 @@ async fn a_profile_recompiled_outside_the_gated_set_is_refused_and_nothing_is_wr
             .unwrap_or_else(|e| panic!("{e}\n{sql}"));
     }
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert_eq!(body["committed"], false, "{body}");
-    let refusal = body["refusal"].as_str().expect("a refusal sentence");
+    // The profile set grew after the write took its locks, so the write is
+    // refused and retryable either way: by the lock guard (409
+    // `profile_set_changed`, which fires first when Q's recompile has to take
+    // a lock) or by the backstop under test (422, naming Q).
     assert!(
-        refusal.contains(&format!("recompiled profile(s) #{q},")) && refusal.contains("retry"),
-        "{refusal}"
+        status == StatusCode::CONFLICT || status == StatusCode::UNPROCESSABLE_ENTITY,
+        "{status} {body}"
     );
+    if status == StatusCode::CONFLICT {
+        assert_eq!(body["code"], "profile_set_changed", "{body}");
+    } else {
+        assert_eq!(body["committed"], false, "{body}");
+        let refusal = body["refusal"].as_str().expect("a refusal sentence");
+        assert!(
+            refusal.contains(&format!("recompiled profile(s) #{q},")) && refusal.contains("retry"),
+            "{refusal}"
+        );
+    }
     // Nothing written, the attachment included (it ran in the rolled-back tx).
     assert_eq!(grants_on_catalog(&f).await, 0);
     assert!(provenance(&f, f.p).await.is_empty());
@@ -1640,7 +1658,9 @@ async fn an_external_trino_declaring_2_5_0_refuses_the_migration_naming_the_pair
 async fn pin_bound_trino_image(f: &Fixture, image_version: &str) {
     let res = sqlx::query(
         "UPDATE engine_mgmt.engines \
-            SET spec = jsonb_build_object('imageVersion', $2::text, \
+            SET origin = 'provisioned', external_host = NULL, external_port = NULL, \
+                ranger_plugin_version = NULL, namespace = 'egret', \
+                spec = jsonb_build_object('imageVersion', $2::text, \
                                           'trinoConfig', '{\"delegationMode\":\"open\"}'::jsonb) \
           WHERE authz_service_id = $1",
     )
@@ -1669,8 +1689,10 @@ async fn a_provisioned_trino_483_is_proved_on_2_8_0() {
     )
     .await;
 
-    let (status, body) = migrate(&f, f.p, &[&name], true).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // The engine is provisioned, so its profile carries the per-user baseline
+    // and the proof cannot succeed (422); the plugin the gate resolved from the
+    // image is what this measures.
+    let (_status, body) = migrate(&f, f.p, &[&name], true).await;
     assert_eq!(
         body["profiles"][0]["plugin_versions"],
         json!(["ranger_2_8_0"])

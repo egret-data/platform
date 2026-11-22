@@ -86,11 +86,11 @@ async fn seed(db: &Db) -> Fixture {
     }
 }
 
-/// An engine bound to `profile`. A Trino one is in `open` mode, so it brings
-/// no infrastructure policies (governance SP2a, D2) and a compile's
-/// `policy_version` bump is the compile's own.
+/// An engine bound to `profile`. A Trino one is in `open` mode, which brings
+/// the per-user baseline only (KI-333); it is converged here, as an apply
+/// would have, so a compile's `policy_version` bump is the compile's own.
 async fn engine(pool: &PgPool, ty: &str, profile: Option<i64>) -> Uuid {
-    sqlx::query_scalar(
+    let id = sqlx::query_scalar(
         "INSERT INTO engine_mgmt.engines (name, type, namespace, spec, authz_service_id) \
          VALUES ($1, $2, 'egret', \
                  CASE WHEN $2 = 'trino' \
@@ -103,7 +103,13 @@ async fn engine(pool: &PgPool, ty: &str, profile: Option<i64>) -> Uuid {
     .bind(profile)
     .fetch_one(pool)
     .await
-    .expect("engine")
+    .expect("engine");
+    if let (Some(svc), "trino") = (profile, ty) {
+        egret_perm_compile::converge_infra_policy(pool, svc)
+            .await
+            .expect("converge the engine's infrastructure policies");
+    }
+    id
 }
 
 async fn user(pool: &PgPool, username: Option<&str>) -> Uuid {

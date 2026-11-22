@@ -581,13 +581,34 @@ async fn an_external_starrocks_engine_gets_no_query_log_rows() {
 }
 
 #[tokio::test]
-async fn an_external_or_open_engine_does_not_qualify() {
+async fn an_external_engine_does_not_qualify() {
     let _serial = SERIAL.lock().await;
     let Some(db) = test_db().await else { return };
     one_admin(&db).await;
     let (external, _) = profile(&db, "trino").await;
     bind_external_engine(&db, external, "trino").await;
-    let (open, _) = profile(&db, "trino").await;
+
+    let v0 = policy_version(&db, external).await;
+    let sync = converge_infra_policy(&db.pool, external)
+        .await
+        .expect("converge");
+    assert!(
+        infra_rows(&db, external).await.is_empty(),
+        "a profile bound only to an external engine got infra rows"
+    );
+    assert!(!sync.changed, "{sync:?}");
+    assert_eq!(policy_version(&db, external).await, v0, "bumped");
+}
+
+/// KI-333: an open engine's sessions are checked like any other, so its
+/// profile gets the per-user baseline, and neither the delegator grant nor
+/// admin all-access.
+#[tokio::test]
+async fn an_open_engine_gets_the_per_user_baseline_only() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = test_db().await else { return };
+    one_admin(&db).await;
+    let (open, name) = profile(&db, "trino").await;
     bind_engine(
         &db,
         open,
@@ -596,18 +617,22 @@ async fn an_external_or_open_engine_does_not_qualify() {
     )
     .await;
 
-    for (what, svc) in [("an external engine", external), ("an open engine", open)] {
-        let v0 = policy_version(&db, svc).await;
-        let sync = converge_infra_policy(&db.pool, svc)
-            .await
-            .expect("converge");
-        assert!(
-            infra_rows(&db, svc).await.is_empty(),
-            "a profile bound only to {what} got infra rows"
-        );
-        assert!(!sync.changed, "{what}: {sync:?}");
-        assert_eq!(policy_version(&db, svc).await, v0, "{what}: bumped");
-    }
+    let sync = converge_infra_policy(&db.pool, open)
+        .await
+        .expect("converge");
+
+    assert!(sync.changed, "{sync:?}");
+    let got: BTreeMap<String, Value> = infra_rows(&db, open)
+        .await
+        .into_iter()
+        .map(|(n, r)| (n, r.body))
+        .collect();
+    let want: BTreeMap<String, Value> =
+        egret_policy_api::infra_bodies::user_baseline_policies(&name)
+            .into_iter()
+            .map(|(n, b)| (n.to_string(), b))
+            .collect();
+    assert_eq!(got, want);
 }
 
 #[tokio::test]
