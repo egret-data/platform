@@ -21,6 +21,7 @@ pub mod security_upgrade;
 pub mod starrocks_ddl;
 pub(crate) mod starrocks_users;
 pub mod state;
+pub mod status_sweeper;
 pub mod store;
 pub mod tls_cert;
 
@@ -56,6 +57,7 @@ pub use starrocks_ddl::{
 pub use starrocks_users::live_testing as starrocks_users_live_testing;
 pub use starrocks_users::{spawn_starrocks_user_sync, USER_SYNC_CHANNEL};
 pub use state::EngineMgmtState;
+pub use status_sweeper::spawn_engine_status_sweeper;
 pub use store::{engine_status, Engine, EngineMgmtStore};
 
 /// Aggregated OpenAPI fragment for the engine-provisioning seam (E0·P4b-9):

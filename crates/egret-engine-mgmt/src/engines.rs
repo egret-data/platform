@@ -6009,9 +6009,7 @@ async fn get_engine(
                 Ok(s) => {
                     // Record the first all-pods-ready observation. Conditional on the
                     // row still being `provisioning`, so `deleting`/`failed` stay put.
-                    if s.phase == crate::engine_status::RUNNING
-                        && engine.status == crate::engine_status::PROVISIONING
-                    {
+                    if crate::status_sweeper::records_running(&engine.status, &s.phase) {
                         match st
                             .engine_mgmt
                             .transition_engine_status(
