@@ -75,3 +75,20 @@ test("says the tab's connection is gone, by the word Connection", async () => {
 
   expect(await screen.findByText("This connection is no longer available.")).toBeInTheDocument();
 });
+
+// KI-338: a StarRocks connection browses the catalogs the engine serves, not
+// its built-in default catalog's databases.
+test("a StarRocks connection's explorer opens on its catalogs", async () => {
+  fetchMock.mockImplementation(async (input: unknown) => {
+    const url = String(input);
+    if (url.endsWith("/databases")) return json(200, [{ id: "db-2", name: "sr-demo", engine: "starrocks", delegated: false }]);
+    if (url.includes("/catalogs")) return json(200, ["egret"]);
+    return json(200, []);
+  });
+  renderPanel("db-2");
+
+  expect(await screen.findByText("egret")).toBeInTheDocument();
+  const urls = fetchMock.mock.calls.map((c) => String(c[0]));
+  expect(urls.some((u) => u.includes("/databases/db-2/catalogs"))).toBe(true);
+  expect(urls.some((u) => u.includes("/schemas"))).toBe(false);
+});

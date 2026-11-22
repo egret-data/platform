@@ -219,7 +219,7 @@ function SchemaList({ ws, db, catalog, depth, filter, onInsert, sink }: {
   );
 }
 
-// ── catalogs (Trino only) ──────────────────────────────────────────────────
+// ── catalogs (Trino and StarRocks) ──────────────────────────────────────────────────
 function CatalogNode({ ws, db, catalog, depth, filter, onInsert, sink }: {
   ws: string; db: string; catalog: string; depth: number;
   filter: string; onInsert: (t: string) => void; sink: SchemaSink;
@@ -266,7 +266,9 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
   const dbsLoading = databases == null;
   const dbMeta = dbId ? (databases?.find((d) => d.id === dbId) ?? null) : null;
   const engine = dbMeta?.engine ?? null;
-  const isTrino = engine === "trino";
+  // Both engines browse catalog -> schema -> table: Trino lists its catalogs,
+  // StarRocks the external catalogs it serves (not its built-in default_catalog).
+  const hasCatalogs = engine === "trino" || engine === "starrocks";
   const [filter, setFilter] = useState("");
   // Debounced global object search: at >=2 chars the Explorer swaps the tree for
   // a flat, cross-schema search result list (one bounded engine query).
@@ -413,7 +415,7 @@ export function DataPanel({ ws, dbId, onDb, onInsert, onWords, onSchema, onPrevi
               );
             })
           )
-        ) : isTrino ? (
+        ) : hasCatalogs ? (
           <CatalogList ws={ws} db={dbId} depth={0} filter={filter} onInsert={onInsert} sink={sink} />
         ) : (
           <SchemaList ws={ws} db={dbId} catalog="" depth={0} filter={filter} onInsert={onInsert} sink={sink} />
