@@ -38,6 +38,8 @@ pub enum InfraKind {
     SelfImpersonate,
     ExecuteQuery,
     QueryTimeout,
+    /// The native monitor's grant to view and kill every user's queries.
+    MonitorViewQueries,
     /// The StarRocks AuditLoader's `insert` on the query-log table.
     QueryLogLoader,
     /// The deny on the query-log database for everyone but the loader.

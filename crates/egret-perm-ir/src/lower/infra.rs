@@ -3,7 +3,7 @@
 //! any authored model object. Pure; the caller loads [`InfraInputs`].
 
 use egret_core::engine_principals::{
-    DELEGATOR_PRINCIPAL, QUERY_LOG_LOADER_PRINCIPAL, STARROCKS_RESERVED_USERS,
+    DELEGATOR_PRINCIPAL, MONITOR_PRINCIPAL, QUERY_LOG_LOADER_PRINCIPAL, STARROCKS_RESERVED_USERS,
 };
 use egret_perm::EngineType;
 
@@ -32,6 +32,13 @@ pub struct InfraInputs {
     /// At least one bound engine impersonates with `egret_delegator`
     /// (`egret_core::engine_delegation::delegator_impersonates`).
     pub delegator_impersonates: bool,
+    /// At least one bound Trino engine signs egret's native monitor in as
+    /// `egret-monitor`, i.e. is not JWT-only
+    /// (`egret_core::engine_delegation::monitor_signs_in_as_service_user`).
+    /// Implies `user_baseline`. Only the monitor's view-queries grant hangs on
+    /// this: without it the Monitor tab lists nothing but the monitor's own
+    /// queries.
+    pub native_monitor: bool,
     /// At least one StarRocks engine egret provisioned (origin not external)
     /// is bound: its AuditLoader writes the query log. Independent of
     /// `delegating`.
@@ -67,8 +74,8 @@ fn statement(
 
 /// The infrastructure statements for `i`, in the order `AdminAllAccess`,
 /// `QueryLogLoader`, `QueryLogGuard` (StarRocks only), `DelegatorImpersonate`,
-/// `SelfImpersonate`, `ExecuteQuery`, `QueryTimeout` (the last three Trino
-/// only).
+/// `SelfImpersonate`, `ExecuteQuery`, `QueryTimeout`, `MonitorViewQueries`
+/// (the last four Trino only).
 ///
 /// `AdminAllAccess` and the delegator grant need a delegating engine, the
 /// three Trino per-user statements a delegating or open Trino engine; the
@@ -155,6 +162,14 @@ pub fn lower_infra(i: &InfraInputs) -> Vec<Statement> {
         InfraObject::SystemProperty(QUERY_TIMEOUT_PROPERTY.to_string()),
         "alter",
     ));
+    if i.native_monitor {
+        out.push(statement(
+            InfraKind::MonitorViewQueries,
+            vec![user(MONITOR_PRINCIPAL)],
+            InfraObject::AnyUser,
+            "impersonate",
+        ));
+    }
     out
 }
 
@@ -180,6 +195,7 @@ mod tests {
             delegating,
             user_baseline: false,
             delegator_impersonates: imp,
+            native_monitor: false,
             query_log: false,
         }
     }
@@ -235,6 +251,48 @@ mod tests {
             s[4].target,
             Target::Infra(InfraObject::SystemProperty("query_max_run_time".into()))
         );
+    }
+
+    fn with_monitor(mut i: InfraInputs) -> InfraInputs {
+        i.user_baseline = true;
+        i.native_monitor = true;
+        i
+    }
+
+    #[test]
+    fn a_native_monitor_trino_engine_grants_egret_monitor_every_users_queries() {
+        let s = lower_infra(&with_monitor(inputs(EngineType::Trino, &[], false, false)));
+        let m = s
+            .iter()
+            .find(|s| {
+                s.source
+                    == Source::Infra {
+                        kind: InfraKind::MonitorViewQueries,
+                    }
+            })
+            .expect("monitor statement emitted");
+        assert_eq!(m.target, Target::Infra(InfraObject::AnyUser));
+        assert_eq!(m.audience.include, vec![user("egret-monitor")]);
+        assert_eq!(
+            m.effect,
+            Effect::EnginePrivilege {
+                capability: "impersonate".into()
+            }
+        );
+    }
+
+    #[test]
+    fn no_monitor_statement_without_native_monitor_or_on_starrocks() {
+        let mut jwt_only = inputs(EngineType::Trino, &["a"], true, false);
+        jwt_only.user_baseline = true;
+        assert!(!kinds(&lower_infra(&jwt_only)).contains(&InfraKind::MonitorViewQueries));
+        let s = lower_infra(&with_monitor(inputs(
+            EngineType::StarRocks,
+            &["a"],
+            true,
+            true,
+        )));
+        assert!(!kinds(&s).contains(&InfraKind::MonitorViewQueries));
     }
 
     #[test]

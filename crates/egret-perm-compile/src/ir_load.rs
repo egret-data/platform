@@ -774,7 +774,8 @@ pub(crate) async fn load_infra_inputs(
     missing: crate::members::MissingUsername,
 ) -> Result<Option<LoadedInfra>, CompileError> {
     use egret_core::engine_delegation::{
-        delegator_impersonates, needs_user_baseline, qualifies_for_infra,
+        delegator_impersonates, monitor_signs_in_as_service_user, needs_user_baseline,
+        qualifies_for_infra,
     };
 
     let svc: Option<(String, String)> =
@@ -807,6 +808,9 @@ pub(crate) async fn load_infra_inputs(
     let user_baseline = engines
         .iter()
         .any(|(t, origin, _)| needs_user_baseline(t, origin));
+    let native_monitor = engines
+        .iter()
+        .any(|(t, origin, spec)| monitor_signs_in_as_service_user(t, origin, spec));
     let query_log = engines
         .iter()
         .any(|(t, origin, _)| writes_query_log(t, origin));
@@ -824,6 +828,7 @@ pub(crate) async fn load_infra_inputs(
             delegating,
             user_baseline,
             delegator_impersonates,
+            native_monitor,
             query_log,
         },
     }))

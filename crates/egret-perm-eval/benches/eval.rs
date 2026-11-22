@@ -157,6 +157,7 @@ fn statements(layout: Layout, tables: usize) -> Vec<Statement> {
         delegating: true,
         user_baseline: false,
         delegator_impersonates: true,
+        native_monitor: false,
         query_log: false,
     }));
     out

@@ -78,6 +78,10 @@ pub(crate) fn render(
             bodies::QUERY_TIMEOUT_POLICY_NAME,
             bodies::query_timeout_policy(service_name),
         ),
+        InfraKind::MonitorViewQueries => one(
+            bodies::MONITOR_VIEW_QUERIES_POLICY_NAME,
+            bodies::monitor_view_queries_policy(service_name),
+        ),
         InfraKind::QueryLogLoader => one(
             bodies::QUERY_LOG_LOADER_POLICY_NAME,
             bodies::query_log_loader_policy(service_name),
@@ -104,6 +108,7 @@ mod tests {
             delegating: true,
             user_baseline: false,
             delegator_impersonates: true,
+            native_monitor: false,
             query_log: false,
         });
         let got: Vec<(String, serde_json::Value)> = s
@@ -139,6 +144,7 @@ mod tests {
             delegating: true,
             user_baseline: false,
             delegator_impersonates: false,
+            native_monitor: false,
             query_log: false,
         });
         let got: Vec<_> = s
@@ -175,6 +181,7 @@ mod tests {
             delegating: true,
             user_baseline: false,
             delegator_impersonates: false,
+            native_monitor: false,
             query_log: false,
         })
         .remove(0);
@@ -191,6 +198,7 @@ mod tests {
             delegating: false,
             user_baseline: false,
             delegator_impersonates: false,
+            native_monitor: false,
             query_log: true,
         })
         .iter()
@@ -354,6 +362,7 @@ mod tests {
             delegating,
             user_baseline: false,
             delegator_impersonates: imp,
+            native_monitor: false,
             query_log: false,
         })
     }
@@ -386,6 +395,7 @@ mod tests {
             delegating: true,
             user_baseline: false,
             delegator_impersonates: true,
+            native_monitor: false,
             query_log: false,
         });
         let delegator = trino

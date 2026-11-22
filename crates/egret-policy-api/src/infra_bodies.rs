@@ -6,11 +6,13 @@
 
 use serde_json::{json, Value};
 
-use egret_core::engine_principals::{DELEGATOR_PRINCIPAL, QUERY_LOG_LOADER_PRINCIPAL};
+use egret_core::engine_principals::{
+    DELEGATOR_PRINCIPAL, MONITOR_PRINCIPAL, QUERY_LOG_LOADER_PRINCIPAL,
+};
 
 pub use crate::infra_names::{
-    EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME, QUERY_LOG_DATABASE,
-    QUERY_LOG_LOADER_POLICY_NAME, QUERY_LOG_TABLE, QUERY_TIMEOUT_POLICY_NAME,
+    EXECUTE_QUERY_POLICY_NAME, IMPERSONATE_POLICY_NAME, MONITOR_VIEW_QUERIES_POLICY_NAME,
+    QUERY_LOG_DATABASE, QUERY_LOG_LOADER_POLICY_NAME, QUERY_LOG_TABLE, QUERY_TIMEOUT_POLICY_NAME,
     SELF_IMPERSONATE_POLICY_NAME,
 };
 
@@ -50,6 +52,21 @@ pub fn delegator_impersonate_policy(service: &str) -> Value {
         IMPERSONATE_POLICY_NAME,
         json!({ "trinouser": { "values": ["*"], "isExcludes": false, "isRecursive": false } }),
         json!([DELEGATOR_PRINCIPAL]),
+        "impersonate",
+    )
+}
+
+/// `egret-monitor` may impersonate any user, which Trino's Ranger plugin reads
+/// as "view or kill a query that user owns" (`checkCanViewQueryOwnedBy`,
+/// `checkCanKillQueryOwnedBy`). Without it the native monitor, signed in as
+/// `egret-monitor`, lists only its own queries. The monitor holds a password
+/// only egret knows, so no end-user can use the grant.
+pub fn monitor_view_queries_policy(service: &str) -> Value {
+    policy(
+        service,
+        MONITOR_VIEW_QUERIES_POLICY_NAME,
+        json!({ "trinouser": { "values": ["*"], "isExcludes": false, "isRecursive": false } }),
+        json!([MONITOR_PRINCIPAL]),
         "impersonate",
     )
 }
@@ -185,6 +202,15 @@ pub fn query_log_loader_policy(service: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_policy_grants_egret_monitor_impersonate_any_user() {
+        let p = monitor_view_queries_policy("rgr2");
+        assert_eq!(p["name"], "egret-monitor-view-queries");
+        assert_eq!(p["resources"]["trinouser"]["values"][0], "*");
+        assert_eq!(p["policyItems"][0]["users"][0], "egret-monitor");
+        assert_eq!(p["policyItems"][0]["accesses"][0]["type"], "impersonate");
+    }
 
     #[test]
     fn impersonate_policy_grants_delegator_impersonate_any_user() {
