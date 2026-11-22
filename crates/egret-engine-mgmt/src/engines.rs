@@ -18081,6 +18081,148 @@ mod tests {
             .contains(&alice));
     }
 
+    /// KI-358: on an engine bound to no profile, the delegator's grant on a
+    /// user that is gone is revoked through a short-lived re-created user
+    /// (`REVOKE` refuses a user that does not exist), and a second sync
+    /// sends nothing.
+    #[tokio::test]
+    async fn an_unbound_engine_revokes_a_grant_on_a_vanished_user() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping an_unbound_engine_revokes_a_grant_on_a_vanished_user: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let (alice, gone) = (uname("alice"), uname("gone"));
+        seed_member(&st, ws, &alice, "active").await;
+        fake.seed_impersonate_all();
+        fake.seed_impersonation(&gone);
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            matches!(&out, crate::starrocks_users::UserSync::Done { orphans_revoked: 1, failed, .. } if failed.is_empty()),
+            "{out:?}"
+        );
+        let sent = fake.executed();
+        let at = |prefix: String| {
+            sent.iter()
+                .position(|s| s.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("{prefix}: {sent:?}"))
+        };
+        let (create, revoke, drop) = (
+            at(format!("CREATE USER '{gone}'@'%'")),
+            at(format!("REVOKE IMPERSONATE ON USER '{gone}'@'%'")),
+            at(format!("DROP USER '{gone}'@'%'")),
+        );
+        assert!(create < revoke && revoke < drop, "{sent:?}");
+        assert!(
+            !fake.users().contains(&gone),
+            "the stand-in user is dropped"
+        );
+        assert!(!fake.impersonation().1.contains(&gone));
+        assert!(fake.impersonation().1.contains(&alice), "live grants stay");
+
+        fake.clear_executed();
+        let again = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&again, crate::starrocks_users::UserSync::Done { orphans_revoked: 0, failed, .. } if failed.is_empty()),
+            "{again:?}"
+        );
+        assert!(
+            !fake.executed().iter().any(|s| s.contains("USER")),
+            "idempotent: {:?}",
+            fake.executed()
+        );
+    }
+
+    /// KI-358: when the revoke fails, the stand-in user is dropped anyway (no
+    /// stray user with an unknown password is left holding the grant) and the
+    /// next sync tries again.
+    #[tokio::test]
+    async fn a_failed_orphan_revoke_still_drops_the_stand_in_user() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_failed_orphan_revoke_still_drops_the_stand_in_user: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let gone = uname("gone");
+        fake.seed_impersonate_all();
+        fake.seed_impersonation(&gone);
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        fake.fail_matching_once("REVOKE IMPERSONATE ON USER", "ERROR 1064 (HY000): boom");
+        let out = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&out, crate::starrocks_users::UserSync::Done { orphans_revoked: 0, failed, .. } if !failed.is_empty()),
+            "{out:?}"
+        );
+        assert!(!fake.users().contains(&gone));
+        assert!(fake.impersonation().1.contains(&gone));
+
+        let retry = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&retry, crate::starrocks_users::UserSync::Done { orphans_revoked: 1, failed, .. } if failed.is_empty()),
+            "{retry:?}"
+        );
+        assert!(!fake.impersonation().1.contains(&gone));
+    }
+
+    /// KI-358: an engine bound to a profile reads no native grant (Ranger
+    /// decides), so a grant on a vanished user is left alone there.
+    #[tokio::test]
+    async fn a_bound_engine_leaves_a_grant_on_a_vanished_user_alone() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_bound_engine_leaves_a_grant_on_a_vanished_user_alone: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        st.authz
+            .ensure_starrocks_def()
+            .await
+            .expect("seed starrocks service-def");
+        let svc = st
+            .authz
+            .create_service(&uname("p2b1_sr"), "starrocks", &serde_json::json!({}))
+            .await
+            .expect("service");
+        let engine = seed_impersonate_sr_engine(&st).await;
+        sqlx::query("UPDATE engine_mgmt.engines SET authz_service_id = $2 WHERE id = $1")
+            .bind(engine.id)
+            .bind(svc.id)
+            .execute(st.engine_mgmt.pool())
+            .await
+            .unwrap();
+        let engine = st.engine_mgmt.get_engine(engine.id).await.unwrap().unwrap();
+        let gone = uname("gone");
+        fake.seed_impersonate_all();
+        fake.seed_impersonation(&gone);
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(
+            !fake.executed().iter().any(|s| s.contains("IMPERSONATE")),
+            "{:?}",
+            fake.executed()
+        );
+    }
+
     /// The bootstrap grants no `ON ALL USERS` any more; the sync right after it
     /// grants the members.
     #[tokio::test]
