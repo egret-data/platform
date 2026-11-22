@@ -773,7 +773,9 @@ pub(crate) async fn load_infra_inputs(
     service_id: i64,
     missing: crate::members::MissingUsername,
 ) -> Result<Option<LoadedInfra>, CompileError> {
-    use egret_core::engine_delegation::{delegator_impersonates, qualifies_for_infra};
+    use egret_core::engine_delegation::{
+        delegator_impersonates, needs_user_baseline, qualifies_for_infra,
+    };
 
     let svc: Option<(String, String)> =
         sqlx::query_as("SELECT name, type FROM policy.authz_services WHERE id = $1")
@@ -802,6 +804,9 @@ pub(crate) async fn load_infra_inputs(
     let delegator_impersonates = qualifying
         .iter()
         .any(|(t, _, spec)| delegator_impersonates(t, spec));
+    let user_baseline = engines
+        .iter()
+        .any(|(t, origin, _)| needs_user_baseline(t, origin));
     let query_log = engines
         .iter()
         .any(|(t, origin, _)| writes_query_log(t, origin));
@@ -817,6 +822,7 @@ pub(crate) async fn load_infra_inputs(
             engine,
             admins,
             delegating,
+            user_baseline,
             delegator_impersonates,
             query_log,
         },

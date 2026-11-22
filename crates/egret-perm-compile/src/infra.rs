@@ -230,7 +230,7 @@ fn admin_users<'a>(rows: impl Iterator<Item = (&'a String, &'a Value)>) -> BTree
 pub(crate) async fn infra_services_via(
     conn: &mut sqlx::PgConnection,
 ) -> Result<Vec<i64>, CompileError> {
-    use egret_core::engine_delegation::qualifies_for_infra;
+    use egret_core::engine_delegation::{needs_user_baseline, qualifies_for_infra};
 
     let holding: Vec<(i64, String, String)> = sqlx::query_as(
         "SELECT p.service_id, s.type, p.name \
@@ -259,6 +259,7 @@ pub(crate) async fn infra_services_via(
                 .into_iter()
                 .filter(|(_, t, origin, spec)| {
                     qualifies_for_infra(t, origin, spec)
+                        || needs_user_baseline(t, origin)
                         || crate::ir_load::writes_query_log(t, origin)
                 })
                 .map(|(id, _, _, _)| id),

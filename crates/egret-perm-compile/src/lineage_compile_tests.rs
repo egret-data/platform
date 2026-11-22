@@ -681,6 +681,21 @@ async fn the_lineage_principal_keeps_only_the_narrow_specials() {
     let Some(db) = test_db().await else { return };
     let f = seed(&db).await;
     govern(&db, &f).await;
+    // The fixture's engine is bound, so its profile carries the per-user
+    // baseline (KI-333: an engine without a jwt block is open, and open
+    // engines get it too). Its `{USER}` policies are Undecidable to the
+    // offline evaluator for every user, which would hide what this test
+    // measures: the compiled specials alone.
+    sqlx::query("DELETE FROM policy.authz_policies WHERE service_id = $1 AND name = ANY($2)")
+        .bind(f.profile_id)
+        .bind(
+            egret_policy_api::infra_bodies::user_baseline_policies("p")
+                .map(|(n, _)| n.to_string())
+                .to_vec(),
+        )
+        .execute(&db.pool)
+        .await
+        .expect("drop the per-user baseline");
     for plugin in PLUGINS {
         let a = Asker::new(&db, &f, plugin).await;
         for (access, resource, value) in [

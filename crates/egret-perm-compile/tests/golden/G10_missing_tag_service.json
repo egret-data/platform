@@ -18,7 +18,125 @@
         "reason": "this Trino profile has no usable `tagService` (unconfigured, or naming a profile that does not exist), and a Trino clearance is a TAG policy — nothing filed here could be served to any plugin"
       }
     ],
-    "served": []
+    "served": [
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-user-impersonate-self",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "{USER}"
+            ]
+          }
+        },
+        "service": "{g10.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-user-execute-query",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "queryid": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g10.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 2,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-timeout",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "systemproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "query_max_run_time"
+            ]
+          }
+        },
+        "service": "{g10.trino}",
+        "serviceType": "trino",
+        "version": 1
+      }
+    ]
   },
   {
     "desired": [],
@@ -39,6 +157,124 @@
         "reason": "this Trino profile has no usable `tagService` (unconfigured, or naming a profile that does not exist), and a Trino clearance is a TAG policy — nothing filed here could be served to any plugin"
       }
     ],
-    "served": []
+    "served": [
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-user-impersonate-self",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "{USER}"
+            ]
+          }
+        },
+        "service": "{g10.nowhere}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-user-execute-query",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "queryid": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g10.nowhere}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 2,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-timeout",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "systemproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "query_max_run_time"
+            ]
+          }
+        },
+        "service": "{g10.nowhere}",
+        "serviceType": "trino",
+        "version": 1
+      }
+    ]
   }
 ]

@@ -165,6 +165,123 @@
     "skipped": [],
     "served": [
       {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 0,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-user-impersonate-self",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "impersonate"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "trinouser": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "{USER}"
+            ]
+          }
+        },
+        "service": "{g02.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 1,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-user-execute-query",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "execute"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "queryid": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "*"
+            ]
+          }
+        },
+        "service": "{g02.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
+        "allowExceptions": [],
+        "denyExceptions": [],
+        "denyPolicyItems": [],
+        "id": 2,
+        "isDenyAllElse": false,
+        "isEnabled": true,
+        "name": "egret-query-timeout",
+        "policyItems": [
+          {
+            "accesses": [
+              {
+                "isAllowed": true,
+                "type": "alter"
+              }
+            ],
+            "delegateAdmin": false,
+            "groups": [],
+            "roles": [],
+            "users": [
+              "{USER}"
+            ]
+          }
+        ],
+        "policyPriority": 0,
+        "policyType": 0,
+        "resources": {
+          "systemproperty": {
+            "isExcludes": false,
+            "isRecursive": false,
+            "values": [
+              "query_max_run_time"
+            ]
+          }
+        },
+        "service": "{g02.trino}",
+        "serviceType": "trino",
+        "version": 1
+      },
+      {
         "additionalResources": [],
         "allowExceptions": [],
         "denyExceptions": [
@@ -200,7 +317,7 @@
           }
         ],
         "description": "",
-        "id": 0,
+        "id": 3,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-grant-{g02.deny}",
@@ -278,7 +395,7 @@
           }
         ],
         "description": "",
-        "id": 1,
+        "id": 4,
         "isDenyAllElse": false,
         "isEnabled": true,
         "name": "perm-hidden-meta-perm-grant-{g02.deny}",

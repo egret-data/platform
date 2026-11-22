@@ -92,6 +92,17 @@ pub fn qualifies_for_infra(engine_type: &str, origin: &str, spec: &Value) -> boo
     origin != ORIGIN_EXTERNAL && supports_delegation(engine_type, spec)
 }
 
+/// Whether a bound engine needs the per-user session baseline on its profile
+/// (`egret-user-impersonate-self`, `egret-user-execute-query`,
+/// `egret-user-query-timeout`): a Trino engine egret provisioned, whatever its
+/// delegation mode. Trino 483 checks those on every session, and an open
+/// engine's sessions are checked like any other (its one `egret` principal
+/// must be allowed to become itself). A delegating engine qualifies through
+/// [`qualifies_for_infra`] as well; only an open one needs this.
+pub fn needs_user_baseline(engine_type: &str, origin: &str) -> bool {
+    engine_type == "trino" && origin != ORIGIN_EXTERNAL
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +148,8 @@ mod tests {
     fn external_engines_never_qualify() {
         assert!(qualifies_for_infra("trino", "provisioned", &json!({})));
         assert!(!qualifies_for_infra("trino", "external", &json!({})));
+        assert!(needs_user_baseline("trino", "provisioned"));
+        assert!(!needs_user_baseline("trino", "external"));
+        assert!(!needs_user_baseline("starrocks", "provisioned"));
     }
 }

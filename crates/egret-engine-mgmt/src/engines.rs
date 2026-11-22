@@ -10786,6 +10786,43 @@ mod tests {
         );
     }
 
+    /// KI-333: an open Trino engine (`delegationMode: none`) still runs under
+    /// the Ranger plugin, and egret's connection to it presents ONE principal
+    /// (`egret`) as `X-Trino-User`, which Trino 483 checks for `impersonate`,
+    /// `execute` and `query_max_run_time` on every session. Before this the
+    /// baseline was seeded for delegating engines only, so every query failed
+    /// `Principal egret cannot become user egret`. The open engine gets the
+    /// baseline and neither a delegator grant nor admin all-access.
+    #[tokio::test]
+    async fn an_open_engine_apply_seeds_the_user_baseline_and_no_delegator_grant() {
+        let Some(st) = converging_state().await else {
+            eprintln!(
+                "skipping an_open_engine_apply_seeds_the_user_baseline_and_no_delegator_grant: DATABASE_URL not set"
+            );
+            return;
+        };
+        let (engine, sid, profile) =
+            bound_trino_engine(&st, serde_json::json!({ "delegationMode": "none" })).await;
+        assert!(!engine.supports_delegation(), "premise: an open engine");
+
+        build_provision_req(&st, &engine)
+            .await
+            .expect("build_provision_req");
+
+        let rows = stored_policies(sid).await;
+        assert_user_baseline(&rows, &profile);
+        assert!(
+            !rows
+                .iter()
+                .any(|(n, _, _)| n == crate::delegator_policy::IMPERSONATE_POLICY_NAME),
+            "an open engine has no delegator: {rows:#?}"
+        );
+        assert!(
+            !rows.iter().any(|(n, _, _)| n.starts_with("egret-admin - ")),
+            "an open engine gets no admin all-access: {rows:#?}"
+        );
+    }
+
     /// An impersonate engine with auth keeps its delegator grant
     /// (impersonate-only, unchanged) and gets the same per-user baseline.
     #[tokio::test]
@@ -11108,8 +11145,9 @@ mod tests {
     /// Existing engines get their infrastructure policies without an apply:
     /// the boot pass (`egret_perm_compile::converge_infra_policies`, which
     /// replaced the per-user baseline pass) converges every profile a
-    /// qualifying engine is bound to, and gives nothing to a profile whose
-    /// engine is open, unbound or external.
+    /// qualifying engine is bound to, gives an open engine's profile the
+    /// per-user baseline only (KI-333), and nothing to a profile that is
+    /// unbound or external.
     #[tokio::test]
     async fn the_boot_pass_converges_an_existing_engine_and_skips_open_unbound_and_external_ones() {
         let Some(st) = converging_state().await else {
@@ -11123,7 +11161,7 @@ mod tests {
             serde_json::json!({ "delegationMode": "jwt", "auth": { "jwt": {} } }),
         )
         .await;
-        let (_open, open_sid, _) =
+        let (_open, open_sid, open_profile) =
             bound_trino_engine(&st, serde_json::json!({ "delegationMode": "none" })).await;
         // A delegating engine that was bound and then unbound: its former
         // profile has no qualifying engine left.
@@ -11182,9 +11220,12 @@ mod tests {
             .expect("the boot pass");
 
         assert_user_baseline(&stored_policies(jwt_sid).await, &jwt_profile);
-        assert!(
-            stored_policies(open_sid).await.is_empty(),
-            "a non-delegating engine's profile gets nothing"
+        let open_rows = stored_policies(open_sid).await;
+        assert_user_baseline(&open_rows, &open_profile);
+        assert_eq!(
+            open_rows.len(),
+            3,
+            "an open engine's profile gets the baseline and nothing else: {open_rows:#?}"
         );
         assert!(
             stored_policies(unbound_sid).await.is_empty(),

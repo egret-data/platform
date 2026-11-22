@@ -102,6 +102,7 @@ mod tests {
             engine: EngineType::Trino,
             admins: vec!["ann".into(), "bob".into()],
             delegating: true,
+            user_baseline: false,
             delegator_impersonates: true,
             query_log: false,
         });
@@ -136,6 +137,7 @@ mod tests {
             engine: EngineType::StarRocks,
             admins: vec!["ann".into()],
             delegating: true,
+            user_baseline: false,
             delegator_impersonates: false,
             query_log: false,
         });
@@ -171,6 +173,7 @@ mod tests {
             engine: EngineType::Trino,
             admins: vec![],
             delegating: true,
+            user_baseline: false,
             delegator_impersonates: false,
             query_log: false,
         })
@@ -186,6 +189,7 @@ mod tests {
             engine: EngineType::StarRocks,
             admins: vec![],
             delegating: false,
+            user_baseline: false,
             delegator_impersonates: false,
             query_log: true,
         })
@@ -348,6 +352,7 @@ mod tests {
             engine: EngineType::StarRocks,
             admins: vec![],
             delegating,
+            user_baseline: false,
             delegator_impersonates: imp,
             query_log: false,
         })
@@ -379,6 +384,7 @@ mod tests {
             engine: EngineType::Trino,
             admins: vec![],
             delegating: true,
+            user_baseline: false,
             delegator_impersonates: true,
             query_log: false,
         });
