@@ -41,18 +41,19 @@ impl SchemaService {
     pub async fn catalogs(&self, spec: &ConnSpec) -> Result<Vec<String>, BiError> {
         match spec.engine {
             Engine::Trino => self.first_col(spec, "SHOW CATALOGS").await,
-            Engine::StarRocks => Ok(vec![]), // no catalog level
+            Engine::StarRocks => {
+                let conn = build_connector(spec);
+                let r = conn
+                    .execute("SHOW CATALOGS", &Self::limits(), CancellationToken::new())
+                    .await?;
+                Ok(starrocks_served_catalogs(r.rows))
+            }
         }
     }
 
     pub async fn schemas(&self, spec: &ConnSpec, catalog: &str) -> Result<Vec<String>, BiError> {
-        match spec.engine {
-            Engine::Trino => {
-                self.first_col(spec, &format!("SHOW SCHEMAS FROM {}", quote_trino(catalog)))
-                    .await
-            }
-            Engine::StarRocks => self.first_col(spec, "SHOW DATABASES").await,
-        }
+        self.first_col(spec, &schemas_sql(spec.engine, catalog))
+            .await
     }
 
     pub async fn tables(
@@ -61,23 +62,8 @@ impl SchemaService {
         catalog: &str,
         schema: &str,
     ) -> Result<Vec<String>, BiError> {
-        match spec.engine {
-            Engine::Trino => {
-                self.first_col(
-                    spec,
-                    &format!(
-                        "SHOW TABLES FROM {}.{}",
-                        quote_trino(catalog),
-                        quote_trino(schema)
-                    ),
-                )
-                .await
-            }
-            Engine::StarRocks => {
-                self.first_col(spec, &format!("SHOW TABLES FROM {}", quote_mysql(schema)))
-                    .await
-            }
-        }
+        self.first_col(spec, &tables_sql(spec.engine, catalog, schema))
+            .await
     }
 
     /// Global object search: find tables/views whose name matches `query`
@@ -110,15 +96,7 @@ impl SchemaService {
         table: &str,
     ) -> Result<Vec<SchemaColumn>, BiError> {
         let conn = build_connector(spec);
-        let sql = match spec.engine {
-            Engine::Trino => format!(
-                "DESCRIBE {}.{}.{}",
-                quote_trino(catalog),
-                quote_trino(schema),
-                quote_trino(table)
-            ),
-            Engine::StarRocks => format!("DESCRIBE {}.{}", quote_mysql(schema), quote_mysql(table)),
-        };
+        let sql = columns_sql(spec.engine, catalog, schema, table);
         let r = conn
             .execute(&sql, &Self::limits(), CancellationToken::new())
             .await?;
@@ -132,6 +110,75 @@ impl SchemaService {
                 }
             })
             .collect())
+    }
+}
+
+const STARROCKS_INTERNAL_CATALOG_TYPE: &str = "Internal";
+
+/// The catalogs a StarRocks connection offers in the explorer: the external
+/// catalogs the engine serves (`SHOW CATALOGS` rows are `Catalog, Type,
+/// Comment`). The built-in `Internal` catalog (`default_catalog`, whose
+/// databases are `_statistics_`, `information_schema` and `sys`) holds nothing
+/// egret serves, so it is left out (KI-338).
+fn starrocks_served_catalogs(rows: Vec<Vec<serde_json::Value>>) -> Vec<String> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let mut it = row.into_iter();
+            let name = it.next().map(val_to_string)?;
+            let ty = it.next().map(val_to_string).unwrap_or_default();
+            let internal = if ty.is_empty() {
+                name == "default_catalog"
+            } else {
+                ty.eq_ignore_ascii_case(STARROCKS_INTERNAL_CATALOG_TYPE)
+            };
+            (!internal).then_some(name)
+        })
+        .collect()
+}
+
+fn schemas_sql(engine: Engine, catalog: &str) -> String {
+    match engine {
+        Engine::Trino => format!("SHOW SCHEMAS FROM {}", quote_trino(catalog)),
+        Engine::StarRocks if catalog.is_empty() => "SHOW DATABASES".to_string(),
+        Engine::StarRocks => format!("SHOW DATABASES FROM {}", quote_mysql(catalog)),
+    }
+}
+
+fn tables_sql(engine: Engine, catalog: &str, schema: &str) -> String {
+    match engine {
+        Engine::Trino => format!(
+            "SHOW TABLES FROM {}.{}",
+            quote_trino(catalog),
+            quote_trino(schema)
+        ),
+        Engine::StarRocks if catalog.is_empty() => {
+            format!("SHOW TABLES FROM {}", quote_mysql(schema))
+        }
+        Engine::StarRocks => format!(
+            "SHOW TABLES FROM {}.{}",
+            quote_mysql(catalog),
+            quote_mysql(schema)
+        ),
+    }
+}
+
+fn columns_sql(engine: Engine, catalog: &str, schema: &str, table: &str) -> String {
+    match engine {
+        Engine::Trino => format!(
+            "DESCRIBE {}.{}.{}",
+            quote_trino(catalog),
+            quote_trino(schema),
+            quote_trino(table)
+        ),
+        Engine::StarRocks if catalog.is_empty() => {
+            format!("DESCRIBE {}.{}", quote_mysql(schema), quote_mysql(table))
+        }
+        Engine::StarRocks => format!(
+            "DESCRIBE {}.{}.{}",
+            quote_mysql(catalog),
+            quote_mysql(schema),
+            quote_mysql(table)
+        ),
     }
 }
 
@@ -201,7 +248,9 @@ pub(crate) fn quote_ident(engine: Engine, ident: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{like_literal, search_sql};
+    use super::{
+        columns_sql, like_literal, schemas_sql, search_sql, starrocks_served_catalogs, tables_sql,
+    };
     use egret_query_api::Engine;
 
     /// KI-160: same-named tables come back in a fixed order, by catalog and
@@ -225,5 +274,42 @@ mod tests {
         assert_eq!(like_literal("orders"), "orders");
         // An injection attempt stays inert (quotes doubled, no early terminator).
         assert_eq!(like_literal("'; DROP TABLE t --"), "''; DROP TABLE t --");
+    }
+
+    fn row(cols: &[&str]) -> Vec<serde_json::Value> {
+        cols.iter().map(|c| serde_json::json!(c)).collect()
+    }
+
+    /// KI-338: the explorer offers the catalog the engine serves, not
+    /// StarRocks' built-in one.
+    #[test]
+    fn starrocks_explorer_lists_the_served_catalog_not_default_catalog() {
+        let rows = vec![
+            row(&["default_catalog", "Internal", "An internal catalog"]),
+            row(&["egret", "Iceberg", ""]),
+        ];
+        assert_eq!(starrocks_served_catalogs(rows), vec!["egret"]);
+        // No Type column: fall back on the built-in's fixed name.
+        let rows = vec![row(&["default_catalog"]), row(&["egret"])];
+        assert_eq!(starrocks_served_catalogs(rows), vec!["egret"]);
+    }
+
+    /// KI-338: with a catalog picked, schemas, tables and columns are read
+    /// from that catalog, not from `default_catalog`.
+    #[test]
+    fn starrocks_listings_are_scoped_to_the_picked_catalog() {
+        let sr = Engine::StarRocks;
+        assert_eq!(schemas_sql(sr, "egret"), "SHOW DATABASES FROM `egret`");
+        assert_eq!(
+            tables_sql(sr, "egret", "sales"),
+            "SHOW TABLES FROM `egret`.`sales`"
+        );
+        assert_eq!(
+            columns_sql(sr, "egret", "sales", "orders"),
+            "DESCRIBE `egret`.`sales`.`orders`"
+        );
+        // A client that sends no catalog keeps the old, session-scoped listing.
+        assert_eq!(schemas_sql(sr, ""), "SHOW DATABASES");
+        assert_eq!(tables_sql(sr, "", "sales"), "SHOW TABLES FROM `sales`");
     }
 }
