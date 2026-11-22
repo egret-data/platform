@@ -23,6 +23,12 @@ pub struct InfraInputs {
     pub admins: Vec<String>,
     /// At least one qualifying engine is bound.
     pub delegating: bool,
+    /// At least one provisioned Trino engine is bound, delegating or open
+    /// (`egret_core::engine_delegation::needs_user_baseline`): Trino checks
+    /// the per-user baseline on its sessions whatever the delegation mode.
+    /// Only the baseline hangs on this; admin all-access and the delegator
+    /// grant need `delegating`.
+    pub user_baseline: bool,
     /// At least one bound engine impersonates with `egret_delegator`
     /// (`egret_core::engine_delegation::delegator_impersonates`).
     pub delegator_impersonates: bool,
@@ -64,7 +70,8 @@ fn statement(
 /// `SelfImpersonate`, `ExecuteQuery`, `QueryTimeout` (the last three Trino
 /// only).
 ///
-/// `AdminAllAccess` and the Trino statements need a delegating engine; the
+/// `AdminAllAccess` and the delegator grant need a delegating engine, the
+/// three Trino per-user statements a delegating or open Trino engine; the
 /// two query-log statements need only `query_log`, so a StarRocks engine that
 /// does not delegate still gets its loader allow and its guard.
 pub fn lower_infra(i: &InfraInputs) -> Vec<Statement> {
@@ -115,10 +122,10 @@ pub fn lower_infra(i: &InfraInputs) -> Vec<Statement> {
             "impersonate",
         ));
     }
-    if !i.delegating || i.engine != EngineType::Trino {
+    if i.engine != EngineType::Trino || !(i.delegating || i.user_baseline) {
         return out;
     }
-    if i.delegator_impersonates {
+    if i.delegating && i.delegator_impersonates {
         out.push(statement(
             InfraKind::DelegatorImpersonate,
             vec![user(DELEGATOR_PRINCIPAL)],
@@ -171,6 +178,7 @@ mod tests {
             engine,
             admins: admins.iter().map(|s| s.to_string()).collect(),
             delegating,
+            user_baseline: false,
             delegator_impersonates: imp,
             query_log: false,
         }
@@ -381,6 +389,27 @@ mod tests {
             kinds(&s),
             vec![InfraKind::QueryLogLoader, InfraKind::QueryLogGuard],
             "no AdminAllAccess without delegation, but both query-log statements"
+        );
+    }
+
+    /// KI-333: an open Trino engine (bound, not delegating) gets the three
+    /// per-user statements and nothing delegation-specific.
+    #[test]
+    fn an_open_trino_engine_emits_the_user_baseline_only() {
+        let mut i = inputs(EngineType::Trino, &["a"], false, true);
+        i.user_baseline = true;
+        assert_eq!(
+            kinds(&lower_infra(&i)),
+            vec![
+                InfraKind::SelfImpersonate,
+                InfraKind::ExecuteQuery,
+                InfraKind::QueryTimeout
+            ]
+        );
+        i.engine = EngineType::StarRocks;
+        assert!(
+            lower_infra(&i).is_empty(),
+            "StarRocks has no per-user baseline"
         );
     }
 

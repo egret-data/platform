@@ -155,6 +155,7 @@ fn statements(layout: Layout, tables: usize) -> Vec<Statement> {
         engine: EngineType::Trino,
         admins: vec!["admin".into()],
         delegating: true,
+        user_baseline: false,
         delegator_impersonates: true,
         query_log: false,
     }));
