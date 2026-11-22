@@ -3465,6 +3465,23 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         );
     }
 
+    // The stored `provisioning` status of a provisioned engine is advanced to
+    // `running` once the provisioner reports every pod ready, so the engine
+    // list and the governance browse (which read the stored column) are right
+    // without anyone opening the detail page. A compare-and-set, safe on every
+    // replica; stops with the other background loops.
+    {
+        let st = engine_mgmt
+            .as_ref()
+            .expect("engine-mgmt state is built just above")
+            .clone();
+        egret_engine_mgmt::spawn_engine_status_sweeper(
+            st,
+            egret_engine_mgmt::status_sweeper::ENGINE_STATUS_SWEEP_INTERVAL,
+            reaper_cancel.clone().cancelled_owned(),
+        );
+    }
+
     // Governance SP2b: the OPA decision surface and its snapshot refresher,
     // only while `[governance.opa] enabled` (default true) and the Ranger
     // surface is on. With the gate off, `opa` is `None`: the routes are not

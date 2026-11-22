@@ -6128,6 +6128,64 @@ async fn sweep_ranger_retire(f: &Fixture) -> usize {
     egret_engine_mgmt::ranger_credential::retire_rolled_out_previous_credentials(&st).await
 }
 
+/// One pass of the status-convergence sweep over the state `f.app` runs on.
+async fn sweep_engine_status(f: &Fixture) -> usize {
+    let st = engine_state(
+        &f.db,
+        &f.sessions,
+        f.engine_provisioner.clone(),
+        f.kube.clone(),
+        std::sync::Arc::new(AllowAllPdp),
+        f.ranger_enabled,
+        f.starrocks_ddl.clone(),
+        None,
+        egret_engine_mgmt::state::RangerSurfaceMode::Required,
+    );
+    egret_engine_mgmt::status_sweeper::converge_provisioning_engines(&st).await
+}
+
+/// A provisioned engine whose pods are ready is recorded `running` by the
+/// background sweep, with NO read of the engine detail; one that is not ready
+/// stays `provisioning`.
+#[tokio::test]
+async fn the_status_sweep_records_running_without_a_detail_read() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_status_sweep_admin", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let (status, j) = create_engine_via_api(&f, &token, &name, wh_id, serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create; body={j}");
+    let id = j["id"].as_str().unwrap().to_string();
+    assert_eq!(stored_status(&f, &id).await, "provisioning");
+
+    // Not ready: the sweep leaves the row alone.
+    port.set_status(egret_engine_mgmt_api::EngineStatus {
+        phase: "provisioning".into(),
+        message: Some("waiting for pods".into()),
+        pods: vec![],
+    });
+    sweep_engine_status(&f).await;
+    assert_eq!(stored_status(&f, &id).await, "provisioning");
+
+    // Ready: the sweep advances it with no GET /engines/{id}.
+    *port.status_response.lock().unwrap() = None;
+    assert!(sweep_engine_status(&f).await >= 1, "the sweep advanced it");
+    assert_eq!(
+        stored_status(&f, &id).await,
+        "running",
+        "pods ready => the stored column converges with no detail read"
+    );
+}
+
 /// A9: a bound Trino engine is provisioned with `engine-<uuid>` and a password
 /// `/ranger` accepts; a second apply reuses it (no rotation by accident).
 #[tokio::test]

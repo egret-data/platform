@@ -317,6 +317,18 @@ impl EngineMgmtStore {
         .await?)
     }
 
+    /// The PROVISIONED engines still recorded as `provisioning` — all the
+    /// status-convergence sweep looks at. External engines are excluded: egret
+    /// has no cluster of theirs to ask about.
+    pub async fn list_provisioning_engines(&self) -> Result<Vec<Engine>, EngineMgmtError> {
+        Ok(sqlx::query_as::<_, Engine>(
+            "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, query_log_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
+             FROM engine_mgmt.engines WHERE status = 'provisioning' AND origin = 'provisioned' ORDER BY created_at",
+        )
+        .fetch_all(self.pool())
+        .await?)
+    }
+
     pub async fn get_engine(&self, id: Uuid) -> Result<Option<Engine>, EngineMgmtError> {
         Ok(sqlx::query_as::<_, Engine>(
             "SELECT id, name, type, namespace, spec, status, authz_service_id, delegator_secret_id, root_secret_id, query_log_secret_id, tls_secret_id, coordinator_cert, tls_cert_secret_ref, internal_secret_id, monitor_secret_id, created_at, origin, external_host, external_port, ranger_plugin_version, ranger_secret_id, ranger_secret_prev_id, applied_security_rev, security_upgrade_pending \
