@@ -1318,6 +1318,11 @@ pub struct FakeStarRocksDdl {
     /// `needle` fails with `message` and the entry is consumed. An FE that
     /// refuses a statement and then, on a retry, accepts it.
     fail_once: Arc<Mutex<Vec<(String, String)>>>,
+    /// `(needle, message)`, each used ONCE: the first `execute` containing
+    /// `needle` RUNS on the FE and then answers `message` as an error: the
+    /// statement's answer was lost (a timeout or a dropped connection after
+    /// the front end ran it).
+    lose_answer_once: Arc<Mutex<Vec<(String, String)>>>,
     /// The `(Name, Status)` rows `SHOW PLUGINS` lists. An `INSTALL PLUGIN
     /// FROM` that the fake accepts adds `AuditLoader` as `INSTALLED`, the one
     /// plugin egret installs; `UNINSTALL PLUGIN <name>` removes the row.
@@ -1409,6 +1414,14 @@ impl FakeStarRocksDdl {
     /// Fail the next `execute` containing `needle` with `msg`, once.
     pub fn fail_matching_once(&self, needle: &str, msg: &str) {
         self.fail_once
+            .lock()
+            .unwrap()
+            .push((needle.to_string(), msg.to_string()));
+    }
+    /// The first `execute` containing `needle` runs on the FE, then fails
+    /// with `msg` (a transport-shaped failure: no FE error code), once.
+    pub fn lose_answer_matching_once(&self, needle: &str, msg: &str) {
+        self.lose_answer_once
             .lock()
             .unwrap()
             .push((needle.to_string(), msg.to_string()));
@@ -1644,6 +1657,19 @@ impl StarRocksDdl for FakeStarRocksDdl {
         // still show up in `executed()`, so a test can assert both "we sent
         // it" and "it failed" instead of only one.
         self.executed.lock().unwrap().push(sql.to_string());
+        let lost = {
+            let mut once = self.lose_answer_once.lock().unwrap();
+            once.iter()
+                .position(|(n, _)| sql.contains(n.as_str()))
+                .map(|i| once.remove(i).1)
+        };
+        if let Some(msg) = lost {
+            self.execute(fe, sql).await?;
+            // The statement was recorded by this call and again by the one
+            // above; keep one entry per statement the caller sent.
+            self.executed.lock().unwrap().pop();
+            return Err(fe_error(msg));
+        }
         // BEFORE the fail/succeed decision (fix round 1, F1): a hook must be
         // able to fire for a statement the FE is about to reject — that is
         // exactly the window the delegation bootstrap's repair checkpoint

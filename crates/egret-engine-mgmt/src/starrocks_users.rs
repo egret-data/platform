@@ -274,6 +274,73 @@ async fn converge_native_impersonation(
     }
 }
 
+/// The delegator's grants on users the FE does not have (KI-358): `granted`
+/// minus `on_fe` minus the users this sync just created (`on_fe` was read
+/// before them), keeping only names StarRocks could hold again, since only
+/// those can ever be re-created and take the grant live.
+pub(crate) fn orphaned_impersonation(
+    granted: &BTreeSet<String>,
+    on_fe: &BTreeSet<String>,
+    created: &[String],
+) -> Vec<String> {
+    granted
+        .iter()
+        .filter(|n| !on_fe.contains(*n) && !created.contains(n))
+        .filter(|n| is_starrocks_user_name(n) && !is_starrocks_reserved_user(n))
+        .cloned()
+        .collect()
+}
+
+/// Revoke the delegator's grant on a user that is gone. StarRocks refuses
+/// `REVOKE ... ON USER` for a missing user (`cannot find user`), so the name is
+/// re-created with a password kept nowhere, the grant is revoked, and the user
+/// dropped again. Chosen over `REVOKE ... ON ALL USERS` plus re-granting the
+/// live set, which leaves a window where no member can be impersonated. The
+/// stand-in is dropped even when the revoke failed, so no user with an unknown
+/// password is left holding the grant; the next sync tries again. A `CREATE
+/// USER` that fails (the name is held again) sends nothing else.
+async fn revoke_orphaned_impersonation(
+    st: &CpState,
+    fe: &FeTarget,
+    orphans: &[String],
+    failed: &mut Vec<String>,
+) -> usize {
+    let mut revoked = 0;
+    for name in orphans {
+        let password = random_internal_secret();
+        let secrets = BTreeMap::from([(Uuid::from_u128(1), password.clone())]);
+        if let Err(e) = st
+            .starrocks_ddl
+            .execute(fe, &create_user_sql(name, &password))
+            .await
+        {
+            failed.push(format!(
+                "{name}: orphan grant: {}",
+                e.scrubbed(fe, &secrets)
+            ));
+            continue;
+        }
+        match st
+            .starrocks_ddl
+            .execute(fe, &revoke_impersonation_sql(name))
+            .await
+        {
+            Ok(()) => revoked += 1,
+            Err(e) => failed.push(format!(
+                "{name}: orphan grant revoke: {}",
+                e.scrubbed(fe, &BTreeMap::new())
+            )),
+        }
+        if let Err(e) = st.starrocks_ddl.execute(fe, &drop_user_sql(name)).await {
+            failed.push(format!(
+                "{name}: orphan grant stand-in drop: {}",
+                e.scrubbed(fe, &BTreeMap::new())
+            ));
+        }
+    }
+    revoked
+}
+
 /// The user names `SHOW USERS` lists: the first column, read as `'<name>'@'<host>'`
 /// when it has that form (measured in Task 1, M2), as is otherwise.
 pub(crate) fn listed_users(rows: &[Vec<Option<String>>]) -> BTreeSet<String> {
@@ -348,6 +415,8 @@ pub enum UserSync {
         granted: usize,
         /// Whether `ON ALL USERS` was revoked (spec 2.7).
         revoked_all: bool,
+        /// Grants on users the FE no longer has that were revoked (KI-358).
+        orphans_revoked: usize,
         foreign: Vec<String>,
         refused: Vec<String>,
         /// One scrubbed message per statement or record that failed.
@@ -509,10 +578,15 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
             }
             Err(e) => {
                 // Never adopt a user that appeared between the read and the
-                // create: forget the record if this call made it, or if the
-                // FE says the user exists (this call did not create it: a
-                // recorded user the FE had lost, re-created by someone else).
-                if inserted || e.is_already_exists() {
+                // create: forget the record if the FE says the user exists
+                // (this call did not create it: a recorded user the FE had
+                // lost, re-created by someone else), or if this call made the
+                // record and the FE refused the statement. A failure with no
+                // FE error code (a timeout, a dropped connection) may have
+                // come after the FE ran the CREATE: the record stays, the next
+                // sync finds the user recorded and on the FE (kept, granted),
+                // or absent and creates it again (KI-359).
+                if e.is_already_exists() || (inserted && e.code.is_some()) {
                     if let Err(f) = st.engine_mgmt.forget_starrocks_user(engine.id, name).await {
                         failed.push(format!("{name}: forget: {f}"));
                     }
@@ -592,11 +666,19 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
         }
         _ => (0, false),
     };
+    let orphans_revoked = match &grants {
+        Some((_, users)) if converges => {
+            let orphans = orphaned_impersonation(users, &on_fe, &created_names);
+            revoke_orphaned_impersonation(st, fe, &orphans, &mut failed).await
+        }
+        _ => 0,
+    };
     UserSync::Done {
         created,
         dropped,
         granted,
         revoked_all,
+        orphans_revoked,
         foreign: plan.foreign,
         refused: plan.refused,
         failed,
@@ -613,12 +695,14 @@ pub(crate) fn log_outcome(engine_name: &str, outcome: &UserSync) {
             dropped,
             granted,
             revoked_all,
+            orphans_revoked,
             foreign,
             refused,
             failed,
         } => {
-            if *created > 0 || *dropped > 0 || *granted > 0 || *revoked_all {
-                tracing::info!(engine = %engine_name, created, dropped, granted, revoked_all,
+            if *created > 0 || *dropped > 0 || *granted > 0 || *revoked_all || *orphans_revoked > 0
+            {
+                tracing::info!(engine = %engine_name, created, dropped, granted, revoked_all, orphans_revoked,
                     "starrocks users synced");
             }
             if !foreign.is_empty() {
@@ -1217,6 +1301,20 @@ mod tests {
 
         listener.abort();
         pool.close().await;
+    }
+
+    #[test]
+    fn orphans_are_the_granted_users_the_fe_lacks() {
+        let granted = set(&["live", "gone", "fresh", "root", "bad'name", "also_gone"]);
+        let on_fe = set(&["live", "other"]);
+        let created = vec!["fresh".to_string()];
+        // `root` is reserved and `bad'name` cannot be a StarRocks user: neither
+        // can be re-created, so neither is revocable nor exploitable.
+        assert_eq!(
+            orphaned_impersonation(&granted, &on_fe, &created),
+            vec!["also_gone".to_string(), "gone".to_string()]
+        );
+        assert!(orphaned_impersonation(&set(&[]), &on_fe, &[]).is_empty());
     }
 
     #[test]
