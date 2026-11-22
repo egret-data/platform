@@ -509,10 +509,15 @@ async fn sync_locked(st: &CpState, engine: &Engine, fe: &FeTarget) -> UserSync {
             }
             Err(e) => {
                 // Never adopt a user that appeared between the read and the
-                // create: forget the record if this call made it, or if the
-                // FE says the user exists (this call did not create it: a
-                // recorded user the FE had lost, re-created by someone else).
-                if inserted || e.is_already_exists() {
+                // create: forget the record if the FE says the user exists
+                // (this call did not create it: a recorded user the FE had
+                // lost, re-created by someone else), or if this call made the
+                // record and the FE refused the statement. A failure with no
+                // FE error code (a timeout, a dropped connection) may have
+                // come after the FE ran the CREATE: the record stays, the next
+                // sync finds the user recorded and on the FE (kept, granted),
+                // or absent and creates it again (KI-359).
+                if e.is_already_exists() || (inserted && e.code.is_some()) {
                     if let Err(f) = st.engine_mgmt.forget_starrocks_user(engine.id, name).await {
                         failed.push(format!("{name}: forget: {f}"));
                     }
@@ -613,12 +618,14 @@ pub(crate) fn log_outcome(engine_name: &str, outcome: &UserSync) {
             dropped,
             granted,
             revoked_all,
+            orphans_revoked,
             foreign,
             refused,
             failed,
         } => {
-            if *created > 0 || *dropped > 0 || *granted > 0 || *revoked_all {
-                tracing::info!(engine = %engine_name, created, dropped, granted, revoked_all,
+            if *created > 0 || *dropped > 0 || *granted > 0 || *revoked_all || *orphans_revoked > 0
+            {
+                tracing::info!(engine = %engine_name, created, dropped, granted, revoked_all, orphans_revoked,
                     "starrocks users synced");
             }
             if !foreign.is_empty() {

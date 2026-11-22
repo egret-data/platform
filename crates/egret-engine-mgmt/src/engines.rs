@@ -16846,7 +16846,7 @@ mod tests {
         assert!(!fake.users().contains(&ike));
     }
 
-    /// A create that fails forgets only the record it made, and the FE's error
+    /// A create the FE refuses forgets only the record it made, and the FE's error
     /// reaches the outcome scrubbed of the password it carried.
     #[tokio::test]
     async fn a_failed_create_forgets_its_record_and_is_scrubbed() {
@@ -16871,7 +16871,7 @@ mod tests {
                 .and_then(|_| sql.rsplit("IDENTIFIED BY '").next())
             {
                 let pw = pw.trim_end_matches('\'');
-                echo.fail_matching(&sql, &format!("rejected; it was {pw}"));
+                echo.fail_matching(&sql, &format!("ERROR 1064 (HY000): rejected; it was {pw}"));
             }
             Box::pin(std::future::ready(()))
         });
@@ -17988,6 +17988,97 @@ mod tests {
             .await
             .expect("records")
             .contains(&left));
+    }
+
+    /// KI-359: the FE ran a member's `CREATE USER` but the answer was lost (a
+    /// timeout). The record written before the statement stays, so the next
+    /// sync finds the user recorded and on the FE, and grants the delegator.
+    #[tokio::test]
+    async fn a_lost_create_answer_keeps_the_record_and_the_next_sync_grants() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!(
+                "skipping a_lost_create_answer_keeps_the_record_and_the_next_sync_grants: DATABASE_URL not set"
+            );
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let alice = uname("alice");
+        seed_member(&st, ws, &alice, "active").await;
+        fake.seed_impersonate_all();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        fake.lose_answer_matching_once(
+            &format!("CREATE USER '{alice}'@'%'"),
+            "statement timed out after 30s",
+        );
+        let first = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&first, crate::starrocks_users::UserSync::Done { created: 0, failed, .. } if !failed.is_empty()),
+            "{first:?}"
+        );
+        assert!(fake.users().contains(&alice), "premise: the FE ran it");
+        assert!(
+            st.engine_mgmt
+                .recorded_starrocks_users(engine.id)
+                .await
+                .expect("records")
+                .contains(&alice),
+            "the record of a create whose answer was lost is kept"
+        );
+
+        let second = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&second, crate::starrocks_users::UserSync::Done { failed, foreign, .. }
+                if failed.is_empty() && !foreign.contains(&alice)),
+            "{second:?}"
+        );
+        assert!(fake.impersonation().1.contains(&alice));
+
+        fake.clear_executed();
+        let third = crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+        assert!(
+            matches!(&third, crate::starrocks_users::UserSync::Done { granted: 0, failed, .. } if failed.is_empty()),
+            "{third:?}"
+        );
+        assert!(
+            !fake.executed().iter().any(|s| s.contains("USER")),
+            "idempotent: {:?}",
+            fake.executed()
+        );
+    }
+
+    /// KI-359: a create the FE REFUSED (an error code: it did not run) is
+    /// forgotten, as before.
+    #[tokio::test]
+    async fn a_refused_create_is_forgotten() {
+        let Some((st, fake, _prov)) = test_state_with_fake_fe().await else {
+            eprintln!("skipping a_refused_create_is_forgotten: DATABASE_URL not set");
+            return;
+        };
+        let _pass = USER_SYNC_PASS.read().await;
+        let engine = seed_impersonate_sr_engine(&st).await;
+        let ws = seed_assigned_workspace(&st, &engine).await;
+        let alice = uname("alice");
+        seed_member(&st, ws, &alice, "active").await;
+        fake.seed_impersonate_all();
+        let fe = crate::starrocks_ddl::fe_target(&st, &engine)
+            .await
+            .expect("fe");
+
+        fake.fail_matching_once("CREATE USER", "ERROR 1064 (HY000): no privilege");
+        crate::starrocks_users::sync_starrocks_users(&st, &engine, &fe).await;
+
+        assert!(!fake.users().contains(&alice));
+        assert!(!st
+            .engine_mgmt
+            .recorded_starrocks_users(engine.id)
+            .await
+            .expect("records")
+            .contains(&alice));
     }
 
     /// The bootstrap grants no `ON ALL USERS` any more; the sync right after it
