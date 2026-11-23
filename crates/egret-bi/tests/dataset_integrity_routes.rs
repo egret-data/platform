@@ -608,6 +608,75 @@ async fn an_empty_or_blank_column_name_is_a_400() {
     }
 }
 
+#[tokio::test]
+async fn a_blank_named_calculated_column_is_deletable_by_query() {
+    let Some(fx) = setup().await else {
+        eprintln!("skip");
+        return;
+    };
+    // A legacy blank-named calculated column: the POST route now refuses to
+    // create one, so insert it straight into the table (the shape older
+    // datasets could hold).
+    sqlx::query(
+        "INSERT INTO analytics.dataset_columns \
+         (dataset_id, column_name, data_type, type_generic, is_temporal, ordinal, expression, verbose_name, description) \
+         VALUES ($1, '', 'bigint', 'numeric', false, 999, '1', '', '')",
+    )
+    .bind(fx.ds)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    let blank_count = || {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM analytics.dataset_columns WHERE dataset_id = $1 AND column_name = ''",
+        )
+        .bind(fx.ds)
+    };
+    assert_eq!(
+        blank_count().fetch_one(&fx.db.pool).await.unwrap(),
+        1,
+        "the blank-named column was inserted"
+    );
+
+    // The path form cannot carry an empty name: `/columns/` has no `{column_name}`
+    // segment to match, so it never reaches the column (this is the gap KI-101
+    // records).
+    let (old, _) = req(
+        &fx,
+        &fx.editor,
+        "DELETE",
+        &format!("{}/columns/", ds_path(&fx)),
+        None,
+    )
+    .await;
+    assert_ne!(
+        old,
+        StatusCode::OK,
+        "the path form must not reach a blank name"
+    );
+    assert_eq!(
+        blank_count().fetch_one(&fx.db.pool).await.unwrap(),
+        1,
+        "still there after the path-form attempt"
+    );
+
+    // The query form addresses it and deletes it.
+    let (st, body) = req(
+        &fx,
+        &fx.editor,
+        "DELETE",
+        &format!("{}/columns?name=", ds_path(&fx)),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "delete by empty name: {body}");
+    assert_eq!(
+        blank_count().fetch_one(&fx.db.pool).await.unwrap(),
+        0,
+        "the blank-named calculated column is gone"
+    );
+}
+
 // ── KI-102 ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]

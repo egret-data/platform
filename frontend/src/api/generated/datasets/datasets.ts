@@ -34,6 +34,7 @@ import type {
   DatasetRefreshDto,
   DatasetSummaryDto,
   DatasetUsageDto,
+  DatasetsDsDeleteColumnByQueryParams,
   DatasetsDsDeleteMetricParams,
   DatasetsDsListParams,
   DatasetsDsRemoveParams,
@@ -1063,6 +1064,132 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getDatasetsDsAddColumnMutationOptions(options), queryClient);
+    }
+    export type datasetsDsDeleteColumnByQueryResponse200 = {
+  data: DatasetDetailDto
+  status: 200
+}
+
+export type datasetsDsDeleteColumnByQueryResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type datasetsDsDeleteColumnByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type datasetsDsDeleteColumnByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type datasetsDsDeleteColumnByQueryResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type datasetsDsDeleteColumnByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type datasetsDsDeleteColumnByQueryResponseSuccess = (datasetsDsDeleteColumnByQueryResponse200) & {
+  headers: Headers;
+};
+export type datasetsDsDeleteColumnByQueryResponseError = (datasetsDsDeleteColumnByQueryResponse400 | datasetsDsDeleteColumnByQueryResponse401 | datasetsDsDeleteColumnByQueryResponse403 | datasetsDsDeleteColumnByQueryResponse404 | datasetsDsDeleteColumnByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type datasetsDsDeleteColumnByQueryResponse = (datasetsDsDeleteColumnByQueryResponseSuccess | datasetsDsDeleteColumnByQueryResponseError)
+
+export const getDatasetsDsDeleteColumnByQueryUrl = (workspace: string,
+    id: string,
+    params?: DatasetsDsDeleteColumnByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/columns?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/datasets/${encodeURIComponent(id)}/columns`
+}
+
+/**
+ * @summary Delete a calculated column named in the query string. This exists only so a
+calculated column with a blank name — not creatable since #725, but possible
+in older datasets — can be removed; `/columns/{column_name}` cannot carry an
+empty name (KI-101). For any non-empty name the path form is equivalent.
+ */
+export const datasetsDsDeleteColumnByQuery = async (workspace: string,
+    id: string,
+    params?: DatasetsDsDeleteColumnByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<datasetsDsDeleteColumnByQueryResponse> => {
+
+  return customInstance<datasetsDsDeleteColumnByQueryResponse>(getDatasetsDsDeleteColumnByQueryUrl(workspace,id,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getDatasetsDsDeleteColumnByQueryMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteColumnByQuery>>, TError,{workspace: string;id: string;params?: DatasetsDsDeleteColumnByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteColumnByQuery>>, TError,{workspace: string;id: string;params?: DatasetsDsDeleteColumnByQueryParams}, TContext> => {
+
+const mutationKey = ['datasetsDsDeleteColumnByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof datasetsDsDeleteColumnByQuery>>, {workspace: string;id: string;params?: DatasetsDsDeleteColumnByQueryParams}> = (props) => {
+          const {workspace,id,params} = props ?? {};
+
+          return  datasetsDsDeleteColumnByQuery(workspace,id,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DatasetsDsDeleteColumnByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof datasetsDsDeleteColumnByQuery>>>
+
+    export type DatasetsDsDeleteColumnByQueryMutationError = ErrorBody
+
+    /**
+ * @summary Delete a calculated column named in the query string. This exists only so a
+calculated column with a blank name — not creatable since #725, but possible
+in older datasets — can be removed; `/columns/{column_name}` cannot carry an
+empty name (KI-101). For any non-empty name the path form is equivalent.
+ */
+export const useDatasetsDsDeleteColumnByQuery = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof datasetsDsDeleteColumnByQuery>>, TError,{workspace: string;id: string;params?: DatasetsDsDeleteColumnByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof datasetsDsDeleteColumnByQuery>>,
+        TError,
+        {workspace: string;id: string;params?: DatasetsDsDeleteColumnByQueryParams},
+        TContext
+      > => {
+      return useMutation(getDatasetsDsDeleteColumnByQueryMutationOptions(options), queryClient);
     }
     export type datasetsDsUpdateColumnResponse200 = {
   data: DatasetDetailDto
