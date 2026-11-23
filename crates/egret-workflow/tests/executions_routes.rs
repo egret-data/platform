@@ -3813,3 +3813,853 @@ async fn the_execution_api_carries_the_outputs_masked_and_never_the_sealed_colum
         "the list carries no sealed column: {text}"
     );
 }
+
+// ── Package 7e: stats, listing helpers, CSV export ──────────────────────────
+
+/// Recent (the average only looks back 30 days) start and end, `secs` apart.
+fn ended(days_ago: i64, secs: i64) -> (DateTime<Utc>, DateTime<Utc>) {
+    let s = Utc::now() - chrono::Duration::days(days_ago);
+    (s, s + chrono::Duration::seconds(secs))
+}
+
+#[tokio::test]
+async fn distinct_namespaces_and_flows_are_workflow_read_gated_and_scoped() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (ws_b, user_b) = common::seed_workspace(&db).await;
+    let (_w, manager) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    common::grant(&db, ws, manager, &["workflow:manage"]).await;
+    common::grant(&db, ws_b, user_b, &["workflow:read"]).await;
+    insert_execution(&db, ws, None, "n.one", "f1", "SUCCESS", at(1)).await;
+    insert_execution(&db, ws, None, "n.one", "f2", "SUCCESS", at(2)).await;
+    insert_execution(&db, ws, None, "n.two", "f3", "SUCCESS", at(3)).await;
+    insert_execution(&db, ws_b, None, "n.theirs", "g", "SUCCESS", at(4)).await;
+
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    assert_eq!(
+        common::anon_get(&app, &format!("{base}/namespaces"))
+            .await
+            .status(),
+        401
+    );
+    for path in [
+        format!("{base}/namespaces"),
+        format!("{base}/namespaces/n.one/flows"),
+    ] {
+        assert_eq!(
+            common::get(&app, &path, manager).await.status(),
+            403,
+            "{path}"
+        );
+    }
+    let ns = common::json(common::get(&app, &format!("{base}/namespaces"), user).await).await;
+    assert_eq!(ns, serde_json::json!(["n.one", "n.two"]), "own ws only");
+    let flows =
+        common::json(common::get(&app, &format!("{base}/namespaces/n.one/flows"), user).await)
+            .await;
+    assert_eq!(flows, serde_json::json!(["f1", "f2"]));
+}
+
+#[tokio::test]
+async fn average_duration_is_null_without_terminated_and_a_number_with() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let url =
+        format!("/api/ws/{ws}/workflows/executions/namespaces/n.avg/flows/f/average-duration");
+    let app = common::app(&db).await;
+
+    insert_execution(&db, ws, None, "n.avg", "f", "RUNNING", at(1)).await;
+    let body = common::json(common::get(&app, &url, user).await).await;
+    assert_eq!(body["avgDurationMs"], Value::Null, "{body}");
+    assert_eq!(body["count"], 0, "{body}");
+
+    for (day, secs) in [(2, 10), (3, 20)] {
+        let (s, e) = ended(i64::from(day), secs);
+        let id = insert_execution(&db, ws, None, "n.avg", "f", "SUCCESS", s).await;
+        sqlx::query("UPDATE workflow.executions SET started_at=$2, ended_at=$3 WHERE id=$1")
+            .bind(id)
+            .bind(s)
+            .bind(e)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    let body = common::json(common::get(&app, &url, user).await).await;
+    assert_eq!(body["avgDurationMs"], 15000, "{body}");
+    assert_eq!(body["count"], 2, "{body}");
+}
+
+#[tokio::test]
+async fn latest_returns_the_newest_execution_per_requested_flow() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    insert_execution(&db, ws, None, "n.l", "f", "FAILED", at(1)).await;
+    let newest = insert_execution(&db, ws, None, "n.l", "f", "SUCCESS", at(5)).await;
+    let app = common::app(&db).await;
+    let url = format!("/api/ws/{ws}/workflows/executions/latest");
+
+    let body = common::json(
+        common::post(
+            &app,
+            &url,
+            user,
+            serde_json::json!([
+                {"namespace": "n.l", "id": "f"},
+                {"namespace": "n.l", "id": "none"}
+            ]),
+        )
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "a flow with no execution is omitted: {body}");
+    assert_eq!(rows[0]["id"], newest.to_string());
+    assert_eq!(rows[0]["flowId"], "f");
+    assert_eq!(rows[0]["namespace"], "n.l");
+    assert_eq!(rows[0]["status"], "SUCCESS");
+
+    let empty = common::json(common::post(&app, &url, user, serde_json::json!([])).await).await;
+    assert_eq!(empty, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn export_csv_has_a_header_and_one_row_per_matching_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (_w, manager) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    common::grant(&db, ws, manager, &["workflow:manage"]).await;
+    insert_execution(&db, ws, None, "n.csv", "a", "SUCCESS", at(1)).await;
+    insert_execution(&db, ws, None, "n.csv", "b", "FAILED", at(2)).await;
+    let cmd = insert_execution(&db, ws, None, "n.csv", "=cmd", "FAILED", at(3)).await;
+    // `a` carries a duration and comma/quote-bearing labels; `b` is terminal
+    // with no timestamps and null labels; `=cmd` is started but never ended.
+    let a_id = insert_execution(&db, ws, None, "n.csv", "a2", "SUCCESS", at(4)).await;
+    sqlx::query("UPDATE workflow.executions SET started_at=$2, ended_at=$3, labels=$4 WHERE id=$1")
+        .bind(a_id)
+        .bind(at(4))
+        .bind(at(4) + chrono::Duration::milliseconds(12_345))
+        .bind(serde_json::json!([{"key": "a,b", "value": "say \"hi\""}]))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workflow.executions SET started_at=$2 WHERE id=$1")
+        .bind(cmd)
+        .bind(at(3))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let app = common::app(&db).await;
+    let url = format!("/api/ws/{ws}/workflows/executions/export.csv");
+
+    assert_eq!(common::get(&app, &url, manager).await.status(), 403);
+    assert_eq!(common::anon_get(&app, &url).await.status(), 401);
+
+    async fn lines(res: axum::response::Response) -> Vec<String> {
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.headers()["content-type"], "text/csv");
+        assert_eq!(
+            res.headers()["content-disposition"],
+            "attachment; filename=executions.csv"
+        );
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+    let all = lines(common::get(&app, &url, user).await).await;
+    assert_eq!(all.len(), 5, "{all:?}");
+    assert_eq!(
+        all[0],
+        "id,namespace,flow_id,flow_key,state,created_at,started_at,ended_at,duration_ms,labels"
+    );
+    // Newest first: a2 (12.345 s, quoted labels), then =cmd, b, a.
+    assert!(all[1].contains(",a2,SUCCESS,"), "{all:?}");
+    assert!(all[1].contains(",12345,"), "exact ms difference: {all:?}");
+    let labels_json = r#"[{"key":"a,b","value":"say \"hi\""}]"#;
+    let quoted = format!("\"{}\"", labels_json.replace('"', "\"\""));
+    assert!(
+        all[1].ends_with(&format!(",12345,{quoted}")),
+        "labels compact JSON, quoted + doubled quotes: {all:?}"
+    );
+    assert!(all[2].contains(",'=cmd,"), "formula defused: {all:?}");
+    assert!(
+        all[2].ends_with(",,,"),
+        "started but not ended: empty duration + null labels: {all:?}"
+    );
+    assert!(
+        all[3].ends_with(",,,,"),
+        "no timestamps, null labels: empty cells: {all:?}"
+    );
+    let failed = lines(common::get(&app, &format!("{url}?state=FAILED"), user).await).await;
+    assert_eq!(failed.len(), 3, "{failed:?}");
+    let one = lines(common::get(&app, &format!("{url}?flow_key=a"), user).await).await;
+    assert_eq!(one.len(), 2, "{one:?}");
+}
+
+#[tokio::test]
+async fn the_new_read_routes_are_404_for_a_foreign_workspace_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws_a, user_a) = common::seed_workspace(&db).await;
+    let (ws_b, _user_b) = common::seed_workspace(&db).await;
+    common::grant(&db, ws_a, user_a, &["workflow:read"]).await;
+    insert_execution(&db, ws_b, None, "n.foreign", "g", "SUCCESS", at(1)).await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws_a}/workflows/executions");
+
+    let flows = common::get(&app, &format!("{base}/namespaces/n.foreign/flows"), user_a).await;
+    assert_eq!(flows.status(), 200, "never a 403 that confirms it exists");
+    assert_eq!(common::json(flows).await, serde_json::json!([]));
+    let avg = common::json(
+        common::get(
+            &app,
+            &format!("{base}/namespaces/n.foreign/flows/g/average-duration"),
+            user_a,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(avg["count"], 0, "{avg}");
+    let latest = common::json(
+        common::post(
+            &app,
+            &format!("{base}/latest"),
+            user_a,
+            serde_json::json!([{"namespace": "n.foreign", "id": "g"}]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(latest, serde_json::json!([]));
+    let ns = common::json(common::get(&app, &format!("{base}/namespaces"), user_a).await).await;
+    assert_eq!(ns, serde_json::json!([]));
+    // A workspace slug that is not the caller's is the 404.
+    let other = common::get(
+        &app,
+        &format!("/api/ws/{ws_b}/workflows/executions/namespaces"),
+        user_a,
+    )
+    .await;
+    assert!(
+        matches!(other.status().as_u16(), 403 | 404),
+        "{}",
+        other.status()
+    );
+}
+
+// ── Eval (package 7e #1a execution context, #1b task-run context) ────────────
+//
+// `POST …/executions/{id}/eval` and
+// `POST …/executions/{id}/task-runs/{task_run_id}/eval` render one Pebble
+// expression against the STORED context. A broken expression — including a
+// sealed `secret()` — is a 200 whose body carries `error`, never a 4xx.
+
+/// A flow source with one SECRET input and one Log task, so the plan builds and
+/// a masked input is declared.
+const EVAL_SOURCE: &str =
+    "id: ev\nnamespace: a.b\ninputs:\n  - id: pw\n    type: SECRET\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+
+/// Insert one `workflow.executions` row with a chosen `source` and `inputs`.
+async fn insert_execution_src(
+    db: &Db,
+    ws: Uuid,
+    namespace: &str,
+    flow_key: &str,
+    source: &str,
+    inputs: Value,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, inputs, created_at) \
+         VALUES ($1, $2, $3, $4, 'SUCCESS', $5, $6, $7) RETURNING id",
+    )
+    .bind(ws)
+    .bind(namespace)
+    .bind(flow_key)
+    .bind(source)
+    .bind(serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]))
+    .bind(inputs)
+    .bind(at(1))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert execution with source")
+}
+
+/// Insert one `workflow.executions` row with a chosen `source`, masked `inputs`
+/// and a real sealed `secret_inputs`.
+async fn insert_execution_sealed(
+    db: &Db,
+    ws: Uuid,
+    namespace: &str,
+    flow_key: &str,
+    source: &str,
+    inputs: Value,
+    secret_inputs: Vec<u8>,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, inputs, secret_inputs, created_at) \
+         VALUES ($1, $2, $3, $4, 'SUCCESS', $5, $6, $7, $8) RETURNING id",
+    )
+    .bind(ws)
+    .bind(namespace)
+    .bind(flow_key)
+    .bind(source)
+    .bind(serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]))
+    .bind(inputs)
+    .bind(secret_inputs)
+    .bind(at(1))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert sealed execution")
+}
+
+/// Insert one terminal `workflow.task_runs` row and return its id.
+async fn insert_task_run(db: &Db, execution: Uuid, task_id: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history, attempts) \
+         VALUES ($1, 0, 0, $2, 'io.kestra.plugin.core.log.Log', 'SUCCESS', \
+                 '[\"CREATED\",\"RUNNING\",\"SUCCESS\"]'::jsonb, '[{}]'::jsonb) RETURNING id",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert task run")
+}
+
+/// `POST {path}` with a `text/plain` body carrying the raw expression.
+async fn eval(
+    app: &common::App,
+    path: &str,
+    user: egret_core::UserId,
+    expr: &str,
+) -> axum::response::Response {
+    common::send_raw(
+        app,
+        "POST",
+        path,
+        user,
+        "text/plain",
+        expr.as_bytes().to_vec(),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn eval_renders_in_execution_and_task_run_context() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution_src(&db, ws, "a.ev", "ev", EVAL_SOURCE, serde_json::json!({})).await;
+    let trid = insert_task_run(&db, id, "t").await;
+    let app = common::app(&db).await;
+
+    // #1a: the execution context. A literal, and a bound name.
+    let base = format!("/api/ws/{ws}/workflows/executions/{id}");
+    let lit = eval(&app, &format!("{base}/eval"), user, "{{ 1 + 1 }}").await;
+    assert_eq!(lit.status(), 200);
+    assert_eq!(
+        common::json(lit).await,
+        serde_json::json!({"result": "2", "error": null})
+    );
+    let exec_id =
+        common::json(eval(&app, &format!("{base}/eval"), user, "{{ execution.id }}").await).await;
+    assert_eq!(exec_id["result"], serde_json::json!(id.to_string()));
+
+    // #1b: the task-run context binds `taskrun`.
+    let tr = common::json(
+        eval(
+            &app,
+            &format!("{base}/task-runs/{trid}/eval"),
+            user,
+            "{{ taskrun.id }}",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(tr["result"], serde_json::json!(trid.to_string()));
+    assert!(tr["error"].is_null());
+}
+
+#[tokio::test]
+async fn eval_returns_the_render_error_in_band_with_200() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution_src(&db, ws, "a.err", "ev", EVAL_SOURCE, serde_json::json!({})).await;
+    let app = common::app(&db).await;
+
+    let res = eval(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/eval"),
+        user,
+        "{{ nope.nope }}",
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        200,
+        "a broken expression is a result, not a 4xx"
+    );
+    let body = common::json(res).await;
+    assert!(body["result"].is_null(), "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(|s| !s.is_empty()),
+        "{body}"
+    );
+}
+
+/// The raw response body as a string — so a sentinel-absence assertion covers
+/// the WHOLE wire payload, not just the fields we thought to parse.
+async fn raw_body(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+}
+
+#[tokio::test]
+async fn eval_seals_secrets_on_both_paths() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+
+    // A distinctive plaintext REALLY sealed into `secret_inputs`; `inputs.pw`
+    // holds only the mask. This test fails if eval ever decrypts the sealed
+    // column — the sentinel would then surface somewhere in the response. The
+    // cipher is the process-wide test key, so the handler (same process) would
+    // use it to decrypt if it tried; it does not.
+    const SENTINEL: &str = "SENTINEL-PLAINTEXT-d3adb33f";
+    egret_workflow::secret_inputs::install_for_tests();
+    let flow = egret_workflow::spec::parse(EVAL_SOURCE).expect("parse");
+    let (masked, sealed) =
+        egret_workflow::secret_inputs::split(&flow, serde_json::json!({ "pw": SENTINEL }))
+            .expect("seal the sentinel");
+    let sealed = sealed.expect("a sealed value");
+    assert_eq!(
+        masked["pw"],
+        serde_json::json!("******"),
+        "split masks the input"
+    );
+
+    let id = insert_execution_sealed(&db, ws, "a.sec", "ev", EVAL_SOURCE, masked, sealed).await;
+    let trid = insert_task_run(&db, id, "t").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions/{id}");
+
+    for path in [
+        format!("{base}/eval"),
+        format!("{base}/task-runs/{trid}/eval"),
+    ] {
+        // `secret()` is never wired here: it is an error, not a value — and the
+        // sentinel appears nowhere in the raw body.
+        let res = eval(&app, &path, user, "{{ secret('pw') }}").await;
+        assert_eq!(
+            res.status(),
+            200,
+            "sealed secret is still a 200 with an error"
+        );
+        let raw = raw_body(res).await;
+        assert!(
+            !raw.contains(SENTINEL),
+            "{path}: secret() leaked the sentinel: {raw}"
+        );
+        let body: Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            body["result"].is_null(),
+            "{path} leaked a secret value: {body}"
+        );
+        assert!(body["error"].as_str().is_some(), "{path}: {body}");
+
+        // Every surface an attacker might try — the sentinel is in none of them.
+        for expr in ["{{ inputs.pw }}", "{{ inputs }}", "{{ outputs }}"] {
+            let res = eval(&app, &path, user, expr).await;
+            assert_eq!(res.status(), 200);
+            let raw = raw_body(res).await;
+            assert!(
+                !raw.contains(SENTINEL),
+                "{path} {expr}: leaked the sentinel: {raw}"
+            );
+        }
+
+        // The masked input renders the mask, never the plaintext.
+        let masked = common::json(eval(&app, &path, user, "{{ inputs.pw }}").await).await;
+        assert_eq!(
+            masked["result"],
+            serde_json::json!("******"),
+            "{path}: {masked}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn eval_is_404_for_unknown_execution_or_task_run() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution_src(&db, ws, "a.nf", "ev", EVAL_SOURCE, serde_json::json!({})).await;
+    insert_task_run(&db, id, "t").await;
+    let app = common::app(&db).await;
+
+    // An execution that does not exist.
+    let ghost = Uuid::new_v4();
+    let miss_exec = eval(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{ghost}/eval"),
+        user,
+        "{{ 1 }}",
+    )
+    .await;
+    assert_eq!(miss_exec.status(), 404, "unknown execution");
+
+    // A task run that is not this execution's.
+    let miss_run = eval(
+        &app,
+        &format!(
+            "/api/ws/{ws}/workflows/executions/{id}/task-runs/{}/eval",
+            Uuid::new_v4()
+        ),
+        user,
+        "{{ 1 }}",
+    )
+    .await;
+    assert_eq!(miss_run.status(), 404, "unknown task run");
+
+    // Control: the real execution answers 200, so the 404s are about existence.
+    let ok = eval(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/eval"),
+        user,
+        "{{ 1 }}",
+    )
+    .await;
+    assert_eq!(ok.status(), 200);
+}
+
+#[tokio::test]
+async fn eval_requires_workflow_read() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    // `workflow:manage` alone — NOT `workflow:read`.
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let id = insert_execution_src(&db, ws, "a.403", "ev", EVAL_SOURCE, serde_json::json!({})).await;
+    let trid = insert_task_run(&db, id, "t").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions/{id}");
+
+    assert_eq!(
+        eval(&app, &format!("{base}/eval"), user, "{{ 1 }}")
+            .await
+            .status(),
+        403,
+        "the execution eval route requires workflow:read"
+    );
+    assert_eq!(
+        eval(
+            &app,
+            &format!("{base}/task-runs/{trid}/eval"),
+            user,
+            "{{ 1 }}"
+        )
+        .await
+        .status(),
+        403,
+        "the task-run eval route requires workflow:read"
+    );
+}
+
+// ── Poll→SSE follow (package 7e #2 execution, #3 logs) ───────────────────────
+//
+// GET /api/ws/{workspace}/workflows/executions/{id}/follow
+// GET /api/ws/{workspace}/workflows/executions/{id}/logs/follow
+//
+// Each re-reads the store every `follow_poll_interval` (20 ms under test, 1 s in
+// production) and emits an SSE event only when something changed; the execution
+// stream ends on a terminal state, the log stream on `complete && no new lines`.
+// The body of a `text/event-stream` is drained to completion here precisely
+// because these streams end — a never-ending one would hang `body_text`.
+
+/// Parse an SSE body into the JSON payload of each `data:` event, skipping the
+/// keep-alive comments (`:\n\n`) the wrapper emits when a tick changes nothing.
+fn sse_events(body: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for block in body.split("\n\n") {
+        let mut data = String::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("data:") {
+                let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(rest);
+            }
+        }
+        if data.is_empty() {
+            continue;
+        }
+        out.push(serde_json::from_str(&data).expect("an SSE event's data is JSON"));
+    }
+    out
+}
+
+/// Pull from a streamed SSE body until one complete `data:` event (terminated by
+/// a blank line) is buffered, then parse and return it; `None` once the stream
+/// ends with no further event. Reading events as they arrive — rather than
+/// buffering the whole body with `common::body_text` — lets a test observe the
+/// first event BEFORE it mutates the row, so there is no wall-clock race between
+/// the handler's first emit and the mutation (the
+/// [`time-dependent-test-assertions`] lesson).
+///
+/// `buf` carries bytes across calls (a chunk can split or join events). Keep-
+/// alive comment frames (no `data:`) are skipped.
+async fn next_sse_event(body: &mut axum::body::BodyDataStream, buf: &mut String) -> Option<Value> {
+    use futures_util::StreamExt as _;
+    loop {
+        if let Some(idx) = buf.find("\n\n") {
+            let block: String = buf.drain(..idx + 2).collect();
+            let mut data = String::new();
+            for line in block.lines() {
+                if let Some(rest) = line.strip_prefix("data:") {
+                    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                    if !data.is_empty() {
+                        data.push('\n');
+                    }
+                    data.push_str(rest);
+                }
+            }
+            if data.is_empty() {
+                continue; // a keep-alive comment frame; read on
+            }
+            return Some(serde_json::from_str(&data).expect("an SSE event's data is JSON"));
+        }
+        match body.next().await {
+            Some(Ok(chunk)) => buf.push_str(&String::from_utf8_lossy(&chunk)),
+            Some(Err(e)) => panic!("SSE stream error: {e}"),
+            None => return None,
+        }
+    }
+}
+
+/// Seed one exec-level log line (no task/run), returning nothing.
+async fn insert_log_line(db: &Db, ws: Uuid, ex: Uuid, level: i16, message: &str) {
+    sqlx::query(
+        "INSERT INTO workflow.task_logs \
+           (workspace_id, execution_id, task_id, task_run_id, attempt, level, ts, message) \
+         VALUES ($1, $2, NULL, NULL, NULL, $3, $4, $5)",
+    )
+    .bind(ws)
+    .bind(ex)
+    .bind(level)
+    .bind(at(1))
+    .bind(message)
+    .execute(&db.pool)
+    .await
+    .expect("insert log line");
+}
+
+/// Backdate every line of `ex` past the settle lag (2 s), so a page serves them
+/// at once — the same move `tests/task_logs.rs` makes.
+async fn settle_logs(db: &Db, ex: Uuid) {
+    sqlx::query(
+        "UPDATE workflow.task_logs SET inserted_at = inserted_at - interval '3 seconds' \
+           WHERE execution_id = $1",
+    )
+    .bind(ex)
+    .execute(&db.pool)
+    .await
+    .expect("settle logs");
+}
+
+/// **#2: the execution stream emits the current snapshot, a fresh event when it
+/// changes, and one final event as it goes terminal, then closes.**
+///
+/// Deterministic by construction — **no wall-clock race**. The body is read as a
+/// stream: the RUNNING snapshot is observed FIRST, and only then is the row
+/// flipped to SUCCESS, so the initial emit is guaranteed to have already
+/// happened regardless of CPU load (the earlier timer-vs-poll version flaked
+/// under full-suite contention; see `time-dependent-test-assertions`). The flip
+/// is the single mutation, and the stream must then deliver one terminal event
+/// and close.
+#[tokio::test]
+async fn follow_execution_emits_a_snapshot_then_closes_on_terminal() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution(&db, ws, None, "a.follow", "f", "RUNNING", at(1)).await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/executions/{id}/follow");
+
+    let res = common::get(&app, &path, user).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["content-type"], "text/event-stream");
+
+    let mut body = res.into_body().into_data_stream();
+    let mut buf = String::new();
+
+    // Observe the initial RUNNING snapshot BEFORE mutating the row. Reading the
+    // first event is what proves the handler emitted it; the flip cannot race it.
+    let first = next_sse_event(&mut body, &mut buf)
+        .await
+        .expect("an initial snapshot event");
+    assert_eq!(first["id"], id.to_string(), "{first}");
+    assert_eq!(first["state"], "RUNNING", "the first event is the snapshot");
+    // Same shape as `get_execution`: the frozen source and task-run list are here.
+    assert_eq!(first["source"], SEEDED_SOURCE, "{first}");
+    assert!(first["runs"].is_array(), "{first}");
+
+    // Only now go terminal. The next poll tick (20 ms) sees SUCCESS, emits one
+    // final event, and ends the stream.
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .expect("flip to terminal");
+
+    // Drain to completion; the last event is the terminal snapshot, then close.
+    let mut last = None;
+    while let Some(ev) = next_sse_event(&mut body, &mut buf).await {
+        last = Some(ev);
+    }
+    let last = last.expect("a terminal event after the flip, then the stream closes");
+    assert_eq!(
+        last["state"], "SUCCESS",
+        "the final event is the terminal snapshot"
+    );
+    assert_eq!(last["id"], id.to_string(), "{last}");
+}
+
+/// **#3: the log stream emits the lines after its watermark and closes once the
+/// execution is complete and the tail is drained.** The lines are settled and
+/// the execution is idle past the settle lag, so the first tick serves them and
+/// a later tick — finding nothing new and `complete` — ends the stream.
+#[tokio::test]
+async fn follow_logs_emits_appended_lines_then_closes_when_drained() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    // Terminal, and idle longer ago than the settle lag -> `complete` is true.
+    let id = insert_execution(&db, ws, None, "a.logs", "f", "SUCCESS", at(1)).await;
+    sqlx::query(
+        "UPDATE workflow.executions SET updated_at = now() - interval '5 seconds' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .expect("backdate updated_at");
+    insert_log_line(&db, ws, id, 2, "one").await;
+    insert_log_line(&db, ws, id, 4, "two").await;
+    insert_log_line(&db, ws, id, 2, "three").await;
+    settle_logs(&db, id).await;
+
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/executions/{id}/logs/follow");
+
+    let res = common::get(&app, &path, user).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["content-type"], "text/event-stream");
+    let body = common::body_text(res).await;
+
+    let events = sse_events(&body);
+    assert!(
+        !events.is_empty(),
+        "expected at least one log page event, got {events:#?}"
+    );
+    // Every seeded line, in order, across whatever pages the stream emitted.
+    let messages: Vec<String> = events
+        .iter()
+        .flat_map(|e| e["items"].as_array().cloned().unwrap_or_default())
+        .map(|l| l["message"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(messages, vec!["one", "two", "three"], "{events:#?}");
+    let last = events.last().unwrap();
+    assert_eq!(
+        last["complete"],
+        Value::Bool(true),
+        "the final page reports complete"
+    );
+    assert_eq!(last["execution_state"], "SUCCESS", "{last}");
+}
+
+/// **404 before the stream opens for a foreign execution** — never an error
+/// event inside a 200 stream. A `workflow:read` holder in A asks after B's
+/// execution: the answer is a 404 whose body is JSON, not `text/event-stream`.
+#[tokio::test]
+async fn follow_is_404_before_the_stream_opens_for_a_foreign_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws_a, user_a) = common::seed_workspace(&db).await;
+    let (ws_b, user_b) = common::seed_workspace(&db).await;
+    common::grant(&db, ws_a, user_a, &["workflow:read"]).await;
+    common::grant(&db, ws_b, user_b, &["workflow:read"]).await;
+    let theirs = insert_execution(&db, ws_b, None, "b.theirs", "g", "RUNNING", at(1)).await;
+    let app = common::app(&db).await;
+
+    for suffix in ["follow", "logs/follow"] {
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws_a}/workflows/executions/{theirs}/{suffix}"),
+            user_a,
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            404,
+            "a foreign execution must 404 before the {suffix} stream opens"
+        );
+        assert_ne!(
+            res.headers()["content-type"],
+            "text/event-stream",
+            "the 404 must be a plain response, not an event inside a stream ({suffix})"
+        );
+    }
+
+    // Control: B may follow its own execution — so the 404s are about ownership,
+    // not a missing route. (The RUNNING execution never terminates, so only the
+    // response head is checked; the body is dropped unread.)
+    for suffix in ["follow", "logs/follow"] {
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws_b}/workflows/executions/{theirs}/{suffix}"),
+            user_b,
+        )
+        .await;
+        assert_eq!(res.status(), 200, "the owner may follow ({suffix})");
+        assert_eq!(res.headers()["content-type"], "text/event-stream");
+    }
+}
+
+/// **Both follow routes require `workflow:read`.** A `workflow:manage` holder —
+/// authoring, not reading — is refused 403, as the detail and logs routes are.
+#[tokio::test]
+async fn follow_requires_workflow_read() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let id = insert_execution(&db, ws, None, "a.403", "f", "RUNNING", at(1)).await;
+    let app = common::app(&db).await;
+
+    for suffix in ["follow", "logs/follow"] {
+        assert_eq!(
+            common::get(
+                &app,
+                &format!("/api/ws/{ws}/workflows/executions/{id}/{suffix}"),
+                user,
+            )
+            .await
+            .status(),
+            403,
+            "the {suffix} route requires workflow:read, not workflow:manage"
+        );
+    }
+}

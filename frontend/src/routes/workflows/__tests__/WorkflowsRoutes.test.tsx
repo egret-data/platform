@@ -27,6 +27,10 @@ function renderAt(path: string) {
   vi.mocked(api.useWorkflowGetFlow).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowGetFlow>);
   vi.mocked(api.useWorkflowGetFlowSchema).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowGetFlowSchema>);
   vi.mocked(api.workflowValidateUnsavedFlow).mockReturnValue(new Promise(() => {}));
+  const empty = { data: { status: 200, data: [] }, isLoading: false, isError: false, error: null };
+  vi.mocked(api.useWorkflowListExecutionNamespaces).mockReturnValue(empty as unknown as ReturnType<typeof api.useWorkflowListExecutionNamespaces>);
+  vi.mocked(api.useWorkflowListExecutionNamespaceFlows).mockReturnValue(empty as unknown as ReturnType<typeof api.useWorkflowListExecutionNamespaceFlows>);
+  vi.mocked(api.getWorkflowExportExecutionsCsvUrl).mockReturnValue("/export.csv");
   vi.mocked(api.workflowListExecutions).mockReturnValue(new Promise(() => {}));
   vi.mocked(api.useWorkflowGetExecution).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowGetExecution>);
   vi.mocked(api.useWorkflowListTriggers).mockReturnValue(loading as unknown as ReturnType<typeof api.useWorkflowListTriggers>);

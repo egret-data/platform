@@ -26,18 +26,21 @@ import type {
 
 import type {
   Ack,
+  AvgDurationDto,
   BulkResultsDto,
   CreateBackfillRequest,
   CreateFlowRequest,
   DeleteBackfillsRequest,
   DetailedErrorBody,
   ErrorBody,
+  EvalResultDto,
   ExecutionDto,
   ExecutionGraph,
   ExecutionPageDto,
   FileMetasDto,
   FilePreviewDto,
   FlowDto,
+  FlowFilterDto,
   FlowGraph,
   FlowGraphRequest,
   FlowListItemDto,
@@ -49,6 +52,7 @@ import type {
   KvKeysBody,
   KvRevisionDto,
   LabelDto,
+  LastExecutionDto,
   LogPageDto,
   NamespaceDependenciesDto,
   NsFileRevisionDto,
@@ -76,6 +80,7 @@ import type {
   WorkflowDownloadExecutionLogsParams,
   WorkflowDownloadNamespaceFileParams,
   WorkflowExecutionFileMetasParams,
+  WorkflowExportExecutionsCsvParams,
   WorkflowGetExecutionGraphParams,
   WorkflowGetExecutionLogsParams,
   WorkflowGetFlowGraphParams,
@@ -259,6 +264,661 @@ export function useWorkflowListExecutions<TData = Awaited<ReturnType<typeof work
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getWorkflowListExecutionsQueryOptions(workspace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowExportExecutionsCsvResponse200 = {
+  data: string
+  status: 200
+}
+
+export type workflowExportExecutionsCsvResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowExportExecutionsCsvResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowExportExecutionsCsvResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowExportExecutionsCsvResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowExportExecutionsCsvResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowExportExecutionsCsvResponseSuccess = (workflowExportExecutionsCsvResponse200) & {
+  headers: Headers;
+};
+export type workflowExportExecutionsCsvResponseError = (workflowExportExecutionsCsvResponse400 | workflowExportExecutionsCsvResponse401 | workflowExportExecutionsCsvResponse403 | workflowExportExecutionsCsvResponse404 | workflowExportExecutionsCsvResponse500) & {
+  headers: Headers;
+};
+
+export type workflowExportExecutionsCsvResponse = (workflowExportExecutionsCsvResponseSuccess | workflowExportExecutionsCsvResponseError)
+
+export const getWorkflowExportExecutionsCsvUrl = (workspace: string,
+    params?: WorkflowExportExecutionsCsvParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/export.csv?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/export.csv`
+}
+
+export const workflowExportExecutionsCsv = async (workspace: string,
+    params?: WorkflowExportExecutionsCsvParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowExportExecutionsCsvResponse> => {
+
+  return customInstance<workflowExportExecutionsCsvResponse>(getWorkflowExportExecutionsCsvUrl(workspace,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowExportExecutionsCsvQueryKey = (workspace: string,
+    params?: WorkflowExportExecutionsCsvParams,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/export.csv`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getWorkflowExportExecutionsCsvQueryOptions = <TData = Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError = ErrorBody>(workspace: string,
+    params?: WorkflowExportExecutionsCsvParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowExportExecutionsCsvQueryKey(workspace,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowExportExecutionsCsv>>> = ({ signal }) => workflowExportExecutionsCsv(workspace,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowExportExecutionsCsvQueryResult = NonNullable<Awaited<ReturnType<typeof workflowExportExecutionsCsv>>>
+export type WorkflowExportExecutionsCsvQueryError = ErrorBody
+
+
+export function useWorkflowExportExecutionsCsv<TData = Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError = ErrorBody>(
+ workspace: string,
+    params: undefined |  WorkflowExportExecutionsCsvParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExportExecutionsCsv>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExportExecutionsCsv>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExportExecutionsCsv<TData = Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowExportExecutionsCsvParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExportExecutionsCsv>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExportExecutionsCsv>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExportExecutionsCsv<TData = Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowExportExecutionsCsvParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowExportExecutionsCsv<TData = Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError = ErrorBody>(
+ workspace: string,
+    params?: WorkflowExportExecutionsCsvParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExportExecutionsCsv>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowExportExecutionsCsvQueryOptions(workspace,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowLatestExecutionsResponse200 = {
+  data: LastExecutionDto[]
+  status: 200
+}
+
+export type workflowLatestExecutionsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowLatestExecutionsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowLatestExecutionsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowLatestExecutionsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowLatestExecutionsResponseSuccess = (workflowLatestExecutionsResponse200) & {
+  headers: Headers;
+};
+export type workflowLatestExecutionsResponseError = (workflowLatestExecutionsResponse401 | workflowLatestExecutionsResponse403 | workflowLatestExecutionsResponse404 | workflowLatestExecutionsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowLatestExecutionsResponse = (workflowLatestExecutionsResponseSuccess | workflowLatestExecutionsResponseError)
+
+export const getWorkflowLatestExecutionsUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/latest`
+}
+
+export const workflowLatestExecutions = async (workspace: string,
+    flowFilterDto: FlowFilterDto[], options?: Parameters<typeof customInstance>[1]): Promise<workflowLatestExecutionsResponse> => {
+
+  return customInstance<workflowLatestExecutionsResponse>(getWorkflowLatestExecutionsUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(flowFilterDto)
+  }
+);}
+
+
+
+
+
+export const getWorkflowLatestExecutionsMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowLatestExecutions>>, TError,{workspace: string;data: FlowFilterDto[]}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowLatestExecutions>>, TError,{workspace: string;data: FlowFilterDto[]}, TContext> => {
+
+const mutationKey = ['workflowLatestExecutions'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowLatestExecutions>>, {workspace: string;data: FlowFilterDto[]}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowLatestExecutions(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowLatestExecutionsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowLatestExecutions>>>
+    export type WorkflowLatestExecutionsMutationBody = FlowFilterDto[]
+    export type WorkflowLatestExecutionsMutationError = ErrorBody
+
+    export const useWorkflowLatestExecutions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowLatestExecutions>>, TError,{workspace: string;data: FlowFilterDto[]}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowLatestExecutions>>,
+        TError,
+        {workspace: string;data: FlowFilterDto[]},
+        TContext
+      > => {
+      return useMutation(getWorkflowLatestExecutionsMutationOptions(options), queryClient);
+    }
+    export type workflowListExecutionNamespacesResponse200 = {
+  data: string[]
+  status: 200
+}
+
+export type workflowListExecutionNamespacesResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowListExecutionNamespacesResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowListExecutionNamespacesResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowListExecutionNamespacesResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowListExecutionNamespacesResponseSuccess = (workflowListExecutionNamespacesResponse200) & {
+  headers: Headers;
+};
+export type workflowListExecutionNamespacesResponseError = (workflowListExecutionNamespacesResponse401 | workflowListExecutionNamespacesResponse403 | workflowListExecutionNamespacesResponse404 | workflowListExecutionNamespacesResponse500) & {
+  headers: Headers;
+};
+
+export type workflowListExecutionNamespacesResponse = (workflowListExecutionNamespacesResponseSuccess | workflowListExecutionNamespacesResponseError)
+
+export const getWorkflowListExecutionNamespacesUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/namespaces`
+}
+
+export const workflowListExecutionNamespaces = async (workspace: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowListExecutionNamespacesResponse> => {
+
+  return customInstance<workflowListExecutionNamespacesResponse>(getWorkflowListExecutionNamespacesUrl(workspace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowListExecutionNamespacesQueryKey = (workspace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/namespaces`
+    ] as const;
+    }
+
+
+export const getWorkflowListExecutionNamespacesQueryOptions = <TData = Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError = ErrorBody>(workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowListExecutionNamespacesQueryKey(workspace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowListExecutionNamespaces>>> = ({ signal }) => workflowListExecutionNamespaces(workspace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowListExecutionNamespacesQueryResult = NonNullable<Awaited<ReturnType<typeof workflowListExecutionNamespaces>>>
+export type WorkflowListExecutionNamespacesQueryError = ErrorBody
+
+
+export function useWorkflowListExecutionNamespaces<TData = Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError = ErrorBody>(
+ workspace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListExecutionNamespaces>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListExecutionNamespaces>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListExecutionNamespaces<TData = Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListExecutionNamespaces>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListExecutionNamespaces>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListExecutionNamespaces<TData = Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowListExecutionNamespaces<TData = Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError = ErrorBody>(
+ workspace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaces>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowListExecutionNamespacesQueryOptions(workspace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowListExecutionNamespaceFlowsResponse200 = {
+  data: string[]
+  status: 200
+}
+
+export type workflowListExecutionNamespaceFlowsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowListExecutionNamespaceFlowsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowListExecutionNamespaceFlowsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowListExecutionNamespaceFlowsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowListExecutionNamespaceFlowsResponseSuccess = (workflowListExecutionNamespaceFlowsResponse200) & {
+  headers: Headers;
+};
+export type workflowListExecutionNamespaceFlowsResponseError = (workflowListExecutionNamespaceFlowsResponse401 | workflowListExecutionNamespaceFlowsResponse403 | workflowListExecutionNamespaceFlowsResponse404 | workflowListExecutionNamespaceFlowsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowListExecutionNamespaceFlowsResponse = (workflowListExecutionNamespaceFlowsResponseSuccess | workflowListExecutionNamespaceFlowsResponseError)
+
+export const getWorkflowListExecutionNamespaceFlowsUrl = (workspace: string,
+    namespace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/namespaces/${encodeURIComponent(namespace)}/flows`
+}
+
+export const workflowListExecutionNamespaceFlows = async (workspace: string,
+    namespace: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowListExecutionNamespaceFlowsResponse> => {
+
+  return customInstance<workflowListExecutionNamespaceFlowsResponse>(getWorkflowListExecutionNamespaceFlowsUrl(workspace,namespace),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowListExecutionNamespaceFlowsQueryKey = (workspace: string,
+    namespace: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/namespaces/${encodeURIComponent(namespace)}/flows`
+    ] as const;
+    }
+
+
+export const getWorkflowListExecutionNamespaceFlowsQueryOptions = <TData = Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError = ErrorBody>(workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowListExecutionNamespaceFlowsQueryKey(workspace,namespace);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>> = ({ signal }) => workflowListExecutionNamespaceFlows(workspace,namespace, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowListExecutionNamespaceFlowsQueryResult = NonNullable<Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>>
+export type WorkflowListExecutionNamespaceFlowsQueryError = ErrorBody
+
+
+export function useWorkflowListExecutionNamespaceFlows<TData = Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListExecutionNamespaceFlows<TData = Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>,
+          TError,
+          Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowListExecutionNamespaceFlows<TData = Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowListExecutionNamespaceFlows<TData = Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowListExecutionNamespaceFlows>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowListExecutionNamespaceFlowsQueryOptions(workspace,namespace,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowExecutionAverageDurationResponse200 = {
+  data: AvgDurationDto
+  status: 200
+}
+
+export type workflowExecutionAverageDurationResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowExecutionAverageDurationResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowExecutionAverageDurationResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowExecutionAverageDurationResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowExecutionAverageDurationResponseSuccess = (workflowExecutionAverageDurationResponse200) & {
+  headers: Headers;
+};
+export type workflowExecutionAverageDurationResponseError = (workflowExecutionAverageDurationResponse401 | workflowExecutionAverageDurationResponse403 | workflowExecutionAverageDurationResponse404 | workflowExecutionAverageDurationResponse500) & {
+  headers: Headers;
+};
+
+export type workflowExecutionAverageDurationResponse = (workflowExecutionAverageDurationResponseSuccess | workflowExecutionAverageDurationResponseError)
+
+export const getWorkflowExecutionAverageDurationUrl = (workspace: string,
+    namespace: string,
+    flowId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/namespaces/${encodeURIComponent(namespace)}/flows/${encodeURIComponent(flowId)}/average-duration`
+}
+
+export const workflowExecutionAverageDuration = async (workspace: string,
+    namespace: string,
+    flowId: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowExecutionAverageDurationResponse> => {
+
+  return customInstance<workflowExecutionAverageDurationResponse>(getWorkflowExecutionAverageDurationUrl(workspace,namespace,flowId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowExecutionAverageDurationQueryKey = (workspace: string,
+    namespace: string,
+    flowId: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/namespaces/${encodeURIComponent(namespace)}/flows/${encodeURIComponent(flowId)}/average-duration`
+    ] as const;
+    }
+
+
+export const getWorkflowExecutionAverageDurationQueryOptions = <TData = Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError = ErrorBody>(workspace: string,
+    namespace: string,
+    flowId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowExecutionAverageDurationQueryKey(workspace,namespace,flowId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowExecutionAverageDuration>>> = ({ signal }) => workflowExecutionAverageDuration(workspace,namespace,flowId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && namespace !== null && namespace !== undefined && flowId !== null && flowId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowExecutionAverageDurationQueryResult = NonNullable<Awaited<ReturnType<typeof workflowExecutionAverageDuration>>>
+export type WorkflowExecutionAverageDurationQueryError = ErrorBody
+
+
+export function useWorkflowExecutionAverageDuration<TData = Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    flowId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExecutionAverageDuration>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExecutionAverageDuration>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExecutionAverageDuration<TData = Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    flowId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowExecutionAverageDuration>>,
+          TError,
+          Awaited<ReturnType<typeof workflowExecutionAverageDuration>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowExecutionAverageDuration<TData = Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    flowId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+
+export function useWorkflowExecutionAverageDuration<TData = Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError = ErrorBody>(
+ workspace: string,
+    namespace: string,
+    flowId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowExecutionAverageDuration>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowExecutionAverageDurationQueryOptions(workspace,namespace,flowId,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 
@@ -540,6 +1200,118 @@ export const useWorkflowDeleteExecution = <TError = ErrorBody | DetailedErrorBod
         TContext
       > => {
       return useMutation(getWorkflowDeleteExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowEvalExecutionExpressionResponse200 = {
+  data: EvalResultDto
+  status: 200
+}
+
+export type workflowEvalExecutionExpressionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowEvalExecutionExpressionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowEvalExecutionExpressionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowEvalExecutionExpressionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowEvalExecutionExpressionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowEvalExecutionExpressionResponseSuccess = (workflowEvalExecutionExpressionResponse200) & {
+  headers: Headers;
+};
+export type workflowEvalExecutionExpressionResponseError = (workflowEvalExecutionExpressionResponse400 | workflowEvalExecutionExpressionResponse401 | workflowEvalExecutionExpressionResponse403 | workflowEvalExecutionExpressionResponse404 | workflowEvalExecutionExpressionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowEvalExecutionExpressionResponse = (workflowEvalExecutionExpressionResponseSuccess | workflowEvalExecutionExpressionResponseError)
+
+export const getWorkflowEvalExecutionExpressionUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/eval`
+}
+
+/**
+ * @summary Evaluate one Pebble expression against an execution's stored context (#1a).
+ */
+export const workflowEvalExecutionExpression = async (workspace: string,
+    id: string,
+    workflowEvalExecutionExpressionBody: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowEvalExecutionExpressionResponse> => {
+
+  return customInstance<workflowEvalExecutionExpressionResponse>(getWorkflowEvalExecutionExpressionUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain', ...options?.headers },
+    body: workflowEvalExecutionExpressionBody
+  }
+);}
+
+
+
+
+
+export const getWorkflowEvalExecutionExpressionMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowEvalExecutionExpression>>, TError,{workspace: string;id: string;data: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowEvalExecutionExpression>>, TError,{workspace: string;id: string;data: string}, TContext> => {
+
+const mutationKey = ['workflowEvalExecutionExpression'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowEvalExecutionExpression>>, {workspace: string;id: string;data: string}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  workflowEvalExecutionExpression(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowEvalExecutionExpressionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowEvalExecutionExpression>>>
+    export type WorkflowEvalExecutionExpressionMutationBody = string
+    export type WorkflowEvalExecutionExpressionMutationError = ErrorBody
+
+    /**
+ * @summary Evaluate one Pebble expression against an execution's stored context (#1a).
+ */
+export const useWorkflowEvalExecutionExpression = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowEvalExecutionExpression>>, TError,{workspace: string;id: string;data: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowEvalExecutionExpression>>,
+        TError,
+        {workspace: string;id: string;data: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowEvalExecutionExpressionMutationOptions(options), queryClient);
     }
     export type workflowDownloadExecutionFileResponse200 = {
   data: Blob
@@ -993,6 +1765,153 @@ export function useWorkflowPreviewExecutionFile<TData = Awaited<ReturnType<typeo
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getWorkflowPreviewExecutionFileQueryOptions(workspace,id,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+export type workflowFollowExecutionResponse200 = {
+  data: ExecutionDto
+  status: 200
+}
+
+export type workflowFollowExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowFollowExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowFollowExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowFollowExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowFollowExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowFollowExecutionResponseSuccess = (workflowFollowExecutionResponse200) & {
+  headers: Headers;
+};
+export type workflowFollowExecutionResponseError = (workflowFollowExecutionResponse400 | workflowFollowExecutionResponse401 | workflowFollowExecutionResponse403 | workflowFollowExecutionResponse404 | workflowFollowExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowFollowExecutionResponse = (workflowFollowExecutionResponseSuccess | workflowFollowExecutionResponseError)
+
+export const getWorkflowFollowExecutionUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/follow`
+}
+
+/**
+ * @summary Follow one execution as Server-Sent Events (#2).
+ */
+export const workflowFollowExecution = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowFollowExecutionResponse> => {
+
+  return customInstance<workflowFollowExecutionResponse>(getWorkflowFollowExecutionUrl(workspace,id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowFollowExecutionQueryKey = (workspace: string,
+    id: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/follow`
+    ] as const;
+    }
+
+
+export const getWorkflowFollowExecutionQueryOptions = <TData = Awaited<ReturnType<typeof workflowFollowExecution>>, TError = ErrorBody>(workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecution>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowFollowExecutionQueryKey(workspace,id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowFollowExecution>>> = ({ signal }) => workflowFollowExecution(workspace,id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecution>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowFollowExecutionQueryResult = NonNullable<Awaited<ReturnType<typeof workflowFollowExecution>>>
+export type WorkflowFollowExecutionQueryError = ErrorBody
+
+
+export function useWorkflowFollowExecution<TData = Awaited<ReturnType<typeof workflowFollowExecution>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecution>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowFollowExecution>>,
+          TError,
+          Awaited<ReturnType<typeof workflowFollowExecution>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowFollowExecution<TData = Awaited<ReturnType<typeof workflowFollowExecution>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecution>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowFollowExecution>>,
+          TError,
+          Awaited<ReturnType<typeof workflowFollowExecution>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowFollowExecution<TData = Awaited<ReturnType<typeof workflowFollowExecution>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecution>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Follow one execution as Server-Sent Events (#2).
+ */
+
+export function useWorkflowFollowExecution<TData = Awaited<ReturnType<typeof workflowFollowExecution>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecution>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowFollowExecutionQueryOptions(workspace,id,options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 
@@ -1899,6 +2818,160 @@ export function useWorkflowDownloadExecutionLogs<TData = Awaited<ReturnType<type
 
 
 
+export type workflowFollowExecutionLogsResponse200 = {
+  data: LogPageDto
+  status: 200
+}
+
+export type workflowFollowExecutionLogsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowFollowExecutionLogsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowFollowExecutionLogsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowFollowExecutionLogsResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowFollowExecutionLogsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowFollowExecutionLogsResponseSuccess = (workflowFollowExecutionLogsResponse200) & {
+  headers: Headers;
+};
+export type workflowFollowExecutionLogsResponseError = (workflowFollowExecutionLogsResponse400 | workflowFollowExecutionLogsResponse401 | workflowFollowExecutionLogsResponse403 | workflowFollowExecutionLogsResponse404 | workflowFollowExecutionLogsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowFollowExecutionLogsResponse = (workflowFollowExecutionLogsResponseSuccess | workflowFollowExecutionLogsResponseError)
+
+export const getWorkflowFollowExecutionLogsUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs/follow`
+}
+
+/**
+ * A watermark poll loop: each tick pages the lines after the last served `id`
+ * (reusing `get_execution_logs`' settle-watermark `LogRepo::page`) and, when
+ * there are any, emits one [`LogPageDto`] -- the SAME shape the paged route
+ * returns -- advancing the watermark. The stream ends on the 7d settle rule:
+ * `complete` (terminal AND the tail drained past the settle lag) with no new
+ * lines, never on a terminal state alone. Authorisation and the 404-before-the-
+ * stream guarantee are `get_execution_logs`'; see the follow section's note.
+ * @summary Follow an execution's log as Server-Sent Events (#3).
+ */
+export const workflowFollowExecutionLogs = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowFollowExecutionLogsResponse> => {
+
+  return customInstance<workflowFollowExecutionLogsResponse>(getWorkflowFollowExecutionLogsUrl(workspace,id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowFollowExecutionLogsQueryKey = (workspace: string,
+    id: string,) => {
+    return [
+    `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/logs/follow`
+    ] as const;
+    }
+
+
+export const getWorkflowFollowExecutionLogsQueryOptions = <TData = Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError = ErrorBody>(workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getWorkflowFollowExecutionLogsQueryKey(workspace,id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof workflowFollowExecutionLogs>>> = ({ signal }) => workflowFollowExecutionLogs(workspace,id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: workspace !== null && workspace !== undefined && id !== null && id !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type WorkflowFollowExecutionLogsQueryResult = NonNullable<Awaited<ReturnType<typeof workflowFollowExecutionLogs>>>
+export type WorkflowFollowExecutionLogsQueryError = ErrorBody
+
+
+export function useWorkflowFollowExecutionLogs<TData = Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowFollowExecutionLogs>>,
+          TError,
+          Awaited<ReturnType<typeof workflowFollowExecutionLogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowFollowExecutionLogs<TData = Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof workflowFollowExecutionLogs>>,
+          TError,
+          Awaited<ReturnType<typeof workflowFollowExecutionLogs>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useWorkflowFollowExecutionLogs<TData = Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary Follow an execution's log as Server-Sent Events (#3).
+ */
+
+export function useWorkflowFollowExecutionLogs<TData = Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError = ErrorBody>(
+ workspace: string,
+    id: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof workflowFollowExecutionLogs>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getWorkflowFollowExecutionLogsQueryOptions(workspace,id,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 export type workflowPauseExecutionResponse200 = {
   data: ExecutionDto
   status: 200
@@ -2739,6 +3812,120 @@ export const useWorkflowSetExecutionStatus = <TError = ErrorBody,
         TContext
       > => {
       return useMutation(getWorkflowSetExecutionStatusMutationOptions(options), queryClient);
+    }
+    export type workflowEvalTaskRunExpressionResponse200 = {
+  data: EvalResultDto
+  status: 200
+}
+
+export type workflowEvalTaskRunExpressionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowEvalTaskRunExpressionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowEvalTaskRunExpressionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowEvalTaskRunExpressionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowEvalTaskRunExpressionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowEvalTaskRunExpressionResponseSuccess = (workflowEvalTaskRunExpressionResponse200) & {
+  headers: Headers;
+};
+export type workflowEvalTaskRunExpressionResponseError = (workflowEvalTaskRunExpressionResponse400 | workflowEvalTaskRunExpressionResponse401 | workflowEvalTaskRunExpressionResponse403 | workflowEvalTaskRunExpressionResponse404 | workflowEvalTaskRunExpressionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowEvalTaskRunExpressionResponse = (workflowEvalTaskRunExpressionResponseSuccess | workflowEvalTaskRunExpressionResponseError)
+
+export const getWorkflowEvalTaskRunExpressionUrl = (workspace: string,
+    id: string,
+    taskRunId: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/task-runs/${encodeURIComponent(taskRunId)}/eval`
+}
+
+/**
+ * @summary Evaluate one Pebble expression against a task-run's stored context (#1b).
+ */
+export const workflowEvalTaskRunExpression = async (workspace: string,
+    id: string,
+    taskRunId: string,
+    workflowEvalTaskRunExpressionBody: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowEvalTaskRunExpressionResponse> => {
+
+  return customInstance<workflowEvalTaskRunExpressionResponse>(getWorkflowEvalTaskRunExpressionUrl(workspace,id,taskRunId),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain', ...options?.headers },
+    body: workflowEvalTaskRunExpressionBody
+  }
+);}
+
+
+
+
+
+export const getWorkflowEvalTaskRunExpressionMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowEvalTaskRunExpression>>, TError,{workspace: string;id: string;taskRunId: string;data: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowEvalTaskRunExpression>>, TError,{workspace: string;id: string;taskRunId: string;data: string}, TContext> => {
+
+const mutationKey = ['workflowEvalTaskRunExpression'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowEvalTaskRunExpression>>, {workspace: string;id: string;taskRunId: string;data: string}> = (props) => {
+          const {workspace,id,taskRunId,data} = props ?? {};
+
+          return  workflowEvalTaskRunExpression(workspace,id,taskRunId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowEvalTaskRunExpressionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowEvalTaskRunExpression>>>
+    export type WorkflowEvalTaskRunExpressionMutationBody = string
+    export type WorkflowEvalTaskRunExpressionMutationError = ErrorBody
+
+    /**
+ * @summary Evaluate one Pebble expression against a task-run's stored context (#1b).
+ */
+export const useWorkflowEvalTaskRunExpression = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowEvalTaskRunExpression>>, TError,{workspace: string;id: string;taskRunId: string;data: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowEvalTaskRunExpression>>,
+        TError,
+        {workspace: string;id: string;taskRunId: string;data: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowEvalTaskRunExpressionMutationOptions(options), queryClient);
     }
     export type workflowSetTaskRunStateResponse200 = {
   data: ExecutionDto

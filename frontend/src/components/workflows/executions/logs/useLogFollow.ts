@@ -60,6 +60,12 @@ export interface LogFollowOptions {
    * the follower stops.
    */
   endedAt?: string | null;
+  /**
+   * An event stream is open (7e #3): the timer is held back, and each `nudge`
+   * step reads at once instead. When `live` turns false the timer polling resumes.
+   */
+  live?: boolean;
+  nudge?: number;
 }
 
 /** The `endedAt` a log view of this execution passes: its end once it is terminal, else null. */
@@ -166,6 +172,9 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
   useEffect(() => {
     endedAtRef.current = options.endedAt;
   });
+  const liveRef = useRef(options.live === true);
+  const live = options.live === true;
+  const nudge = options.nudge ?? 0;
   const [snap, setSnap] = useState<Snapshot>(INITIAL);
   const controls = useRef<{ retry: () => void; loadEarlier: () => void; followLatest: () => void }>({
     retry: () => {},
@@ -191,6 +200,8 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
     let timer: ReturnType<typeof setTimeout> | undefined;
     let loadingEarlier = false;
     let earlierError: unknown = null;
+    /** A nudge arrived while a read was in flight: read again as soon as it lands. */
+    let dirty = false;
 
     const publish = () => {
       if (abort.signal.aborted) return;
@@ -219,8 +230,9 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
     const schedule = () => {
       if (done || abort.signal.aborted) return;
       // A full page: more lines have settled already, read them now.
+      if (liveRef.current && error === null && !dirty && !(lastPage !== undefined && lastPage.items.length >= pageSize)) return;
       const wait =
-        error === null && lastPage !== undefined && lastPage.items.length >= pageSize
+        dirty || (error === null && lastPage !== undefined && lastPage.items.length >= pageSize)
           ? 0
           : nextPollMs(
               { data: lastPage, status: error === null ? "success" : "error", dataUpdatedAt: lastGoodAt },
@@ -240,6 +252,7 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
         return;
       }
       inFlight = true;
+      dirty = false;
       try {
         const page = await readPage(ws, executionId, logParams(f, cursor, pageSize), abort.signal);
         if (abort.signal.aborted) return;
@@ -279,6 +292,7 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
         publish();
       },
       retry: () => {
+        if (inFlight) dirty = true;
         if (inFlight || done) return;
         clearTimeout(timer);
         waitingForVisible = false;
@@ -322,6 +336,15 @@ export function useLogFollow(ws: string, executionId: string, filters: LogFilter
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [key, ws, executionId, minLevel, taskId, taskRunId, pageSize, windowLines]);
+
+  // A pushed event reads now; the stream going away hands the reading back to the timer.
+  const mounted = useRef(false);
+  useEffect(() => {
+    liveRef.current = live;
+    // The first run is the mount, which the follower's own first read covers.
+    if (mounted.current) controls.current.retry();
+    mounted.current = true;
+  }, [live, nudge]);
 
   const retry = useCallback(() => controls.current.retry(), []);
   const loadEarlier = useCallback(() => controls.current.loadEarlier(), []);

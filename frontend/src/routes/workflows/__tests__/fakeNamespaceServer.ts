@@ -99,6 +99,12 @@ export function serveNamespaces(world: NamespaceWorld): Request[] {
           (found
             ? { status: 200, body: { ...found, can_manage: world.canManage ?? true } }
             : { status: 404, body: { error: `not found: namespace ${ns}` } });
+      } else if (/^\/api\/ws\/[^/]+\/workflows\/executions\/namespaces\/[^/]+\/flows$/.test(rawPath)) {
+        // The distinct flow keys of one namespace's executions (7e #5), served from the world's flows.
+        const ns = decodeURIComponent(rawPath.split("/")[7]);
+        reply = { status: 200, body: [...new Set((world.flows ?? []).filter((f) => f.namespace === ns).map((f) => f.flow_id))].sort() };
+      } else if (rawPath === `${base}/executions/namespaces`) {
+        reply = { status: 200, body: [...new Set((world.flows ?? []).map((f) => f.namespace))].sort() };
       } else if (rawPath === `${base}/flows`) {
         reply = { status: 200, body: world.flows ?? [] };
       } else if (rawPath === `${base}/executions`) {

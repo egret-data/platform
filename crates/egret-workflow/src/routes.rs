@@ -88,6 +88,7 @@ use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::sse::Event;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -280,6 +281,11 @@ pub struct WorkflowState {
     pub export_total_timeout: std::time::Duration,
     /// W7e: the loops this deployment runs, echoed by the trigger routes.
     pub trigger_flags: TriggerFlags,
+    /// Package 7e #2/#3: how often the SSE follow streams re-poll the store --
+    /// [`crate::http::follow::FOLLOW_POLL_INTERVAL`] (1 s) in production; a
+    /// field so a test can drive the loop in milliseconds, exactly as
+    /// [`Self::upload_idle_timeout`] does.
+    pub follow_poll_interval: std::time::Duration,
 }
 
 impl FromRef<WorkflowState> for SessionService {
@@ -2124,6 +2130,56 @@ fn parse_state_filter(raw: Option<String>) -> Option<Vec<String>> {
     })
 }
 
+/// The filter half of [`ListExecutionsQuery`] (no `limit`/`offset`): what
+/// `GET …/executions/export.csv` takes. Field meanings are the list's.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ExportExecutionsQuery {
+    pub flow_id: Option<Uuid>,
+    pub namespace: Option<String>,
+    pub namespace_prefix: Option<String>,
+    pub flow_key: Option<String>,
+    /// Comma-separated states, as on the list.
+    pub state: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub root_only: Option<bool>,
+    pub parent: Option<Uuid>,
+}
+
+/// Validate the filter parameters shared by the list and the CSV export, and
+/// assemble the repository's [`ExecutionFilter`].
+fn execution_filter(q: ExportExecutionsQuery) -> EgretResult<ExecutionFilter> {
+    let root_only = q.root_only.unwrap_or(false);
+    // Two views of the tree that do not compose: `parent` lists one level
+    // beneath an execution, `root_only` hides the children that `parent` is
+    // for. A caller who sent both has a bug worth naming. `root_only=false`
+    // beside `parent` is the default spelled out and is accepted.
+    if root_only && q.parent.is_some() {
+        return Err(Error::InvalidInput(
+            "`root_only=true` and `parent` cannot be combined: `parent` lists children, which `root_only` hides"
+                .into(),
+        ));
+    }
+    // Two answers to one question: the exact namespace, or it and its
+    // children. Sending both is a caller bug, named rather than intersected.
+    if q.namespace.is_some() && q.namespace_prefix.is_some() {
+        return Err(Error::InvalidInput(
+            "`namespace` and `namespace_prefix` cannot be combined: send one".into(),
+        ));
+    }
+    Ok(ExecutionFilter {
+        flow_id: q.flow_id,
+        namespace: q.namespace,
+        namespace_prefix: q.namespace_prefix,
+        flow_key: q.flow_key,
+        states: parse_state_filter(q.state),
+        since: q.since,
+        until: q.until,
+        root_only,
+        parent: q.parent,
+    })
+}
+
 #[utoipa::path(
     get,
     path = "/api/ws/{workspace}/workflows/executions",
@@ -2154,35 +2210,17 @@ async fn list_executions(
         limit: q.limit.clamp(1, MAX_PAGE_LIMIT),
         offset: q.offset.max(0),
     };
-    let root_only = q.root_only.unwrap_or(false);
-    // Two views of the tree that do not compose: `parent` lists one level
-    // beneath an execution, `root_only` hides the children that `parent` is
-    // for. A caller who sent both has a bug worth naming. `root_only=false`
-    // beside `parent` is the default spelled out and is accepted.
-    if root_only && q.parent.is_some() {
-        return Err(Error::InvalidInput(
-            "`root_only=true` and `parent` cannot be combined: `parent` lists children, which `root_only` hides"
-                .into(),
-        ));
-    }
-    // Two answers to one question: the exact namespace, or it and its
-    // children. Sending both is a caller bug, named rather than intersected.
-    if q.namespace.is_some() && q.namespace_prefix.is_some() {
-        return Err(Error::InvalidInput(
-            "`namespace` and `namespace_prefix` cannot be combined: send one".into(),
-        ));
-    }
-    let filter = ExecutionFilter {
+    let filter = execution_filter(ExportExecutionsQuery {
         flow_id: q.flow_id,
         namespace: q.namespace,
         namespace_prefix: q.namespace_prefix,
         flow_key: q.flow_key,
-        states: parse_state_filter(q.state),
+        state: q.state,
         since: q.since,
         until: q.until,
-        root_only,
+        root_only: q.root_only,
         parent: q.parent,
-    };
+    })?;
     let found = st
         .executions
         .list(ctx.workspace_id.0, &filter, page)
@@ -2198,6 +2236,281 @@ async fn list_executions(
         offset: page.offset,
         worker_enabled: st.trigger_flags.worker_enabled,
     }))
+}
+
+// ── Execution stats, listing helpers and CSV export (package 7e) ───────────
+//
+// The author-facing flow id is `flow_key`; `executions.flow_id` is the draft's
+// uuid. These routes keep Kestra's wire names (`flowId`, `id`) but every one
+// carries a flow_KEY value.
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/namespaces",
+    tag = "workflow",
+    operation_id = "list_execution_namespaces",
+    params(WorkspacePath),
+    responses(
+        (status = 200, description = "The distinct namespaces this workspace has executions in, sorted", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn list_execution_namespaces(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+) -> EgretResult<Json<Vec<String>>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    Ok(Json(
+        st.executions
+            .distinct_namespaces(ctx.workspace_id.0)
+            .await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/namespaces/{namespace}/flows",
+    tag = "workflow",
+    operation_id = "list_execution_namespace_flows",
+    params(
+        WorkspacePath,
+        ("namespace" = String, Path, description = "Exact namespace"),
+    ),
+    responses(
+        (status = 200, description = "The distinct flow ids (flow keys) with executions in this namespace, sorted; empty for an unknown namespace", body = Vec<String>),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn list_execution_namespace_flows(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, namespace)): Path<(String, String)>,
+) -> EgretResult<Json<Vec<String>>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    Ok(Json(
+        st.executions
+            .distinct_flows(ctx.workspace_id.0, &namespace)
+            .await?,
+    ))
+}
+
+/// `GET …/average-duration`'s answer.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AvgDurationDto {
+    /// Mean of `ended_at - started_at` over the flow's terminated executions,
+    /// in milliseconds; `null` when none has terminated.
+    pub avg_duration_ms: Option<i64>,
+    /// How many executions the mean is over.
+    pub count: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/namespaces/{namespace}/flows/{flowId}/average-duration",
+    tag = "workflow",
+    operation_id = "execution_average_duration",
+    params(
+        WorkspacePath,
+        ("namespace" = String, Path, description = "Exact namespace"),
+        ("flowId" = String, Path, description = "The flow's id (its flow key, the YAML's `id`)"),
+    ),
+    responses(
+        (status = 200, description = "The average duration of the flow's terminated executions; `avgDurationMs` is null with `count` 0 when there are none (or no such flow)", body = AvgDurationDto),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn execution_average_duration(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, namespace, flow_key)): Path<(String, String, String)>,
+) -> EgretResult<Json<AvgDurationDto>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    let a = st
+        .executions
+        .average_duration(ctx.workspace_id.0, &namespace, &flow_key)
+        .await?;
+    Ok(Json(AvgDurationDto {
+        avg_duration_ms: a.avg_duration_ms,
+        count: a.count,
+    }))
+}
+
+/// One flow to ask [`latest_executions`] about.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct FlowFilterDto {
+    pub namespace: String,
+    /// The flow's id (its flow key).
+    pub id: String,
+}
+
+/// A flow's newest execution, from [`latest_executions`].
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LastExecutionDto {
+    pub id: Uuid,
+    /// The flow's id (its flow key), as the request named it.
+    pub flow_id: String,
+    pub namespace: String,
+    /// When the execution started (`created_at` if it never ran).
+    pub start_date: DateTime<Utc>,
+    pub status: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/latest",
+    tag = "workflow",
+    operation_id = "latest_executions",
+    params(WorkspacePath),
+    request_body = Vec<FlowFilterDto>,
+    responses(
+        (status = 200, description = "The newest execution of each requested flow that has any; flows with none are omitted", body = Vec<LastExecutionDto>),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn latest_executions(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(flows): Json<Vec<FlowFilterDto>>,
+) -> EgretResult<Json<Vec<LastExecutionDto>>> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    let pairs: Vec<(String, String)> = flows.into_iter().map(|f| (f.namespace, f.id)).collect();
+    let rows = st
+        .executions
+        .latest_per_flow(ctx.workspace_id.0, &pairs)
+        .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| LastExecutionDto {
+                id: r.id,
+                flow_id: r.flow_id,
+                namespace: r.namespace,
+                start_date: r.start_date,
+                status: r.status,
+            })
+            .collect(),
+    ))
+}
+
+/// One CSV field: quoted when it needs it, and defused when a spreadsheet
+/// would read it as a formula (`namespace` and `flow_key` are author-typed).
+fn csv_field(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 2);
+    let formula = matches!(v.chars().next(), Some('=' | '+' | '-' | '@' | '\t' | '\r'));
+    if formula {
+        out.push('\'');
+    }
+    out.push_str(v);
+    if out.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", out.replace('"', "\"\""))
+    } else {
+        out
+    }
+}
+
+const EXECUTIONS_CSV_HEADER: &str =
+    "id,namespace,flow_id,flow_key,state,created_at,started_at,ended_at,duration_ms,labels\n";
+
+fn execution_csv_line(r: &crate::repo::ExecutionRow) -> String {
+    let ts = |t: Option<DateTime<Utc>>| t.map(|t| t.to_rfc3339()).unwrap_or_default();
+    let duration_ms = match (r.started_at, r.ended_at) {
+        (Some(s), Some(e)) => (e - s).num_milliseconds().to_string(),
+        _ => String::new(),
+    };
+    let labels = r.labels.as_ref().map(|v| v.to_string()).unwrap_or_default();
+    format!(
+        "{},{},{},{},{},{},{},{},{},{}\n",
+        r.id,
+        csv_field(&r.namespace),
+        r.flow_id.map(|u| u.to_string()).unwrap_or_default(),
+        csv_field(&r.flow_key),
+        csv_field(&r.state),
+        r.created_at.to_rfc3339(),
+        ts(r.started_at),
+        ts(r.ended_at),
+        duration_ms,
+        csv_field(&labels),
+    )
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/export.csv",
+    tag = "workflow",
+    operation_id = "export_executions_csv",
+    params(WorkspacePath, ExportExecutionsQuery),
+    responses(
+        (status = 200, description = "Every matching execution, newest first, as a streamed CSV (header row first): id, namespace, flow_id (the flow key), state, created_at, started_at, ended_at", content_type = "text/csv", body = String),
+        (status = 400, description = "The query string does not decode, or `root_only=true` and `parent` (or `namespace` and `namespace_prefix`) were both sent", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn export_executions_csv(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+) -> EgretResult<axum::response::Response> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_READ).await?;
+    let filter = execution_filter(q)?;
+    let ws = ctx.workspace_id.0;
+    // The repository's cursor borrows the repo, which a response body cannot:
+    // a task owns a clone and feeds a small bounded channel, so the export is
+    // paced by the client and never held in memory. A dropped client closes
+    // the receiver, the next `send` fails, and the task (and its connection)
+    // ends.
+    let repo = st.executions.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(16);
+    tokio::spawn(async move {
+        use futures_util::StreamExt as _;
+        if tx.send(Ok(EXECUTIONS_CSV_HEADER.into())).await.is_err() {
+            return;
+        }
+        let mut rows = std::pin::pin!(repo.export_cursor(ws, &filter));
+        while let Some(row) = rows.next().await {
+            let item = match row {
+                Ok(r) => Ok(bytes::Bytes::from(execution_csv_line(&r))),
+                Err(e) => {
+                    tracing::error!(error = %e, "an executions export failed mid-body");
+                    Err(std::io::Error::other(e.to_string()))
+                }
+            };
+            let failed = item.is_err();
+            if tx.send(item).await.is_err() || failed {
+                return;
+            }
+        }
+    });
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    let mut res = axum::response::Response::new(axum::body::Body::from_stream(stream));
+    let h = res.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/csv"));
+    h.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment; filename=executions.csv"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(res)
 }
 
 #[utoipa::path(
@@ -2232,6 +2545,202 @@ async fn get_execution(
         detail,
         can_manage,
         st.trigger_flags.worker_enabled,
+    )))
+}
+
+// ---------- Follow: poll→SSE (package 7e #2 execution, #3 logs) ----------
+//
+// Each stream re-reads the store every `st.follow_poll_interval`
+// ([`crate::http::follow::FOLLOW_POLL_INTERVAL`], 1 s, in production) and emits
+// an SSE event only when something changed -- so one code path serves a live
+// run and a historical one, with nothing to keep in sync with the executor.
+//
+// **Authorisation is `GET …/executions/{id}`'s, and it runs BEFORE the stream
+// opens.** `require_exec(…, WF_READ)` resolves existence and ownership, so a
+// foreign-workspace or missing id is a 404 *response* -- never an error event
+// inside an already-committed 200 stream. Only once that passes is the `Sse`
+// response built.
+
+/// Follow one execution as Server-Sent Events (#2).
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/follow",
+    tag = "workflow",
+    operation_id = "follow_execution",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    responses(
+        (status = 200, description = "A `text/event-stream`: the current execution (same shape as `GET …/executions/{id}`) as the first event, then a fresh event each time it changes. On a terminal state one final event is sent and the stream closes. The poll interval is 1 s.", content_type = "text/event-stream", body = ExecutionDto),
+        (status = 400, description = "`{id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed. **Answered before the stream opens**, so a foreign id is a 404 response and never a 200 stream.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn follow_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> EgretResult<impl axum::response::IntoResponse> {
+    // 404/403 BEFORE the stream opens -- the same check `get_execution` makes.
+    require_exec(&st, &ctx, id, WF_READ).await?;
+    let ws = ctx.workspace_id.0;
+    // `can_manage` is a per-object PDP decision; it does not change for the life
+    // of a follow, so it is decided once here (where a refusal can still become
+    // an error response) rather than on every poll.
+    let can_manage = exec_caller_may_manage(&st, &ctx, id).await?;
+    let worker_enabled = st.trigger_flags.worker_enabled;
+
+    struct FollowExec {
+        st: WorkflowState,
+        ws: Uuid,
+        id: Uuid,
+        interval: std::time::Duration,
+        can_manage: bool,
+        worker_enabled: bool,
+        last: Option<String>,
+        first: bool,
+        done: bool,
+    }
+    let seed = FollowExec {
+        interval: st.follow_poll_interval,
+        st,
+        ws,
+        id,
+        can_manage,
+        worker_enabled,
+        last: None,
+        first: true,
+        done: false,
+    };
+    let stream = futures_util::stream::unfold(seed, |mut s| async move {
+        loop {
+            if s.done {
+                return None;
+            }
+            if s.first {
+                s.first = false;
+            } else {
+                tokio::time::sleep(s.interval).await;
+            }
+            // The row is gone (deleted mid-follow): end the stream cleanly.
+            let Ok(detail) = s.st.executions.get(s.ws, s.id).await else {
+                return None;
+            };
+            let state = detail.execution.state.clone();
+            let terminal = crate::worker::from_wire(&state).is_some_and(RunState::is_terminal);
+            let dto = ExecutionDto::new(detail, s.can_manage, s.worker_enabled);
+            let json = serde_json::to_string(&dto).unwrap_or_default();
+            let changed = s.last.as_deref() != Some(json.as_str());
+            if terminal {
+                // One final event, then end -- emit it even if somehow
+                // unchanged, so a stream that opens on an already-terminal
+                // execution still sends exactly one snapshot.
+                s.done = true;
+                s.last = Some(json.clone());
+                return Some((Ok(Event::default().data(json)), s));
+            }
+            if changed {
+                s.last = Some(json.clone());
+                return Some((Ok(Event::default().data(json)), s));
+            }
+            // Nothing changed and not terminal: wait and poll again, emitting
+            // no event (the keep-alive holds the connection open).
+        }
+    });
+    Ok(crate::http::follow::sse_from_poll(stream))
+}
+
+// ---------- Eval (package 7e #1a, #1b) ----------
+//
+// POST /api/ws/{workspace}/workflows/executions/{id}/eval
+// POST /api/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/eval
+//
+// Render one Pebble expression against the STORED execution (or task-run)
+// context — [`crate::eval`] builds it from the stored rows, mirroring the
+// worker's live `Surface::context`. A broken expression is a 200 whose body
+// carries `error`, never a request error; a SECRET expression is sealed by
+// construction and arrives in that same `error` field. `workflow:read` gates
+// both: eval only reads, so there is no `workflow:manage`/`egret.sql` gate.
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/eval",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    request_body(
+        content = String,
+        description = "The Pebble expression to render, as the raw request body",
+        content_type = "text/plain",
+    ),
+    responses(
+        (status = 200, description = "The render result in the execution context: `{result}` on success, or `{error}` when the expression does not render — a broken expression is a 200, not a 400. A SECRET expression (`{{ secret('X') }}`) is sealed and arrives as `error`, and `{{ inputs.<secret> }}` renders the mask.", body = crate::eval::EvalResultDto),
+        (status = 400, description = "`{id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Evaluate one Pebble expression against an execution's stored context (#1a).
+async fn eval_execution_expression(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    expr: String,
+) -> EgretResult<Json<crate::eval::EvalResultDto>> {
+    require_exec(&st, &ctx, id, WF_READ).await?;
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(crate::eval::eval_expression(&detail, None, &expr)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/eval",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        ("task_run_id" = Uuid, Path, description = "Task run id"),
+    ),
+    request_body(
+        content = String,
+        description = "The Pebble expression to render, as the raw request body",
+        content_type = "text/plain",
+    ),
+    responses(
+        (status = 200, description = "The render result in the task-run context: the execution context plus `task` and `taskrun`. `{result}` on success, `{error}` on a render error (200, not 400); a SECRET expression is sealed and arrives as `error`.", body = crate::eval::EvalResultDto),
+        (status = 400, description = "`{id}` or `{task_run_id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, or no task run of it with this id", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Evaluate one Pebble expression against a task-run's stored context (#1b).
+async fn eval_task_run_expression(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id, task_run_id)): Path<(String, Uuid, Uuid)>,
+    expr: String,
+) -> EgretResult<Json<crate::eval::EvalResultDto>> {
+    require_exec(&st, &ctx, id, WF_READ).await?;
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    // A task run that is not this execution's is a 404, as the detail route
+    // answers a foreign execution id. `stored_context` is the single place that
+    // decides "unknown run"; the subsequent render rebuilds the same context.
+    crate::eval::stored_context(&detail, Some(task_run_id))
+        .map_err(|_| Error::NotFound("task run".into()))?;
+    Ok(Json(crate::eval::eval_expression(
+        &detail,
+        Some(task_run_id),
+        &expr,
     )))
 }
 
@@ -2415,6 +2924,113 @@ async fn get_execution_logs(
         execution_state: status.state,
         complete: status.complete,
     }))
+}
+
+/// Follow an execution's log as Server-Sent Events (#3).
+///
+/// A watermark poll loop: each tick pages the lines after the last served `id`
+/// (reusing `get_execution_logs`' settle-watermark `LogRepo::page`) and, when
+/// there are any, emits one [`LogPageDto`] -- the SAME shape the paged route
+/// returns -- advancing the watermark. The stream ends on the 7d settle rule:
+/// `complete` (terminal AND the tail drained past the settle lag) with no new
+/// lines, never on a terminal state alone. Authorisation and the 404-before-the-
+/// stream guarantee are `get_execution_logs`'; see the follow section's note.
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/logs/follow",
+    tag = "workflow",
+    operation_id = "follow_execution_logs",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    responses(
+        (status = 200, description = "A `text/event-stream`: each event is a page of new log lines (same shape as `GET …/executions/{id}/logs`) after the stream's watermark, in id order, carrying the execution state and `complete`. The stream closes once `complete` is true and no new lines remain -- terminal AND the tail drained past the 2 s settle lag, not a terminal state alone. The poll interval is 1 s.", content_type = "text/event-stream", body = LogPageDto),
+        (status = 400, description = "`{id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed. **Answered before the stream opens.**", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn follow_execution_logs(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> EgretResult<impl axum::response::IntoResponse> {
+    // 404/403 BEFORE the stream opens -- the same check `get_execution_logs` makes.
+    require_exec(&st, &ctx, id, WF_READ).await?;
+    let ws = ctx.workspace_id.0;
+
+    struct FollowLogs {
+        st: WorkflowState,
+        ws: Uuid,
+        id: Uuid,
+        interval: std::time::Duration,
+        after: Option<i64>,
+        first: bool,
+    }
+    let seed = FollowLogs {
+        interval: st.follow_poll_interval,
+        st,
+        ws,
+        id,
+        after: None,
+        first: true,
+    };
+    let stream = futures_util::stream::unfold(seed, |mut s| async move {
+        loop {
+            if s.first {
+                s.first = false;
+            } else {
+                tokio::time::sleep(s.interval).await;
+            }
+            let Ok(lines) =
+                s.st.logs
+                    .page(
+                        s.ws,
+                        s.id,
+                        &LogQuery {
+                            after: s.after,
+                            limit: MAX_LOG_PAGE_LIMIT,
+                            task_id: None,
+                            task_run_id: None,
+                            min_level: None,
+                        },
+                    )
+                    .await
+            else {
+                return None;
+            };
+            // Read the state on the same tick, so `complete` is never staler
+            // than the page it accompanies.
+            let Ok(status) = s.st.executions.log_status(s.ws, s.id).await else {
+                return None;
+            };
+            if !lines.is_empty() {
+                let next_after = lines.last().map(|l| l.id);
+                s.after = next_after;
+                let page = LogPageDto {
+                    items: lines.into_iter().map(LogLineDto::from).collect(),
+                    next_after,
+                    execution_state: status.state,
+                    complete: status.complete,
+                };
+                let json = serde_json::to_string(&page).unwrap_or_default();
+                return Some((Ok(Event::default().data(json)), s));
+            }
+            // No new lines. End only when the execution is complete -- terminal
+            // AND every settled line already served (7d's settle-watermark
+            // rule, the same stop condition the paged route documents). A
+            // terminal state alone is not enough: a late `afterExecution:` line
+            // may still be inside the settle lag.
+            if status.complete {
+                return None;
+            }
+            // Otherwise wait and poll again.
+        }
+    });
+    Ok(crate::http::follow::sse_from_poll(stream))
 }
 
 // ---------- Delete, labels, log download, log delete (package 7d) ----------
@@ -6066,8 +6682,44 @@ pub fn management_router() -> Router<WorkflowState> {
         )
         .route("/ws/{workspace}/workflows/executions", get(list_executions))
         .route(
+            "/ws/{workspace}/workflows/executions/namespaces",
+            get(list_execution_namespaces),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/namespaces/{namespace}/flows",
+            get(list_execution_namespace_flows),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/namespaces/{namespace}/flows/{flowId}/average-duration",
+            get(execution_average_duration),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/latest",
+            post(latest_executions),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/export.csv",
+            get(export_executions_csv),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}",
             get(get_execution).delete(delete_execution),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/follow",
+            get(follow_execution),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/logs/follow",
+            get(follow_execution_logs),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/eval",
+            post(eval_execution_expression),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/eval",
+            post(eval_task_run_expression),
         )
         .route(
             "/ws/{workspace}/workflows/executions/{id}/graph",
@@ -6231,7 +6883,16 @@ pub fn management_router() -> Router<WorkflowState> {
         graph_unsaved_flow,
         get_execution_graph,
         list_executions,
+        list_execution_namespaces,
+        list_execution_namespace_flows,
+        execution_average_duration,
+        latest_executions,
+        export_executions_csv,
         get_execution,
+        follow_execution,
+        follow_execution_logs,
+        eval_execution_expression,
+        eval_task_run_expression,
         get_execution_logs,
         delete_execution,
         set_execution_labels,
@@ -6298,6 +6959,10 @@ pub fn management_router() -> Router<WorkflowState> {
         TaskRunDto,
         ExecutionDto,
         ExecutionPageDto,
+        AvgDurationDto,
+        crate::eval::EvalResultDto,
+        FlowFilterDto,
+        LastExecutionDto,
         StartExecutionRequest,
         StartExecutionMultipart,
         ValidateInputsDto,

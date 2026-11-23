@@ -1,9 +1,11 @@
-import { lazy, useId, useMemo, useState, type ReactNode } from "react";
+import { lazy, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { CircleStop, History, Loader2, Pause as PauseIcon, Pencil, Play, RotateCcw, RotateCw, Tag, Trash2 } from "lucide-react";
 import { ApiError } from "@/api/client";
 import {
+  getWorkflowFollowExecutionUrl,
   useWorkflowGetExecution,
   useWorkflowKillExecution,
   useWorkflowPauseExecution,
@@ -63,6 +65,9 @@ import { ChangeStateDialog } from "@/components/workflows/executions/ChangeState
 import { DeleteExecutionDialog } from "@/components/workflows/executions/DeleteExecutionDialog";
 import { EditLabelsDialog } from "@/components/workflows/executions/EditLabelsDialog";
 import { ResumeDialog } from "@/components/workflows/executions/ResumeDialog";
+import { AverageDurationProgress } from "@/components/workflows/executions/AverageDurationProgress";
+import { useEventSourceFollow } from "@/components/workflows/executions/useEventSourceFollow";
+import { EvalPanel } from "@/components/workflows/executions/EvalPanel";
 import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
 import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
@@ -111,14 +116,32 @@ export default function ExecutionDetail() {
 }
 
 function ExecutionLoader({ ws, id, tab }: { ws: string; id: string; tab: ExecutionTab }) {
+  const queryClient = useQueryClient();
+  // The event stream pushes each change of a live execution into the cache (7e #2); while it is
+  // live the 2 s polling is held, and when it fails (or ends) polling reads as before (spec §5.1).
+  const streamLive = useRef(false);
   const query = useWorkflowGetExecution(ws, id, {
     query: {
       queryKey: workflowsKeys.execution(id),
       // Every 2 s until terminal, backing off to 30 s while reads fail (spec §5.1).
-      refetchInterval: (q) => nextExecutionPollMs(q.state, Date.now()),
+      refetchInterval: (q) => (streamLive.current ? false : nextExecutionPollMs(q.state, Date.now())),
     },
   });
   const execution = query.data?.status === 200 ? query.data.data : undefined;
+  const stream = useEventSourceFollow<ExecutionDto>(getWorkflowFollowExecutionUrl(ws, id), {
+    // Only for a loaded run that is still going: a finished one has nothing to follow.
+    enabled: execution !== undefined && !isTerminalState(execution.state),
+    onEvent: (dto) =>
+      queryClient.setQueryData(workflowsKeys.execution(id), { status: 200, data: dto, headers: new Headers() }),
+  });
+  useEffect(() => {
+    streamLive.current = stream.live;
+  }, [stream.live]);
+  // A stream that failed or ended while the run still goes leaves the timer unarmed: read now,
+  // and the polling carries on. Never on load, and never for a run that finished.
+  useEffect(() => {
+    if (stream.dropped) void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(id) });
+  }, [stream.dropped, queryClient, id]);
   const listHref = `/explore/${ws}/workflows/executions`;
 
   // Error first (FE-STATE-1), while nothing has loaded; a failed poll keeps the last answer on screen.
@@ -201,6 +224,7 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
     () => ({
       logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} endedAt={endedAt} />,
       // The panel is keyed by run, so the tree's open items start afresh for each run.
+      eval: (run: TaskRunDto) => <EvalPanel ws={ws} executionId={execution.id} taskRunId={run.id} />,
       outputs: (run: TaskRunDto) => <OutputsTree ws={ws} executionId={execution.id} run={run} loopValue={execution.loop_value} />,
     }),
     [ws, execution.id, execution.loop_value, endedAt],
@@ -219,6 +243,12 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
         </TabsList>
         <TabsContent value="overview" className="min-h-0 flex-1 overflow-auto p-4">
           <ExecutionOverview ws={ws} execution={execution} now={now} canManage={execution.can_manage} />
+          <section aria-label="Evaluate an expression" className="mt-6 max-w-2xl">
+            <h2 className="text-sm font-medium">Evaluate an expression</h2>
+            <div className="mt-1">
+              <EvalPanel ws={ws} executionId={execution.id} />
+            </div>
+          </section>
         </TabsContent>
         <TabsContent value="topology" className="min-h-0 flex-1 overflow-auto p-4">
           <LazyRouteArea area="Topology" fallback={<Skeleton className="h-[32rem] w-full" />}>
@@ -337,6 +367,11 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
               )}
             </span>
           </Fact>
+          {isTerminalState(execution.state) ? null : (
+            <Fact term="Progress">
+              <AverageDurationProgress ws={ws} execution={execution} now={now} />
+            </Fact>
+          )}
           <Fact term="Trigger">
             <TriggerLabel row={execution} />
           </Fact>

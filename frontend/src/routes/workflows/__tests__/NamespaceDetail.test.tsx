@@ -35,7 +35,7 @@ const FLOWS = [
 /** Twelve executions under `company.team`, newest first, and one outside it. */
 const EXECUTIONS = [
   ...Array.from({ length: 12 }, (_, i) =>
-    nsExecution(`aaaaaaaa-0000-4000-8000-${String(i).padStart(12, "0")}`, i % 2 ? "company.team.etl" : "company.team", "sync"),
+    nsExecution(`aaaaaaaa-0000-4000-8000-${String(i).padStart(12, "0")}`, i % 2 ? "company.team.etl" : "company.team", i === 1 ? "load" : "sync"),
   ),
   nsExecution("bbbbbbbb-0000-4000-8000-000000000001", "companyx", "outside"),
 ];
@@ -244,13 +244,13 @@ describe("NamespaceDetail: Flows and Executions, pinned to the namespace", () =>
     expect(sent.every((q) => q.get("namespace_prefix") === "company.team" && q.get("namespace") === null)).toBe(true);
   });
 
-  it("Executions offers only the namespace's flows in its flow picker", async () => {
+  it("Executions offers the flow keys of the namespace and its child namespaces in its flow picker", async () => {
     const user = userEvent.setup();
     renderAt(at("company.team", "executions"));
     await screen.findByTestId("executions-table", {}, LAZY);
     await user.click(screen.getByLabelText("Flow"));
-    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
-    expect(options).toEqual(["All", "company.team.etl.load", "company.team.extract", "company.team.sync"]);
+    // From the loaded executions: `load` runs in the child namespace company.team.etl; `outside` is not under this namespace.
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["All", "load", "sync"]);
   });
 });
 

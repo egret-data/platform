@@ -11,7 +11,7 @@ import type { WorkflowListExecutionsParams } from "@/api/generated/model";
  * | `state` | states, one comma list | every state |
  * | `namespace` | one namespace | every namespace |
  * | `subns` | `1`: the namespace's child namespaces too (`namespace_prefix`) | that namespace only |
- * | `flow` | a flow's uuid | every flow |
+ * | `flow` | a flow's key (its YAML id) in the chosen namespace, sent as `flow_key` | every flow |
  * | `time` | `1h`, `24h`, `7d`, `30d` or `custom` | all time |
  * | `since`, `until` | UTC instants, with `time=custom` only | open |
  * | `child` | `1`: child executions too | no loop iterations or subflow and flow-trigger children (retries stay) |
@@ -60,7 +60,7 @@ export interface ExecutionFilters {
   namespace: string;
   /** Include the namespace's child namespaces (`namespace_prefix`). Meaningless without `namespace`. */
   subNamespaces: boolean;
-  /** A flow's uuid (`flow_id`), not its YAML id: those repeat across namespaces. */
+  /** A flow's key (its YAML id, `flow_key`): the picker offers the chosen namespace's keys, so they do not repeat. */
   flow: string;
   time: TimePreset | "custom" | "";
   /** With `time: "custom"` only: UTC ISO instants, either may be empty. */
@@ -189,8 +189,8 @@ export function toQueryParams(
     if (f.subNamespaces) q.namespace_prefix = f.namespace;
     else q.namespace = f.namespace;
   }
-  const flowId = opts.pinnedFlowId ?? f.flow;
-  if (flowId) q.flow_id = flowId;
+  if (opts.pinnedFlowId) q.flow_id = opts.pinnedFlowId;
+  else if (f.flow) q.flow_key = f.flow;
   const preset = TIME_PRESETS.find((p) => p.value === f.time);
   if (preset) q.since = new Date(now - preset.ms).toISOString();
   if (f.time === "custom") {

@@ -138,6 +138,8 @@ export default function ExecutionTopologyTab({
   const outputsSlot = slots.outputs;
   const logs = useMemo(() => (selectedRun ? logsSlot(selectedRun) : null), [selectedRun, logsSlot]);
   const outputs = useMemo(() => (selectedRun ? outputsSlot(selectedRun) : null), [selectedRun, outputsSlot]);
+  const evalSlot = slots.eval;
+  const evaluate = useMemo(() => (selectedRun && evalSlot ? evalSlot(selectedRun) : null), [selectedRun, evalSlot]);
 
   let panel = null;
   let note: string | null = null;
@@ -148,7 +150,7 @@ export default function ExecutionTopologyTab({
     } else if (selection.kind === "run") {
       if (row) {
         // Keyed by run: a slot's own state (a log cursor) starts afresh for each run.
-        panel = <GanttRunPanel key={row.run.id} row={row} onClose={close} logs={logs} outputs={outputs} />;
+        panel = <GanttRunPanel key={row.run.id} row={row} onClose={close} logs={logs} outputs={outputs} evaluate={evaluate} />;
       } else {
         note = `The run of ${name} is not in this execution's task runs yet.`;
       }

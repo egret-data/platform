@@ -122,6 +122,10 @@ export const workflowsKeys = {
    * `namespace(ws, ns)`: built from every flow's saved draft on each request, nothing stored.
    */
   nsDependencies: (ws: string, namespace: string) => ["workflows", "ws", ws, "namespace", namespace, "dependencies"] as const,
+  /** The distinct namespaces executions exist in (`GET …/executions/namespaces`), the list's namespace picker. */
+  executionNamespaces: (ws: string) => ["workflows", "ws", ws, "execution-namespaces"] as const,
+  /** The distinct flow keys of one namespace's executions, the list's flow picker. */
+  executionFlows: (ws: string, namespace: string) => ["workflows", "ws", ws, "execution-namespaces", namespace, "flows"] as const,
   executions: (ws: string, params?: object) =>
     params
       ? (["workflows", "ws", ws, "executions", params] as const)

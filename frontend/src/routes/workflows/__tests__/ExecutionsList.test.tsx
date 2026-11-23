@@ -3,7 +3,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ExecutionListItemDto, FlowListItemDto } from "@/api/generated/model";
+import type { ExecutionListItemDto } from "@/api/generated/model";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ExecutionsList from "@/routes/workflows/ExecutionsList";
 
@@ -57,10 +57,10 @@ const ROWS: ExecutionListItemDto[] = [
   }),
 ];
 
-const FLOWS: FlowListItemDto[] = [
-  { id: OTHER_FLOW, namespace: "company", flow_id: "nightly", state: "live", created_at: "", updated_at: "" } as FlowListItemDto,
-  { id: FLOW, namespace: "company.team", flow_id: "hello", state: "draft", created_at: "", updated_at: "" } as FlowListItemDto,
-];
+const NAMESPACES = ["company", "company.team"];
+const FLOW_KEYS = ["nightly", "weekly"];
+/** The namespaces whose flow keys were asked for, in order. */
+const flowRequests: string[] = [];
 
 type Reply = { status: number; body: unknown };
 const page = (rows: ExecutionListItemDto[], total = rows.length, offset = 0, worker_enabled = true): Reply => ({
@@ -79,11 +79,15 @@ function slice(total: number, offset: number): Reply {
 }
 
 /**
- * Serves `GET …/executions` from `answer` and `GET …/flows` from `FLOWS`,
+ * Serves `GET …/executions` from `answer` and the distinct namespaces and flow keys from `NAMESPACES` and `FLOW_KEYS`,
  * through the real hooks, mutator and `apiFetch` (FE-TEST-1). Returns every
  * executions request's query, in order.
  */
-function serve(answer: (q: URLSearchParams, n: number) => Reply | Promise<Reply>, flows: Reply = { status: 200, body: FLOWS }) {
+function serve(
+  answer: (q: URLSearchParams, n: number) => Reply | Promise<Reply>,
+  flows: Reply = { status: 200, body: FLOW_KEYS },
+  namespaces: Reply = { status: 200, body: NAMESPACES },
+) {
   const lists: URLSearchParams[] = [];
   vi.stubGlobal(
     "fetch",
@@ -93,7 +97,10 @@ function serve(answer: (q: URLSearchParams, n: number) => Reply | Promise<Reply>
       if (url.pathname === LIST) {
         lists.push(url.searchParams);
         reply = await answer(url.searchParams, lists.length);
-      } else if (url.pathname === `/api/ws/${WS}/workflows/flows`) {
+      } else if (url.pathname === `${LIST}/namespaces`) {
+        reply = namespaces;
+      } else if (url.pathname.startsWith(`${LIST}/namespaces/`) && url.pathname.endsWith("/flows")) {
+        flowRequests.push(decodeURIComponent(url.pathname.slice(`${LIST}/namespaces/`.length, -"/flows".length)));
         reply = flows;
       } else {
         reply = { status: 404, body: { error: `unexpected ${url.pathname}` } };
@@ -156,6 +163,7 @@ function setVisibility(v: DocumentVisibilityState) {
 }
 
 afterEach(() => {
+  flowRequests.length = 0;
   vi.useRealTimers();
   vi.unstubAllGlobals();
   setVisibility("visible");
@@ -297,12 +305,12 @@ describe("ExecutionsList: filters in the URL", () => {
   it("reads every filter back from a shared URL and sends it", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true, now: Date.parse("2026-10-11T12:00:00.000Z") });
     const lists = serve(() => slice(120, 50));
-    renderList(`/explore/${WS}/workflows/executions?state=RUNNING,FAILED&namespace=company&flow=${OTHER_FLOW}&time=24h&child=1&page=2`);
+    renderList(`/explore/${WS}/workflows/executions?state=RUNNING,FAILED&namespace=company&flow=nightly&time=24h&child=1&page=2`);
     await screen.findByTestId("executions-table");
     const q = lists[0];
     expect(q.get("state")).toBe("RUNNING,FAILED");
     expect(q.get("namespace")).toBe("company");
-    expect(q.get("flow_id")).toBe(OTHER_FLOW);
+    expect(q.get("flow_key")).toBe("nightly");
     expect(Date.parse(q.get("since")!)).toBeGreaterThanOrEqual(Date.parse("2026-10-10T12:00:00.000Z"));
     expect(Date.parse(q.get("since")!)).toBeLessThan(Date.parse("2026-10-10T12:00:05.000Z"));
     expect(q.get("until")).toBeNull();
@@ -312,7 +320,7 @@ describe("ExecutionsList: filters in the URL", () => {
     // The controls show what the URL says.
     expect(screen.getByRole("button", { name: /^State/ })).toHaveTextContent("Running, Failed");
     expect(screen.getByRole("combobox", { name: "Namespace" })).toHaveTextContent("company");
-    expect(screen.getByRole("combobox", { name: "Flow" })).toHaveTextContent("company.nightly");
+    expect(screen.getByRole("combobox", { name: "Flow" })).toHaveTextContent("nightly");
     expect(screen.getByRole("combobox", { name: "Time" })).toHaveTextContent("Last 24 hours");
     expect(screen.getByText(/Page 2 of 3/)).toBeInTheDocument();
   });
@@ -513,5 +521,54 @@ describe("ExecutionsList: the worker-off notice (KI-013)", () => {
     renderList(`/explore/${WS}/workflows/flows/${FLOW}/executions`, FLOW);
     await screen.findByTestId("executions-table");
     expect(screen.queryByTestId("worker-off-notice")).not.toBeInTheDocument();
+  });
+});
+
+describe("ExecutionsList: distinct-backed filters and CSV export (7e)", () => {
+  it("offers the namespaces executions exist in, and the chosen namespace's flow keys", async () => {
+    serve(() => page(ROWS));
+    renderList(`/explore/${WS}/workflows/executions`);
+    await screen.findByTestId("executions-table");
+    // No namespace yet: the flow picker says why it is off and asks for nothing.
+    expect(screen.getByRole("combobox", { name: "Flow" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Flow" })).toHaveAttribute("title", "Pick a namespace first");
+    expect(flowRequests).toEqual([]);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: "Namespace" }));
+    expect(await screen.findByRole("option", { name: "company.team" })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "company" }));
+    await waitFor(() => expect(flowRequests).toEqual(["company"]));
+
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Flow" })).toBeEnabled());
+    await user.click(screen.getByRole("combobox", { name: "Flow" }));
+    await user.click(await screen.findByRole("option", { name: "weekly" }));
+    await waitFor(() => expect(search().get("flow")).toBe("weekly"));
+  });
+
+  it("sends the chosen flow key as flow_key, and changing the namespace clears it", async () => {
+    const lists = serve(() => page(ROWS));
+    renderList(`/explore/${WS}/workflows/executions?namespace=company&flow=nightly`);
+    await screen.findByTestId("executions-table");
+    expect(lists[0].get("flow_key")).toBe("nightly");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("combobox", { name: "Namespace" }));
+    await user.click(await screen.findByRole("option", { name: "company.team" }));
+    await waitFor(() => expect(search().get("flow")).toBeNull());
+  });
+
+  it("links Export CSV to export.csv carrying the current filters, and not the page", async () => {
+    serve(() => page(ROWS));
+    renderList(`/explore/${WS}/workflows/executions?state=FAILED&namespace=company&flow=nightly&page=2`);
+    await screen.findByTestId("executions-table");
+    const href = screen.getByRole("link", { name: "Export CSV" }).getAttribute("href")!;
+    const url = new URL(href, "http://x");
+    expect(url.pathname).toBe(`${LIST}/export.csv`);
+    expect(url.searchParams.get("state")).toBe("FAILED");
+    expect(url.searchParams.get("namespace")).toBe("company");
+    expect(url.searchParams.get("flow_key")).toBe("nightly");
+    expect(url.searchParams.get("root_only")).toBe("true");
+    expect(url.searchParams.has("limit")).toBe(false);
+    expect(url.searchParams.has("offset")).toBe(false);
   });
 });
