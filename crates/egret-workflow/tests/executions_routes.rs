@@ -5416,3 +5416,58 @@ async fn state_bulk_refuses_a_foreign_workspace_id_and_more_than_max_bulk() {
         .unwrap_or_default()
         .contains("too_many"));
 }
+
+/// **The hole a kill pre-flight must not have.** An `Exit` leaves a flowable
+/// sibling live for good (`tests/exit_sibling_idle.rs`, shape B): the
+/// execution is `SUCCESS` yet `execution_is_idle` is false. The worker's kill
+/// refuses it (`Terminated`: ended, no `afterExecution:` run live), so the
+/// bulk pre-flight must too -- otherwise ids before it are killed and
+/// committed, then the apply of this one fails: a partial apply.
+#[sqlx::test(migrations = "../../migrations")]
+async fn kill_by_ids_refuses_an_ended_execution_with_a_live_sibling_and_kills_nothing(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let exit_shape = "id: b\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: seq\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: b1\n            type: io.kestra.plugin.core.log.Log\n            message: one\n          - id: b2\n            type: io.kestra.plugin.core.log.Log\n            message: two\n      - id: exit\n        type: io.kestra.plugin.core.execution.Exit\n        state: SUCCESS\n"
+    ;
+    let stuck =
+        egret_workflow::worker::start_execution(&pool, ws, None, exit_shape, serde_json::json!({}))
+            .await
+            .expect("start");
+    let reg = common::Answering(true);
+    for _ in 0..40 {
+        egret_workflow::worker::tick(&pool, 64, &reg)
+            .await
+            .expect("tick");
+    }
+    let idle: Option<bool> = sqlx::query_scalar("SELECT workflow.execution_is_idle($1)")
+        .bind(stuck)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state_of(&db, stuck).await, "SUCCESS");
+    assert_eq!(idle, Some(false), "the shape under test: ended, not idle");
+
+    // Started after the ticks, so nothing has moved them.
+    let (a, c) = (
+        exec_in(&db, ws, user, "RUNNING").await,
+        exec_in(&db, ws, user, "RUNNING").await,
+    );
+    let app = common::app(&db).await;
+    let res = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/kill/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, stuck, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(stuck.to_string(), "already ended".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "RUNNING");
+    assert_eq!(state_of(&db, c).await, "RUNNING");
+    assert_eq!(state_of(&db, stuck).await, "SUCCESS");
+}

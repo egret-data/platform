@@ -154,7 +154,9 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
 }
 pub use copy::{replay_execution, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest};
 pub use delete::{delete_execution, DeleteRefused, DeleteRequest, Deleted};
-pub use kill::{kill_execution, kill_execution_reporting, KillOutcome};
+pub use kill::{
+    kill_execution, kill_execution_reporting, kill_refusal, kill_would_refuse, KillOutcome,
+};
 pub use labels::{labels_precondition, set_execution_labels, LabelsRefused, LabelsSet};
 pub use pause::{pause_by_hand, resume_values, resume_with, Paused, ResumeRefused, ResumeRequest};
 pub use reaper::reap;

@@ -6124,11 +6124,11 @@ async fn kill_write(
 }
 
 /// Bulk pre-flight of a kill for one id: read-only. Existence and the
-/// `workflow:manage` gate, then the worker's own rule: an execution that is
-/// idle (ended, with no `afterExecution:` task live) has nothing to kill --
-/// the worker's `Terminated` under the lock, read here off the same
-/// `execution_is_idle` the state-change and labels routes use. A kill that
-/// still cannot apply (`NotApplied`, a retryable race) is the apply's.
+/// `workflow:manage` gate, then the worker's own refusal
+/// ([`worker::kill_would_refuse`](crate::worker::kill_would_refuse), the
+/// `kill_refusal` rule the write applies under the lock: ended with no
+/// `afterExecution:` run live). A kill that still cannot apply
+/// (`NotApplied`, a retryable race) is the apply's.
 async fn kill_check(
     st: &WorkflowState,
     ctx: &egret_core::WorkspaceContext,
@@ -6138,19 +6138,17 @@ async fn kill_check(
     if let Err(e) = require_exec(st, ctx, id, WF_MANAGE).await {
         return Err(invalid_id(id, gate_reason(&ExecOpError::Core(e))));
     }
-    let idle: Option<bool> = sqlx::query_scalar(
-        "SELECT COALESCE(workflow.execution_is_idle(id), false) \
-           FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
-    )
-    .bind(id)
-    .bind(ws)
-    .fetch_optional(&st.db.pool)
-    .await
-    .map_err(|_| invalid_id(id, "could not be checked"))?;
-    match idle {
-        None => Err(invalid_id(id, "not found")),
-        Some(true) => Err(invalid_id(id, "already ended")),
-        Some(false) => Ok(()),
+    let mut conn = st
+        .db
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| invalid_id(id, "could not be checked"))?;
+    match crate::worker::kill_would_refuse(&mut conn, ws, id).await {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) => Err(invalid_id(id, "already ended")),
+        Err(Error::NotFound(_)) => Err(invalid_id(id, "not found")),
+        Err(_) => Err(invalid_id(id, "could not be checked")),
     }
 }
 
