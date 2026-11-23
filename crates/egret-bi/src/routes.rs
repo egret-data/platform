@@ -712,7 +712,10 @@ pub fn dataset_router() -> Router<BiState> {
             "/ws/{workspace}/datasets/{id}/metrics/{metric_id}/certification",
             put(ds_set_metric_certification),
         )
-        .route("/ws/{workspace}/datasets/{id}/columns", post(ds_add_column))
+        .route(
+            "/ws/{workspace}/datasets/{id}/columns",
+            post(ds_add_column).delete(ds_delete_column_by_query),
+        )
         .route(
             "/ws/{workspace}/datasets/{id}/columns/{column_name}",
             put(ds_update_column).delete(ds_delete_column),
@@ -1946,6 +1949,55 @@ async fn ds_delete_column(
         .map_err(BiApiError::from)?;
     st.datasets
         .delete_calc_column(id, &column_name)
+        .await
+        .map_err(BiApiError::from)?;
+    Ok(Json(load_detail(&st, id).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct DeleteColumnByNameQuery {
+    /// Exact name of the calculated column to delete. Defaults to the empty
+    /// string so `?name=` (or a bare request) can reach a calculated column
+    /// saved with a blank name, which the `/columns/{column_name}` path form
+    /// cannot address (an empty segment does not match).
+    #[serde(default)]
+    name: String,
+}
+
+/// Delete a calculated column named in the query string. This exists only so a
+/// calculated column with a blank name — not creatable since #725, but possible
+/// in older datasets — can be removed; `/columns/{column_name}` cannot carry an
+/// empty name (KI-101). For any non-empty name the path form is equivalent.
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/datasets/{id}/columns",
+    tag = "datasets",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Dataset id"),
+        ("name" = Option<String>, Query, description = "Exact name of the calculated column to delete; empty addresses a blank-named column"),
+    ),
+    responses(
+        (status = 200, description = "Calculated column deleted", body = DatasetDetailDto),
+        (status = 400, description = "No calculated column with that name", body = ErrorBody),
+        (status = 401, description = "Not authenticated", body = ErrorBody),
+        (status = 403, description = "Missing dataset:manage permission, or not the dataset owner", body = ErrorBody),
+        (status = 404, description = "No such dataset in this workspace", body = ErrorBody),
+        (status = 500, description = "Internal error", body = ErrorBody),
+    ),
+)]
+async fn ds_delete_column_by_query(
+    State(st): State<BiState>,
+    WsContext(ctx): WsContext,
+    Path((_w, id)): Path<(String, Uuid)>,
+    AxQuery(q): AxQuery<DeleteColumnByNameQuery>,
+) -> Result<Json<DatasetDetailDto>, BiApiError> {
+    let obj = crate::shares::resolve(&st, &ctx, "dataset", id).await?;
+    egret_core::authz::require_object(&*st.pdp, &ctx, DS_MANAGE, obj)
+        .await
+        .map_err(BiApiError::from)?;
+    st.datasets
+        .delete_calc_column(id, &q.name)
         .await
         .map_err(BiApiError::from)?;
     Ok(Json(load_detail(&st, id).await?))
@@ -3816,6 +3868,7 @@ async fn require_folder(
         ds_add_column,
         ds_update_column,
         ds_delete_column,
+        ds_delete_column_by_query,
         ds_set_folder,
         ds_trash,
         ds_restore,

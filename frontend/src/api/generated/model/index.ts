@@ -226,6 +226,7 @@ export * from './datasetColumnDtoSemanticType';
 export * from './datasetDataBody';
 export * from './datasetDetailDto';
 export * from './datasetRefreshDto';
+export * from './datasetsDsDeleteColumnByQueryParams';
 export * from './datasetsDsDeleteMetricParams';
 export * from './datasetsDsListParams';
 export * from './datasetsDsRemoveParams';
