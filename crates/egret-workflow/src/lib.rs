@@ -41,10 +41,10 @@
 // `pub`, not `mod`: the ratchet that judges it (`tests/executor.rs`) is an
 // integration test, exactly as `tests/oracle.rs` is, and an integration test
 // sees only the public API.
-pub mod executor;
 /// Package 7e (#1a, #1b): evaluate one Pebble expression against a stored
 /// execution or task-run context, with SECRET values sealed by construction.
 pub(crate) mod eval;
+pub mod executor;
 /// W13a: `process_events`, the Flow-trigger outbox processor. `pub` because
 /// `tests/flow_trigger_fire.rs` drives it directly.
 pub mod flow_trigger;

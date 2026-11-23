@@ -403,13 +403,24 @@ mod tests {
         // rendered surface, and `secret()` is an error while the masked input is
         // the mask.
         for task_run in [None, Some(trid)] {
-            for expr in ["{{ secret('pw') }}", "{{ inputs.pw }}", "{{ inputs }}", "{{ outputs }}"] {
+            for expr in [
+                "{{ secret('pw') }}",
+                "{{ inputs.pw }}",
+                "{{ inputs }}",
+                "{{ outputs }}",
+            ] {
                 let r = eval_expression(&d, task_run, expr);
                 let seen = format!("{r:?}");
-                assert!(!seen.contains(SENTINEL), "{expr} leaked the sentinel: {seen}");
+                assert!(
+                    !seen.contains(SENTINEL),
+                    "{expr} leaked the sentinel: {seen}"
+                );
             }
             let secret = eval_expression(&d, task_run, "{{ secret('pw') }}");
-            assert!(secret.result.is_none(), "secret() leaked a value: {secret:?}");
+            assert!(
+                secret.result.is_none(),
+                "secret() leaked a value: {secret:?}"
+            );
             assert!(secret.error.is_some(), "{secret:?}");
             let input = eval_expression(&d, task_run, "{{ inputs.pw }}");
             assert_eq!(input.result.as_deref(), Some(MASK), "{input:?}");
