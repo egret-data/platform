@@ -93,13 +93,17 @@ services:
       TASKS: "0"
 
   egret:
-    image: egret-demo-backend:dev
+    image: ${COMPOSE_PROJECT_NAME:-egret-demo}-backend:dev
     # egret is PID 1; Docker's init reaps the kernel processes marimo leaves behind when a pod stops.
     init: true
     build:
       context: ..
       dockerfile: deploy/docker/backend.Dockerfile
       target: demo
+      args:
+        # Scope the Rust target cache to this compose project so a parallel
+        # stack's build cannot leave this one with a stale binary (#816).
+        CARGO_TARGET_CACHE: ${COMPOSE_PROJECT_NAME:-egret-demo}
     <<: *demo-env
     depends_on:
       postgres: { condition: service_healthy }
@@ -135,8 +139,8 @@ services:
       # "Add engine" starts Trino containers through the socket proxy (egret never mounts the socket).
       EGRET_ENGINES__PROVISIONER: docker
       EGRET_ENGINES__DOCKER__HOST: tcp://docker-proxy:2375
-      EGRET_ENGINES__DOCKER__NETWORK: egret-demo_default
-      EGRET_ENGINES__DOCKER__PROJECT: egret-demo
+      EGRET_ENGINES__DOCKER__NETWORK: ${COMPOSE_PROJECT_NAME:-egret-demo}_default
+      EGRET_ENGINES__DOCKER__PROJECT: ${COMPOSE_PROJECT_NAME:-egret-demo}
       EGRET_LOG__FILTER: info,egret=debug
       EGRET_OIDC__ENABLED: "true"
       EGRET_OIDC__ISSUER_URL: ${DEMO_URL:-http://egret.localtest.me:8080}/auth/realms/egret
@@ -190,7 +194,7 @@ services:
       start_period: 30s
 
   frontend:
-    image: egret-demo-frontend:dev
+    image: ${COMPOSE_PROJECT_NAME:-egret-demo}-frontend:dev
     build:
       context: ../frontend
     environment:
@@ -228,7 +232,7 @@ services:
       MP_SMTP_AUTH_ALLOW_INSECURE: "1"
 
   renderer:
-    image: egret-demo-renderer:dev
+    image: ${COMPOSE_PROJECT_NAME:-egret-demo}-renderer:dev
     build:
       context: ../renderer
     shm_size: 1gb
@@ -241,7 +245,7 @@ services:
 
 networks:
   default:
-    name: egret-demo_default
+    name: ${COMPOSE_PROJECT_NAME:-egret-demo}_default
 
 volumes:
   demo-pgdata:
