@@ -27,7 +27,14 @@ import type {
 import type {
   Ack,
   AvgDurationDto,
+  BulkErrorResponse,
+  BulkIds,
+  BulkKillByIds,
+  BulkLabelsByIds,
+  BulkResponse,
   BulkResultsDto,
+  BulkResumeByIds,
+  BulkStatusByIds,
   CreateBackfillRequest,
   CreateFlowRequest,
   DeleteBackfillsRequest,
@@ -72,9 +79,12 @@ import type {
   ValidateFlowRequest,
   ValidateInputsDto,
   ValidationReportDto,
+  WorkflowChangeStatusExecutionsByQueryParams,
   WorkflowCreateNamespaceDirectoryParams,
   WorkflowDeleteExecutionLogsParams,
   WorkflowDeleteExecutionParams,
+  WorkflowDeleteExecutionsByIdsParams,
+  WorkflowDeleteExecutionsByQueryParams,
   WorkflowDeleteNamespaceFileParams,
   WorkflowDownloadExecutionFileParams,
   WorkflowDownloadExecutionLogsParams,
@@ -88,6 +98,8 @@ import type {
   WorkflowGetKvValueParams,
   WorkflowGraphUnsavedFlowParams,
   WorkflowKillExecutionParams,
+  WorkflowKillExecutionsByQueryParams,
+  WorkflowLabelsExecutionsByQueryParams,
   WorkflowListExecutionsParams,
   WorkflowListFlowsParams,
   WorkflowListNamespaceDirectoryParams,
@@ -98,9 +110,15 @@ import type {
   WorkflowNamespaceDto,
   WorkflowNamespaceFileRevisionsParams,
   WorkflowNamespaceFileStatsParams,
+  WorkflowPauseExecutionsByQueryParams,
   WorkflowPreviewExecutionFileParams,
   WorkflowReplayExecutionParams,
+  WorkflowReplayExecutionsByIdsParams,
+  WorkflowReplayExecutionsByQueryParams,
   WorkflowRestartExecutionParams,
+  WorkflowRestartExecutionsByIdsParams,
+  WorkflowRestartExecutionsByQueryParams,
+  WorkflowResumeExecutionsByQueryParams,
   WorkflowSearchNamespaceFilesParams,
   WorkflowUploadNamespaceFileParams
 } from '../model';
@@ -275,7 +293,453 @@ export function useWorkflowListExecutions<TData = Awaited<ReturnType<typeof work
 
 
 
-export type workflowExportExecutionsCsvResponse200 = {
+export type workflowDeleteExecutionsByIdsResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowDeleteExecutionsByIdsResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowDeleteExecutionsByIdsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteExecutionsByIdsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteExecutionsByIdsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDeleteExecutionsByIdsResponseSuccess = (workflowDeleteExecutionsByIdsResponse200) & {
+  headers: Headers;
+};
+export type workflowDeleteExecutionsByIdsResponseError = (workflowDeleteExecutionsByIdsResponse400 | workflowDeleteExecutionsByIdsResponse401 | workflowDeleteExecutionsByIdsResponse403 | workflowDeleteExecutionsByIdsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowDeleteExecutionsByIdsResponse = (workflowDeleteExecutionsByIdsResponseSuccess | workflowDeleteExecutionsByIdsResponseError)
+
+export const getWorkflowDeleteExecutionsByIdsUrl = (workspace: string,
+    params?: WorkflowDeleteExecutionsByIdsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/by-ids?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/by-ids`
+}
+
+/**
+ * @summary Delete several executions, all or none (package 7f; Kestra `DELETE /by-ids`).
+ */
+export const workflowDeleteExecutionsByIds = async (workspace: string,
+    bulkIds: BulkIds,
+    params?: WorkflowDeleteExecutionsByIdsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteExecutionsByIdsResponse> => {
+
+  return customInstance<workflowDeleteExecutionsByIdsResponse>(getWorkflowDeleteExecutionsByIdsUrl(workspace,params),
+  {
+    ...options,
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bulkIds)
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteExecutionsByIdsMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowDeleteExecutionsByIdsParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowDeleteExecutionsByIdsParams}, TContext> => {
+
+const mutationKey = ['workflowDeleteExecutionsByIds'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteExecutionsByIds>>, {workspace: string;data: BulkIds;params?: WorkflowDeleteExecutionsByIdsParams}> = (props) => {
+          const {workspace,data,params} = props ?? {};
+
+          return  workflowDeleteExecutionsByIds(workspace,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteExecutionsByIdsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteExecutionsByIds>>>
+    export type WorkflowDeleteExecutionsByIdsMutationBody = BulkIds
+    export type WorkflowDeleteExecutionsByIdsMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Delete several executions, all or none (package 7f; Kestra `DELETE /by-ids`).
+ */
+export const useWorkflowDeleteExecutionsByIds = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowDeleteExecutionsByIdsParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteExecutionsByIds>>,
+        TError,
+        {workspace: string;data: BulkIds;params?: WorkflowDeleteExecutionsByIdsParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteExecutionsByIdsMutationOptions(options), queryClient);
+    }
+    export type workflowDeleteExecutionsByQueryResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowDeleteExecutionsByQueryResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowDeleteExecutionsByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowDeleteExecutionsByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowDeleteExecutionsByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowDeleteExecutionsByQueryResponseSuccess = (workflowDeleteExecutionsByQueryResponse200) & {
+  headers: Headers;
+};
+export type workflowDeleteExecutionsByQueryResponseError = (workflowDeleteExecutionsByQueryResponse400 | workflowDeleteExecutionsByQueryResponse401 | workflowDeleteExecutionsByQueryResponse403 | workflowDeleteExecutionsByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type workflowDeleteExecutionsByQueryResponse = (workflowDeleteExecutionsByQueryResponseSuccess | workflowDeleteExecutionsByQueryResponseError)
+
+export const getWorkflowDeleteExecutionsByQueryUrl = (workspace: string,
+    params?: WorkflowDeleteExecutionsByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/by-query?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/by-query`
+}
+
+/**
+ * @summary Delete every execution a filter matches, all or none (package 7f).
+ */
+export const workflowDeleteExecutionsByQuery = async (workspace: string,
+    params?: WorkflowDeleteExecutionsByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowDeleteExecutionsByQueryResponse> => {
+
+  return customInstance<workflowDeleteExecutionsByQueryResponse>(getWorkflowDeleteExecutionsByQueryUrl(workspace,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowDeleteExecutionsByQueryMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowDeleteExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowDeleteExecutionsByQueryParams}, TContext> => {
+
+const mutationKey = ['workflowDeleteExecutionsByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowDeleteExecutionsByQuery>>, {workspace: string;params?: WorkflowDeleteExecutionsByQueryParams}> = (props) => {
+          const {workspace,params} = props ?? {};
+
+          return  workflowDeleteExecutionsByQuery(workspace,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowDeleteExecutionsByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowDeleteExecutionsByQuery>>>
+
+    export type WorkflowDeleteExecutionsByQueryMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Delete every execution a filter matches, all or none (package 7f).
+ */
+export const useWorkflowDeleteExecutionsByQuery = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowDeleteExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowDeleteExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowDeleteExecutionsByQuery>>,
+        TError,
+        {workspace: string;params?: WorkflowDeleteExecutionsByQueryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowDeleteExecutionsByQueryMutationOptions(options), queryClient);
+    }
+    export type workflowChangeStatusExecutionsByIdsResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowChangeStatusExecutionsByIdsResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowChangeStatusExecutionsByIdsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowChangeStatusExecutionsByIdsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowChangeStatusExecutionsByIdsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowChangeStatusExecutionsByIdsResponseSuccess = (workflowChangeStatusExecutionsByIdsResponse200) & {
+  headers: Headers;
+};
+export type workflowChangeStatusExecutionsByIdsResponseError = (workflowChangeStatusExecutionsByIdsResponse400 | workflowChangeStatusExecutionsByIdsResponse401 | workflowChangeStatusExecutionsByIdsResponse403 | workflowChangeStatusExecutionsByIdsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowChangeStatusExecutionsByIdsResponse = (workflowChangeStatusExecutionsByIdsResponseSuccess | workflowChangeStatusExecutionsByIdsResponseError)
+
+export const getWorkflowChangeStatusExecutionsByIdsUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/change-status/by-ids`
+}
+
+/**
+ * @summary Change the status of several finished executions, all or none (package 7f).
+ */
+export const workflowChangeStatusExecutionsByIds = async (workspace: string,
+    bulkStatusByIds: BulkStatusByIds, options?: Parameters<typeof customInstance>[1]): Promise<workflowChangeStatusExecutionsByIdsResponse> => {
+
+  return customInstance<workflowChangeStatusExecutionsByIdsResponse>(getWorkflowChangeStatusExecutionsByIdsUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bulkStatusByIds)
+  }
+);}
+
+
+
+
+
+export const getWorkflowChangeStatusExecutionsByIdsMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByIds>>, TError,{workspace: string;data: BulkStatusByIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByIds>>, TError,{workspace: string;data: BulkStatusByIds}, TContext> => {
+
+const mutationKey = ['workflowChangeStatusExecutionsByIds'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByIds>>, {workspace: string;data: BulkStatusByIds}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowChangeStatusExecutionsByIds(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowChangeStatusExecutionsByIdsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByIds>>>
+    export type WorkflowChangeStatusExecutionsByIdsMutationBody = BulkStatusByIds
+    export type WorkflowChangeStatusExecutionsByIdsMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Change the status of several finished executions, all or none (package 7f).
+ */
+export const useWorkflowChangeStatusExecutionsByIds = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByIds>>, TError,{workspace: string;data: BulkStatusByIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowChangeStatusExecutionsByIds>>,
+        TError,
+        {workspace: string;data: BulkStatusByIds},
+        TContext
+      > => {
+      return useMutation(getWorkflowChangeStatusExecutionsByIdsMutationOptions(options), queryClient);
+    }
+    export type workflowChangeStatusExecutionsByQueryResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowChangeStatusExecutionsByQueryResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowChangeStatusExecutionsByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowChangeStatusExecutionsByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowChangeStatusExecutionsByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowChangeStatusExecutionsByQueryResponseSuccess = (workflowChangeStatusExecutionsByQueryResponse200) & {
+  headers: Headers;
+};
+export type workflowChangeStatusExecutionsByQueryResponseError = (workflowChangeStatusExecutionsByQueryResponse400 | workflowChangeStatusExecutionsByQueryResponse401 | workflowChangeStatusExecutionsByQueryResponse403 | workflowChangeStatusExecutionsByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type workflowChangeStatusExecutionsByQueryResponse = (workflowChangeStatusExecutionsByQueryResponseSuccess | workflowChangeStatusExecutionsByQueryResponseError)
+
+export const getWorkflowChangeStatusExecutionsByQueryUrl = (workspace: string,
+    params?: WorkflowChangeStatusExecutionsByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/change-status/by-query?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/change-status/by-query`
+}
+
+/**
+ * @summary Change the status of every execution a filter matches, all or none (package 7f).
+ */
+export const workflowChangeStatusExecutionsByQuery = async (workspace: string,
+    stateChangeBody: StateChangeBody,
+    params?: WorkflowChangeStatusExecutionsByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowChangeStatusExecutionsByQueryResponse> => {
+
+  return customInstance<workflowChangeStatusExecutionsByQueryResponse>(getWorkflowChangeStatusExecutionsByQueryUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(stateChangeBody)
+  }
+);}
+
+
+
+
+
+export const getWorkflowChangeStatusExecutionsByQueryMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByQuery>>, TError,{workspace: string;data: StateChangeBody;params?: WorkflowChangeStatusExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByQuery>>, TError,{workspace: string;data: StateChangeBody;params?: WorkflowChangeStatusExecutionsByQueryParams}, TContext> => {
+
+const mutationKey = ['workflowChangeStatusExecutionsByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByQuery>>, {workspace: string;data: StateChangeBody;params?: WorkflowChangeStatusExecutionsByQueryParams}> = (props) => {
+          const {workspace,data,params} = props ?? {};
+
+          return  workflowChangeStatusExecutionsByQuery(workspace,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowChangeStatusExecutionsByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByQuery>>>
+    export type WorkflowChangeStatusExecutionsByQueryMutationBody = StateChangeBody
+    export type WorkflowChangeStatusExecutionsByQueryMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Change the status of every execution a filter matches, all or none (package 7f).
+ */
+export const useWorkflowChangeStatusExecutionsByQuery = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowChangeStatusExecutionsByQuery>>, TError,{workspace: string;data: StateChangeBody;params?: WorkflowChangeStatusExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowChangeStatusExecutionsByQuery>>,
+        TError,
+        {workspace: string;data: StateChangeBody;params?: WorkflowChangeStatusExecutionsByQueryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowChangeStatusExecutionsByQueryMutationOptions(options), queryClient);
+    }
+    export type workflowExportExecutionsCsvResponse200 = {
   data: string
   status: 200
 }
@@ -423,7 +887,444 @@ export function useWorkflowExportExecutionsCsv<TData = Awaited<ReturnType<typeof
 
 
 
-export type workflowLatestExecutionsResponse200 = {
+export type workflowKillExecutionsByIdsResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowKillExecutionsByIdsResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowKillExecutionsByIdsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowKillExecutionsByIdsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowKillExecutionsByIdsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowKillExecutionsByIdsResponseSuccess = (workflowKillExecutionsByIdsResponse200) & {
+  headers: Headers;
+};
+export type workflowKillExecutionsByIdsResponseError = (workflowKillExecutionsByIdsResponse400 | workflowKillExecutionsByIdsResponse401 | workflowKillExecutionsByIdsResponse403 | workflowKillExecutionsByIdsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowKillExecutionsByIdsResponse = (workflowKillExecutionsByIdsResponseSuccess | workflowKillExecutionsByIdsResponseError)
+
+export const getWorkflowKillExecutionsByIdsUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/kill/by-ids`
+}
+
+/**
+ * @summary Kill several executions, all or none (package 7f; Kestra `DELETE /kill/by-ids`).
+ */
+export const workflowKillExecutionsByIds = async (workspace: string,
+    bulkKillByIds: BulkKillByIds, options?: Parameters<typeof customInstance>[1]): Promise<workflowKillExecutionsByIdsResponse> => {
+
+  return customInstance<workflowKillExecutionsByIdsResponse>(getWorkflowKillExecutionsByIdsUrl(workspace),
+  {
+    ...options,
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bulkKillByIds)
+  }
+);}
+
+
+
+
+
+export const getWorkflowKillExecutionsByIdsMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecutionsByIds>>, TError,{workspace: string;data: BulkKillByIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecutionsByIds>>, TError,{workspace: string;data: BulkKillByIds}, TContext> => {
+
+const mutationKey = ['workflowKillExecutionsByIds'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowKillExecutionsByIds>>, {workspace: string;data: BulkKillByIds}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowKillExecutionsByIds(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowKillExecutionsByIdsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowKillExecutionsByIds>>>
+    export type WorkflowKillExecutionsByIdsMutationBody = BulkKillByIds
+    export type WorkflowKillExecutionsByIdsMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Kill several executions, all or none (package 7f; Kestra `DELETE /kill/by-ids`).
+ */
+export const useWorkflowKillExecutionsByIds = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecutionsByIds>>, TError,{workspace: string;data: BulkKillByIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowKillExecutionsByIds>>,
+        TError,
+        {workspace: string;data: BulkKillByIds},
+        TContext
+      > => {
+      return useMutation(getWorkflowKillExecutionsByIdsMutationOptions(options), queryClient);
+    }
+    export type workflowKillExecutionsByQueryResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowKillExecutionsByQueryResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowKillExecutionsByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowKillExecutionsByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowKillExecutionsByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowKillExecutionsByQueryResponseSuccess = (workflowKillExecutionsByQueryResponse200) & {
+  headers: Headers;
+};
+export type workflowKillExecutionsByQueryResponseError = (workflowKillExecutionsByQueryResponse400 | workflowKillExecutionsByQueryResponse401 | workflowKillExecutionsByQueryResponse403 | workflowKillExecutionsByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type workflowKillExecutionsByQueryResponse = (workflowKillExecutionsByQueryResponseSuccess | workflowKillExecutionsByQueryResponseError)
+
+export const getWorkflowKillExecutionsByQueryUrl = (workspace: string,
+    params?: WorkflowKillExecutionsByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/kill/by-query?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/kill/by-query`
+}
+
+/**
+ * @summary Kill every execution a filter matches, all or none (package 7f).
+ */
+export const workflowKillExecutionsByQuery = async (workspace: string,
+    params?: WorkflowKillExecutionsByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowKillExecutionsByQueryResponse> => {
+
+  return customInstance<workflowKillExecutionsByQueryResponse>(getWorkflowKillExecutionsByQueryUrl(workspace,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowKillExecutionsByQueryMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowKillExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowKillExecutionsByQueryParams}, TContext> => {
+
+const mutationKey = ['workflowKillExecutionsByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowKillExecutionsByQuery>>, {workspace: string;params?: WorkflowKillExecutionsByQueryParams}> = (props) => {
+          const {workspace,params} = props ?? {};
+
+          return  workflowKillExecutionsByQuery(workspace,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowKillExecutionsByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowKillExecutionsByQuery>>>
+
+    export type WorkflowKillExecutionsByQueryMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Kill every execution a filter matches, all or none (package 7f).
+ */
+export const useWorkflowKillExecutionsByQuery = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowKillExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowKillExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowKillExecutionsByQuery>>,
+        TError,
+        {workspace: string;params?: WorkflowKillExecutionsByQueryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowKillExecutionsByQueryMutationOptions(options), queryClient);
+    }
+    export type workflowLabelsExecutionsByIdsResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowLabelsExecutionsByIdsResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowLabelsExecutionsByIdsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowLabelsExecutionsByIdsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowLabelsExecutionsByIdsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowLabelsExecutionsByIdsResponseSuccess = (workflowLabelsExecutionsByIdsResponse200) & {
+  headers: Headers;
+};
+export type workflowLabelsExecutionsByIdsResponseError = (workflowLabelsExecutionsByIdsResponse400 | workflowLabelsExecutionsByIdsResponse401 | workflowLabelsExecutionsByIdsResponse403 | workflowLabelsExecutionsByIdsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowLabelsExecutionsByIdsResponse = (workflowLabelsExecutionsByIdsResponseSuccess | workflowLabelsExecutionsByIdsResponseError)
+
+export const getWorkflowLabelsExecutionsByIdsUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/labels/by-ids`
+}
+
+/**
+ * @summary Replace the labels of several executions, all or none (package 7f).
+ */
+export const workflowLabelsExecutionsByIds = async (workspace: string,
+    bulkLabelsByIds: BulkLabelsByIds, options?: Parameters<typeof customInstance>[1]): Promise<workflowLabelsExecutionsByIdsResponse> => {
+
+  return customInstance<workflowLabelsExecutionsByIdsResponse>(getWorkflowLabelsExecutionsByIdsUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bulkLabelsByIds)
+  }
+);}
+
+
+
+
+
+export const getWorkflowLabelsExecutionsByIdsMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowLabelsExecutionsByIds>>, TError,{workspace: string;data: BulkLabelsByIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowLabelsExecutionsByIds>>, TError,{workspace: string;data: BulkLabelsByIds}, TContext> => {
+
+const mutationKey = ['workflowLabelsExecutionsByIds'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowLabelsExecutionsByIds>>, {workspace: string;data: BulkLabelsByIds}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowLabelsExecutionsByIds(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowLabelsExecutionsByIdsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowLabelsExecutionsByIds>>>
+    export type WorkflowLabelsExecutionsByIdsMutationBody = BulkLabelsByIds
+    export type WorkflowLabelsExecutionsByIdsMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Replace the labels of several executions, all or none (package 7f).
+ */
+export const useWorkflowLabelsExecutionsByIds = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowLabelsExecutionsByIds>>, TError,{workspace: string;data: BulkLabelsByIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowLabelsExecutionsByIds>>,
+        TError,
+        {workspace: string;data: BulkLabelsByIds},
+        TContext
+      > => {
+      return useMutation(getWorkflowLabelsExecutionsByIdsMutationOptions(options), queryClient);
+    }
+    export type workflowLabelsExecutionsByQueryResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowLabelsExecutionsByQueryResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowLabelsExecutionsByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowLabelsExecutionsByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowLabelsExecutionsByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowLabelsExecutionsByQueryResponseSuccess = (workflowLabelsExecutionsByQueryResponse200) & {
+  headers: Headers;
+};
+export type workflowLabelsExecutionsByQueryResponseError = (workflowLabelsExecutionsByQueryResponse400 | workflowLabelsExecutionsByQueryResponse401 | workflowLabelsExecutionsByQueryResponse403 | workflowLabelsExecutionsByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type workflowLabelsExecutionsByQueryResponse = (workflowLabelsExecutionsByQueryResponseSuccess | workflowLabelsExecutionsByQueryResponseError)
+
+export const getWorkflowLabelsExecutionsByQueryUrl = (workspace: string,
+    params?: WorkflowLabelsExecutionsByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/labels/by-query?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/labels/by-query`
+}
+
+/**
+ * @summary Replace the labels of every execution a filter matches, all or none (package 7f).
+ */
+export const workflowLabelsExecutionsByQuery = async (workspace: string,
+    labelDto: LabelDto[],
+    params?: WorkflowLabelsExecutionsByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowLabelsExecutionsByQueryResponse> => {
+
+  return customInstance<workflowLabelsExecutionsByQueryResponse>(getWorkflowLabelsExecutionsByQueryUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(labelDto)
+  }
+);}
+
+
+
+
+
+export const getWorkflowLabelsExecutionsByQueryMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowLabelsExecutionsByQuery>>, TError,{workspace: string;data: LabelDto[];params?: WorkflowLabelsExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowLabelsExecutionsByQuery>>, TError,{workspace: string;data: LabelDto[];params?: WorkflowLabelsExecutionsByQueryParams}, TContext> => {
+
+const mutationKey = ['workflowLabelsExecutionsByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowLabelsExecutionsByQuery>>, {workspace: string;data: LabelDto[];params?: WorkflowLabelsExecutionsByQueryParams}> = (props) => {
+          const {workspace,data,params} = props ?? {};
+
+          return  workflowLabelsExecutionsByQuery(workspace,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowLabelsExecutionsByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowLabelsExecutionsByQuery>>>
+    export type WorkflowLabelsExecutionsByQueryMutationBody = LabelDto[]
+    export type WorkflowLabelsExecutionsByQueryMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Replace the labels of every execution a filter matches, all or none (package 7f).
+ */
+export const useWorkflowLabelsExecutionsByQuery = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowLabelsExecutionsByQuery>>, TError,{workspace: string;data: LabelDto[];params?: WorkflowLabelsExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowLabelsExecutionsByQuery>>,
+        TError,
+        {workspace: string;data: LabelDto[];params?: WorkflowLabelsExecutionsByQueryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowLabelsExecutionsByQueryMutationOptions(options), queryClient);
+    }
+    export type workflowLatestExecutionsResponse200 = {
   data: LastExecutionDto[]
   status: 200
 }
@@ -930,7 +1831,898 @@ export function useWorkflowExecutionAverageDuration<TData = Awaited<ReturnType<t
 
 
 
-export type workflowGetExecutionResponse200 = {
+export type workflowPauseExecutionsByIdsResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowPauseExecutionsByIdsResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowPauseExecutionsByIdsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowPauseExecutionsByIdsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowPauseExecutionsByIdsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowPauseExecutionsByIdsResponseSuccess = (workflowPauseExecutionsByIdsResponse200) & {
+  headers: Headers;
+};
+export type workflowPauseExecutionsByIdsResponseError = (workflowPauseExecutionsByIdsResponse400 | workflowPauseExecutionsByIdsResponse401 | workflowPauseExecutionsByIdsResponse403 | workflowPauseExecutionsByIdsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowPauseExecutionsByIdsResponse = (workflowPauseExecutionsByIdsResponseSuccess | workflowPauseExecutionsByIdsResponseError)
+
+export const getWorkflowPauseExecutionsByIdsUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/pause/by-ids`
+}
+
+/**
+ * @summary Pause several running executions by hand, all or none (package 7f).
+ */
+export const workflowPauseExecutionsByIds = async (workspace: string,
+    bulkIds: BulkIds, options?: Parameters<typeof customInstance>[1]): Promise<workflowPauseExecutionsByIdsResponse> => {
+
+  return customInstance<workflowPauseExecutionsByIdsResponse>(getWorkflowPauseExecutionsByIdsUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bulkIds)
+  }
+);}
+
+
+
+
+
+export const getWorkflowPauseExecutionsByIdsMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecutionsByIds>>, TError,{workspace: string;data: BulkIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecutionsByIds>>, TError,{workspace: string;data: BulkIds}, TContext> => {
+
+const mutationKey = ['workflowPauseExecutionsByIds'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowPauseExecutionsByIds>>, {workspace: string;data: BulkIds}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowPauseExecutionsByIds(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowPauseExecutionsByIdsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowPauseExecutionsByIds>>>
+    export type WorkflowPauseExecutionsByIdsMutationBody = BulkIds
+    export type WorkflowPauseExecutionsByIdsMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Pause several running executions by hand, all or none (package 7f).
+ */
+export const useWorkflowPauseExecutionsByIds = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecutionsByIds>>, TError,{workspace: string;data: BulkIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowPauseExecutionsByIds>>,
+        TError,
+        {workspace: string;data: BulkIds},
+        TContext
+      > => {
+      return useMutation(getWorkflowPauseExecutionsByIdsMutationOptions(options), queryClient);
+    }
+    export type workflowPauseExecutionsByQueryResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowPauseExecutionsByQueryResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowPauseExecutionsByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowPauseExecutionsByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowPauseExecutionsByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowPauseExecutionsByQueryResponseSuccess = (workflowPauseExecutionsByQueryResponse200) & {
+  headers: Headers;
+};
+export type workflowPauseExecutionsByQueryResponseError = (workflowPauseExecutionsByQueryResponse400 | workflowPauseExecutionsByQueryResponse401 | workflowPauseExecutionsByQueryResponse403 | workflowPauseExecutionsByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type workflowPauseExecutionsByQueryResponse = (workflowPauseExecutionsByQueryResponseSuccess | workflowPauseExecutionsByQueryResponseError)
+
+export const getWorkflowPauseExecutionsByQueryUrl = (workspace: string,
+    params?: WorkflowPauseExecutionsByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/pause/by-query?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/pause/by-query`
+}
+
+/**
+ * @summary Pause every execution a filter matches, all or none (package 7f).
+ */
+export const workflowPauseExecutionsByQuery = async (workspace: string,
+    params?: WorkflowPauseExecutionsByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowPauseExecutionsByQueryResponse> => {
+
+  return customInstance<workflowPauseExecutionsByQueryResponse>(getWorkflowPauseExecutionsByQueryUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowPauseExecutionsByQueryMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowPauseExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowPauseExecutionsByQueryParams}, TContext> => {
+
+const mutationKey = ['workflowPauseExecutionsByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowPauseExecutionsByQuery>>, {workspace: string;params?: WorkflowPauseExecutionsByQueryParams}> = (props) => {
+          const {workspace,params} = props ?? {};
+
+          return  workflowPauseExecutionsByQuery(workspace,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowPauseExecutionsByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowPauseExecutionsByQuery>>>
+
+    export type WorkflowPauseExecutionsByQueryMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Pause every execution a filter matches, all or none (package 7f).
+ */
+export const useWorkflowPauseExecutionsByQuery = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowPauseExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowPauseExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowPauseExecutionsByQuery>>,
+        TError,
+        {workspace: string;params?: WorkflowPauseExecutionsByQueryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowPauseExecutionsByQueryMutationOptions(options), queryClient);
+    }
+    export type workflowReplayExecutionsByIdsResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowReplayExecutionsByIdsResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowReplayExecutionsByIdsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowReplayExecutionsByIdsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowReplayExecutionsByIdsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowReplayExecutionsByIdsResponseSuccess = (workflowReplayExecutionsByIdsResponse200) & {
+  headers: Headers;
+};
+export type workflowReplayExecutionsByIdsResponseError = (workflowReplayExecutionsByIdsResponse400 | workflowReplayExecutionsByIdsResponse401 | workflowReplayExecutionsByIdsResponse403 | workflowReplayExecutionsByIdsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowReplayExecutionsByIdsResponse = (workflowReplayExecutionsByIdsResponseSuccess | workflowReplayExecutionsByIdsResponseError)
+
+export const getWorkflowReplayExecutionsByIdsUrl = (workspace: string,
+    params?: WorkflowReplayExecutionsByIdsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/replay/by-ids?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/replay/by-ids`
+}
+
+/**
+ * @summary Replay several executions, all or none (package 7f; Kestra `POST /replay/by-ids`).
+ */
+export const workflowReplayExecutionsByIds = async (workspace: string,
+    bulkIds: BulkIds,
+    params?: WorkflowReplayExecutionsByIdsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowReplayExecutionsByIdsResponse> => {
+
+  return customInstance<workflowReplayExecutionsByIdsResponse>(getWorkflowReplayExecutionsByIdsUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bulkIds)
+  }
+);}
+
+
+
+
+
+export const getWorkflowReplayExecutionsByIdsMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowReplayExecutionsByIdsParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowReplayExecutionsByIdsParams}, TContext> => {
+
+const mutationKey = ['workflowReplayExecutionsByIds'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowReplayExecutionsByIds>>, {workspace: string;data: BulkIds;params?: WorkflowReplayExecutionsByIdsParams}> = (props) => {
+          const {workspace,data,params} = props ?? {};
+
+          return  workflowReplayExecutionsByIds(workspace,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowReplayExecutionsByIdsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowReplayExecutionsByIds>>>
+    export type WorkflowReplayExecutionsByIdsMutationBody = BulkIds
+    export type WorkflowReplayExecutionsByIdsMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Replay several executions, all or none (package 7f; Kestra `POST /replay/by-ids`).
+ */
+export const useWorkflowReplayExecutionsByIds = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowReplayExecutionsByIdsParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowReplayExecutionsByIds>>,
+        TError,
+        {workspace: string;data: BulkIds;params?: WorkflowReplayExecutionsByIdsParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowReplayExecutionsByIdsMutationOptions(options), queryClient);
+    }
+    export type workflowReplayExecutionsByQueryResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowReplayExecutionsByQueryResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowReplayExecutionsByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowReplayExecutionsByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowReplayExecutionsByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowReplayExecutionsByQueryResponseSuccess = (workflowReplayExecutionsByQueryResponse200) & {
+  headers: Headers;
+};
+export type workflowReplayExecutionsByQueryResponseError = (workflowReplayExecutionsByQueryResponse400 | workflowReplayExecutionsByQueryResponse401 | workflowReplayExecutionsByQueryResponse403 | workflowReplayExecutionsByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type workflowReplayExecutionsByQueryResponse = (workflowReplayExecutionsByQueryResponseSuccess | workflowReplayExecutionsByQueryResponseError)
+
+export const getWorkflowReplayExecutionsByQueryUrl = (workspace: string,
+    params?: WorkflowReplayExecutionsByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/replay/by-query?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/replay/by-query`
+}
+
+/**
+ * @summary Replay every execution a filter matches, all or none (package 7f).
+ */
+export const workflowReplayExecutionsByQuery = async (workspace: string,
+    params?: WorkflowReplayExecutionsByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowReplayExecutionsByQueryResponse> => {
+
+  return customInstance<workflowReplayExecutionsByQueryResponse>(getWorkflowReplayExecutionsByQueryUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowReplayExecutionsByQueryMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowReplayExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowReplayExecutionsByQueryParams}, TContext> => {
+
+const mutationKey = ['workflowReplayExecutionsByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowReplayExecutionsByQuery>>, {workspace: string;params?: WorkflowReplayExecutionsByQueryParams}> = (props) => {
+          const {workspace,params} = props ?? {};
+
+          return  workflowReplayExecutionsByQuery(workspace,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowReplayExecutionsByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowReplayExecutionsByQuery>>>
+
+    export type WorkflowReplayExecutionsByQueryMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Replay every execution a filter matches, all or none (package 7f).
+ */
+export const useWorkflowReplayExecutionsByQuery = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowReplayExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowReplayExecutionsByQuery>>,
+        TError,
+        {workspace: string;params?: WorkflowReplayExecutionsByQueryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowReplayExecutionsByQueryMutationOptions(options), queryClient);
+    }
+    export type workflowRestartExecutionsByIdsResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowRestartExecutionsByIdsResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowRestartExecutionsByIdsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowRestartExecutionsByIdsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowRestartExecutionsByIdsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowRestartExecutionsByIdsResponseSuccess = (workflowRestartExecutionsByIdsResponse200) & {
+  headers: Headers;
+};
+export type workflowRestartExecutionsByIdsResponseError = (workflowRestartExecutionsByIdsResponse400 | workflowRestartExecutionsByIdsResponse401 | workflowRestartExecutionsByIdsResponse403 | workflowRestartExecutionsByIdsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowRestartExecutionsByIdsResponse = (workflowRestartExecutionsByIdsResponseSuccess | workflowRestartExecutionsByIdsResponseError)
+
+export const getWorkflowRestartExecutionsByIdsUrl = (workspace: string,
+    params?: WorkflowRestartExecutionsByIdsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/restart/by-ids?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/restart/by-ids`
+}
+
+/**
+ * @summary Restart several executions, all or none (package 7f; Kestra `POST /restart/by-ids`).
+ */
+export const workflowRestartExecutionsByIds = async (workspace: string,
+    bulkIds: BulkIds,
+    params?: WorkflowRestartExecutionsByIdsParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowRestartExecutionsByIdsResponse> => {
+
+  return customInstance<workflowRestartExecutionsByIdsResponse>(getWorkflowRestartExecutionsByIdsUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bulkIds)
+  }
+);}
+
+
+
+
+
+export const getWorkflowRestartExecutionsByIdsMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowRestartExecutionsByIdsParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowRestartExecutionsByIdsParams}, TContext> => {
+
+const mutationKey = ['workflowRestartExecutionsByIds'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowRestartExecutionsByIds>>, {workspace: string;data: BulkIds;params?: WorkflowRestartExecutionsByIdsParams}> = (props) => {
+          const {workspace,data,params} = props ?? {};
+
+          return  workflowRestartExecutionsByIds(workspace,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowRestartExecutionsByIdsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowRestartExecutionsByIds>>>
+    export type WorkflowRestartExecutionsByIdsMutationBody = BulkIds
+    export type WorkflowRestartExecutionsByIdsMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Restart several executions, all or none (package 7f; Kestra `POST /restart/by-ids`).
+ */
+export const useWorkflowRestartExecutionsByIds = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecutionsByIds>>, TError,{workspace: string;data: BulkIds;params?: WorkflowRestartExecutionsByIdsParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowRestartExecutionsByIds>>,
+        TError,
+        {workspace: string;data: BulkIds;params?: WorkflowRestartExecutionsByIdsParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowRestartExecutionsByIdsMutationOptions(options), queryClient);
+    }
+    export type workflowRestartExecutionsByQueryResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowRestartExecutionsByQueryResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowRestartExecutionsByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowRestartExecutionsByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowRestartExecutionsByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowRestartExecutionsByQueryResponseSuccess = (workflowRestartExecutionsByQueryResponse200) & {
+  headers: Headers;
+};
+export type workflowRestartExecutionsByQueryResponseError = (workflowRestartExecutionsByQueryResponse400 | workflowRestartExecutionsByQueryResponse401 | workflowRestartExecutionsByQueryResponse403 | workflowRestartExecutionsByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type workflowRestartExecutionsByQueryResponse = (workflowRestartExecutionsByQueryResponseSuccess | workflowRestartExecutionsByQueryResponseError)
+
+export const getWorkflowRestartExecutionsByQueryUrl = (workspace: string,
+    params?: WorkflowRestartExecutionsByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/restart/by-query?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/restart/by-query`
+}
+
+/**
+ * @summary Restart every execution a filter matches, all or none (package 7f).
+ */
+export const workflowRestartExecutionsByQuery = async (workspace: string,
+    params?: WorkflowRestartExecutionsByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowRestartExecutionsByQueryResponse> => {
+
+  return customInstance<workflowRestartExecutionsByQueryResponse>(getWorkflowRestartExecutionsByQueryUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowRestartExecutionsByQueryMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowRestartExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowRestartExecutionsByQueryParams}, TContext> => {
+
+const mutationKey = ['workflowRestartExecutionsByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowRestartExecutionsByQuery>>, {workspace: string;params?: WorkflowRestartExecutionsByQueryParams}> = (props) => {
+          const {workspace,params} = props ?? {};
+
+          return  workflowRestartExecutionsByQuery(workspace,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowRestartExecutionsByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowRestartExecutionsByQuery>>>
+
+    export type WorkflowRestartExecutionsByQueryMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Restart every execution a filter matches, all or none (package 7f).
+ */
+export const useWorkflowRestartExecutionsByQuery = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowRestartExecutionsByQuery>>, TError,{workspace: string;params?: WorkflowRestartExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowRestartExecutionsByQuery>>,
+        TError,
+        {workspace: string;params?: WorkflowRestartExecutionsByQueryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowRestartExecutionsByQueryMutationOptions(options), queryClient);
+    }
+    export type workflowResumeExecutionsByIdsResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowResumeExecutionsByIdsResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowResumeExecutionsByIdsResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowResumeExecutionsByIdsResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowResumeExecutionsByIdsResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowResumeExecutionsByIdsResponseSuccess = (workflowResumeExecutionsByIdsResponse200) & {
+  headers: Headers;
+};
+export type workflowResumeExecutionsByIdsResponseError = (workflowResumeExecutionsByIdsResponse400 | workflowResumeExecutionsByIdsResponse401 | workflowResumeExecutionsByIdsResponse403 | workflowResumeExecutionsByIdsResponse500) & {
+  headers: Headers;
+};
+
+export type workflowResumeExecutionsByIdsResponse = (workflowResumeExecutionsByIdsResponseSuccess | workflowResumeExecutionsByIdsResponseError)
+
+export const getWorkflowResumeExecutionsByIdsUrl = (workspace: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/resume/by-ids`
+}
+
+/**
+ * @summary Resume several paused executions, all or none (package 7f).
+ */
+export const workflowResumeExecutionsByIds = async (workspace: string,
+    bulkResumeByIds: BulkResumeByIds, options?: Parameters<typeof customInstance>[1]): Promise<workflowResumeExecutionsByIdsResponse> => {
+
+  return customInstance<workflowResumeExecutionsByIdsResponse>(getWorkflowResumeExecutionsByIdsUrl(workspace),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(bulkResumeByIds)
+  }
+);}
+
+
+
+
+
+export const getWorkflowResumeExecutionsByIdsMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecutionsByIds>>, TError,{workspace: string;data: BulkResumeByIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecutionsByIds>>, TError,{workspace: string;data: BulkResumeByIds}, TContext> => {
+
+const mutationKey = ['workflowResumeExecutionsByIds'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowResumeExecutionsByIds>>, {workspace: string;data: BulkResumeByIds}> = (props) => {
+          const {workspace,data} = props ?? {};
+
+          return  workflowResumeExecutionsByIds(workspace,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowResumeExecutionsByIdsMutationResult = NonNullable<Awaited<ReturnType<typeof workflowResumeExecutionsByIds>>>
+    export type WorkflowResumeExecutionsByIdsMutationBody = BulkResumeByIds
+    export type WorkflowResumeExecutionsByIdsMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Resume several paused executions, all or none (package 7f).
+ */
+export const useWorkflowResumeExecutionsByIds = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecutionsByIds>>, TError,{workspace: string;data: BulkResumeByIds}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowResumeExecutionsByIds>>,
+        TError,
+        {workspace: string;data: BulkResumeByIds},
+        TContext
+      > => {
+      return useMutation(getWorkflowResumeExecutionsByIdsMutationOptions(options), queryClient);
+    }
+    export type workflowResumeExecutionsByQueryResponse200 = {
+  data: BulkResponse
+  status: 200
+}
+
+export type workflowResumeExecutionsByQueryResponse400 = {
+  data: BulkErrorResponse
+  status: 400
+}
+
+export type workflowResumeExecutionsByQueryResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowResumeExecutionsByQueryResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowResumeExecutionsByQueryResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowResumeExecutionsByQueryResponseSuccess = (workflowResumeExecutionsByQueryResponse200) & {
+  headers: Headers;
+};
+export type workflowResumeExecutionsByQueryResponseError = (workflowResumeExecutionsByQueryResponse400 | workflowResumeExecutionsByQueryResponse401 | workflowResumeExecutionsByQueryResponse403 | workflowResumeExecutionsByQueryResponse500) & {
+  headers: Headers;
+};
+
+export type workflowResumeExecutionsByQueryResponse = (workflowResumeExecutionsByQueryResponseSuccess | workflowResumeExecutionsByQueryResponseError)
+
+export const getWorkflowResumeExecutionsByQueryUrl = (workspace: string,
+    params?: WorkflowResumeExecutionsByQueryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/resume/by-query?${stringifiedParams}` : `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/resume/by-query`
+}
+
+/**
+ * @summary Resume every execution a filter matches, all or none (package 7f).
+ */
+export const workflowResumeExecutionsByQuery = async (workspace: string,
+    startExecutionRequest: StartExecutionRequest,
+    params?: WorkflowResumeExecutionsByQueryParams, options?: Parameters<typeof customInstance>[1]): Promise<workflowResumeExecutionsByQueryResponse> => {
+
+  return customInstance<workflowResumeExecutionsByQueryResponse>(getWorkflowResumeExecutionsByQueryUrl(workspace,params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(startExecutionRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowResumeExecutionsByQueryMutationOptions = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecutionsByQuery>>, TError,{workspace: string;data: StartExecutionRequest;params?: WorkflowResumeExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecutionsByQuery>>, TError,{workspace: string;data: StartExecutionRequest;params?: WorkflowResumeExecutionsByQueryParams}, TContext> => {
+
+const mutationKey = ['workflowResumeExecutionsByQuery'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowResumeExecutionsByQuery>>, {workspace: string;data: StartExecutionRequest;params?: WorkflowResumeExecutionsByQueryParams}> = (props) => {
+          const {workspace,data,params} = props ?? {};
+
+          return  workflowResumeExecutionsByQuery(workspace,data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowResumeExecutionsByQueryMutationResult = NonNullable<Awaited<ReturnType<typeof workflowResumeExecutionsByQuery>>>
+    export type WorkflowResumeExecutionsByQueryMutationBody = StartExecutionRequest
+    export type WorkflowResumeExecutionsByQueryMutationError = BulkErrorResponse | ErrorBody
+
+    /**
+ * @summary Resume every execution a filter matches, all or none (package 7f).
+ */
+export const useWorkflowResumeExecutionsByQuery = <TError = BulkErrorResponse | ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecutionsByQuery>>, TError,{workspace: string;data: StartExecutionRequest;params?: WorkflowResumeExecutionsByQueryParams}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowResumeExecutionsByQuery>>,
+        TError,
+        {workspace: string;data: StartExecutionRequest;params?: WorkflowResumeExecutionsByQueryParams},
+        TContext
+      > => {
+      return useMutation(getWorkflowResumeExecutionsByQueryMutationOptions(options), queryClient);
+    }
+    export type workflowGetExecutionResponse200 = {
   data: ExecutionDto
   status: 200
 }
