@@ -813,15 +813,16 @@ pub fn lower_rule(
 
 /// The capability whose image gate (`matrix::Entry::min_egret_image`) decides
 /// whether `r` can be enforced on a StarRocks EP: its mask type, or the
-/// classification selector of a tag rule. `None` for a rule the gate never
-/// touches (a path row filter).
+/// row-filter classification selector. A row filter is image-gated whether it
+/// is tag- or path-selected — both lower through the same StarRocks row-filter
+/// capability — so a path row filter below the enabling image is a deny, not an
+/// ungated passthrough (#855).
 fn image_gated_capability(r: &Rule) -> Option<Capability> {
-    match (&r.kind, &r.selector) {
-        (RuleKind::Mask { mask_type, .. }, _) => Some(Capability::MaskType(mask_type.clone())),
-        (RuleKind::RowFilter { .. }, Selector::Tag { .. }) => Some(
-            Capability::ClassificationSelector(RuleEffectKind::RowFilter),
-        ),
-        (RuleKind::RowFilter { .. }, Selector::Path(_)) => None,
+    match &r.kind {
+        RuleKind::Mask { mask_type, .. } => Some(Capability::MaskType(mask_type.clone())),
+        RuleKind::RowFilter { .. } => Some(Capability::ClassificationSelector(
+            RuleEffectKind::RowFilter,
+        )),
     }
 }
 
@@ -1356,5 +1357,61 @@ mod tests {
             assert_eq!(s[0].derivation, Derivation::AsDeclared);
         }
         assert!(matches!(run(Some(3))[0].effect, Effect::Mask { .. }));
+    }
+
+    /// #855: a StarRocks path-selected row filter below the enabling image level
+    /// denies its table — like a path mask and a tag row filter — instead of
+    /// lowering ungated.
+    #[test]
+    fn a_path_row_filter_below_the_image_level_denies_its_table() {
+        let r = Rule {
+            id: Uuid::from_u128(10),
+            name: "pf".into(),
+            kind: RuleKind::RowFilter {
+                filter_expr: "region = 'us'".into(),
+            },
+            selector: Selector::Path(egret_perm::Scope {
+                catalog_id: Uuid::from_u128(1),
+                schema: Some("s".into()),
+                table: Some("t".into()),
+                column: None,
+            }),
+            exempt: PrincipalSet::default(),
+        };
+        let run = |level| {
+            lower_rule(
+                &r,
+                &audience_from_expanded(&r.exempt),
+                starrocks(),
+                level,
+                false,
+                "c",
+                &RuleInputs::default(),
+                500,
+                &Always,
+            )
+            .unwrap()
+        };
+        for below in [Some(2), None] {
+            let s = run(below);
+            assert_eq!(s.len(), 1, "{below:?}");
+            assert!(
+                matches!(s[0].effect, Effect::Withhold { .. }),
+                "below {below:?} must deny"
+            );
+            assert_eq!(s[0].derivation, Derivation::AsDeclared);
+            assert!(
+                matches!(&s[0].target, Target::Path(p) if p.column == Level::Unnamed),
+                "a row-filter deny targets the whole table"
+            );
+        }
+        // At the enabling level it lowers as a real row filter, not a deny.
+        let at = run(Some(3));
+        assert!(!at.is_empty());
+        assert!(
+            at.iter()
+                .all(|st| !matches!(st.effect, Effect::Withhold { .. })),
+            "egret.3 enforces the row filter"
+        );
     }
 }
