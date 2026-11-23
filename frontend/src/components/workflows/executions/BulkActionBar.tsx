@@ -242,6 +242,9 @@ export function BulkActionBar({
   );
 }
 
+/** A by-query refusal can name thousands of ids; the list shows this many and scrolls. */
+const MAX_LISTED_INVALIDS = 50;
+
 /** Which ids the server refused and why, and that nothing was applied (the routes are all or none). */
 function FailureAlert({ failure }: { failure: Failure }) {
   return (
@@ -251,13 +254,16 @@ function FailureAlert({ failure }: { failure: Failure }) {
         {failure.invalids.length > 0 ? (
           <>
             <p className="mt-1">Nothing was changed. Remove these executions from the selection, or fix what blocks them, and try again.</p>
-            <ul role="list" className="mt-1 grid gap-0.5">
-              {failure.invalids.map((i) => (
+            <ul role="list" className="mt-1 grid max-h-48 gap-0.5 overflow-auto">
+              {failure.invalids.slice(0, MAX_LISTED_INVALIDS).map((i) => (
                 <li key={i.id} className="flex flex-wrap gap-x-2">
                   <span className="font-mono text-xs">{i.id}</span>
                   <span>{i.reason}</span>
                 </li>
               ))}
+              {failure.invalids.length > MAX_LISTED_INVALIDS ? (
+                <li className="tabular-nums">{`and ${failure.invalids.length - MAX_LISTED_INVALIDS} more`}</li>
+              ) : null}
             </ul>
           </>
         ) : null}

@@ -362,7 +362,7 @@ export default function ExecutionsList({
         </div>
         {selected.size > 0 ? (
           <>
-            <SelectAllBanner page={page} selected={selected.size} allMatching={allMatching} onAll={() => setAllMatching(true)} onClear={clearSelection} />
+            <SelectAllBanner page={page} selected={selected.size} pageFull={pageChecked(page.rows, selected) === true} allMatching={allMatching} onAll={() => setAllMatching(true)} onClear={clearSelection} />
             <BulkActionBar
               ws={ws}
               rows={[...selected.values()]}
@@ -547,12 +547,15 @@ function pageChecked(rows: ExecutionListItemDto[], selected: Map<string, Executi
 function SelectAllBanner({
   page,
   selected,
+  pageFull,
   allMatching,
   onAll,
   onClear,
 }: {
   page: ListPage;
   selected: number;
+  /** Every row of the CURRENT page is chosen (the header checkbox's basis, not the cross-page count). */
+  pageFull: boolean;
   allMatching: boolean;
   onAll: () => void;
   onClear: () => void;
@@ -567,7 +570,6 @@ function SelectAllBanner({
       </div>
     );
   }
-  const pageFull = page.rows.length > 0 && selected >= page.rows.length;
   if (!pageFull || page.total <= selected) return null;
   return (
     <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
