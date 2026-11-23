@@ -138,7 +138,8 @@ export function LogView({
   // If the stream fails, the timer polling carries on (7e #3).
   const [nudge, setNudge] = useState(0);
   const stream = useEventSourceFollow<unknown>(getWorkflowFollowExecutionLogsUrl(ws, executionId), {
-    enabled: true,
+    // Not for an execution that has ended: its log is read to the end by the cursor alone.
+    enabled: endedAt == null,
     onEvent: () => setNudge((n) => n + 1),
   });
   const follow = useLogFollow(ws, executionId, filters, { pageSize, windowLines, endedAt, live: stream.live, nudge });

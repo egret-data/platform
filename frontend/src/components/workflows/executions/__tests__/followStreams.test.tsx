@@ -94,8 +94,11 @@ describe("following the execution by EventSource", () => {
     renderAt("logs");
     await screen.findByTestId("execution-summary");
     await waitFor(() => expect(stream(`/executions/${EXEC}/follow`)).toBeDefined());
+    const before = executionReads;
     act(() => stream(`/executions/${EXEC}/follow`)!.onmessage!({ data: JSON.stringify({ ...execution, state: "WARNING", history: ["CREATED", "RUNNING", "WARNING"] }) }));
     expect(await screen.findByText(/warning/i)).toBeInTheDocument();
+    // A push is the answer: no read of the execution follows it.
+    expect(executionReads).toBe(before);
   });
 
   it("falls back to polling the execution when the stream fails", async () => {
@@ -105,6 +108,22 @@ describe("following the execution by EventSource", () => {
     const before = executionReads;
     act(() => stream(`/executions/${EXEC}/follow`)!.onerror!());
     await waitFor(() => expect(executionReads).toBeGreaterThan(before));
+  });
+});
+
+describe("a finished execution", () => {
+  it("opens no stream and reads the execution once", async () => {
+    server.others.set(EXEC_PATH, {
+      status: 200,
+      body: { ...execution, state: "SUCCESS", history: ["CREATED", "RUNNING", "SUCCESS"], ended_at: "2026-10-10T10:01:00.000001Z", idle: true },
+    });
+    server.state = "SUCCESS";
+    server.complete = true;
+    renderAt("logs");
+    await screen.findByTestId("execution-summary");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(FakeEventSource.all).toHaveLength(0);
+    expect(executionReads).toBe(1);
   });
 });
 

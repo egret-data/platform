@@ -129,15 +129,19 @@ function ExecutionLoader({ ws, id, tab }: { ws: string; id: string; tab: Executi
   });
   const execution = query.data?.status === 200 ? query.data.data : undefined;
   const stream = useEventSourceFollow<ExecutionDto>(getWorkflowFollowExecutionUrl(ws, id), {
-    enabled: execution === undefined || !isTerminalState(execution.state),
+    // Only for a loaded run that is still going: a finished one has nothing to follow.
+    enabled: execution !== undefined && !isTerminalState(execution.state),
     onEvent: (dto) =>
       queryClient.setQueryData(workflowsKeys.execution(id), { status: 200, data: dto, headers: new Headers() }),
   });
   useEffect(() => {
     streamLive.current = stream.live;
-    // A stream that just failed leaves the timer unarmed: read now, and the polling carries on.
-    if (!stream.live) void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(id) });
-  }, [stream.live, queryClient, id]);
+  }, [stream.live]);
+  // A stream that failed or ended while the run still goes leaves the timer unarmed: read now,
+  // and the polling carries on. Never on load, and never for a run that finished.
+  useEffect(() => {
+    if (stream.fallback) void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(id) });
+  }, [stream.fallback, queryClient, id]);
   const listHref = `/explore/${ws}/workflows/executions`;
 
   // Error first (FE-STATE-1), while nothing has loaded; a failed poll keeps the last answer on screen.

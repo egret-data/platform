@@ -1,4 +1,4 @@
-import { useId, useMemo, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { LocalDateTimeField } from "@/components/ui/date-time-picker";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
@@ -142,9 +142,14 @@ export default function ExecutionsList({
   const namespaces = namespacesQuery.data?.status === 200 ? namespacesQuery.data.data : [];
   const flowNamespace = pinnedNamespace ?? filters.namespace;
   const flowKeysQuery = useWorkflowListExecutionNamespaceFlows(ws, flowNamespace, {
-    query: { queryKey: workflowsKeys.executionFlows(ws, flowNamespace), enabled: !flowPinned && flowNamespace !== "" },
+    // A namespace's own tab takes its keys from the executions it has loaded (below): the distinct
+    // endpoint answers for the exact namespace only, and that tab includes the child namespaces.
+    query: {
+      queryKey: workflowsKeys.executionFlows(ws, flowNamespace),
+      enabled: !flowPinned && !namespacePinned && flowNamespace !== "",
+    },
   });
-  const flowKeys = flowKeysQuery.data?.status === 200 ? flowKeysQuery.data.data : [];
+  const endpointFlowKeys = flowKeysQuery.data?.status === 200 ? flowKeysQuery.data.data : [];
 
   const query = useQuery({
     queryKey: workflowsKeys.executions(ws, {
@@ -160,11 +165,24 @@ export default function ExecutionsList({
     refetchIntervalInBackground: false,
   });
   const page = query.data;
+  // The distinct flow keys of every page this tab has loaded, kept across filters so that picking
+  // a flow does not narrow the picker to it.
+  const [seen, setSeen] = useState<{ from: ListPage | undefined; keys: string[] }>({ from: undefined, keys: [] });
+  if (namespacePinned && page && seen.from !== page) {
+    // Adjusted during render, the pattern React documents for state derived from a changed value.
+    const keys = new Set(seen.keys);
+    for (const r of page.rows) keys.add(r.flow_key);
+    setSeen({ from: page, keys: [...keys].sort() });
+  }
+  const seenKeys = seen.keys;
+  const flowKeys = namespacePinned ? seenKeys : endpointFlowKeys;
   const now = useNow();
   // The CSV carries the list's filters, not its page; a time preset's window ends at the clock's tick.
-  const { limit: _limit, offset: _offset, ...exportParams } = toQueryParams(filters, now, { pinnedFlowId, pinnedNamespace });
-  const exportHref = getWorkflowExportExecutionsCsvUrl(ws, exportParams as WorkflowExportExecutionsCsvParams);
-
+  const exportParams: WorkflowExportExecutionsCsvParams = toQueryParams(filters, now, { pinnedFlowId, pinnedNamespace });
+  // The export takes no paging: a page's `limit` and `offset` are dropped.
+  delete (exportParams as { limit?: number }).limit;
+  delete (exportParams as { offset?: number }).offset;
+  const exportHref = getWorkflowExportExecutionsCsvUrl(ws, exportParams);
 
   const refresh = (
     <>
