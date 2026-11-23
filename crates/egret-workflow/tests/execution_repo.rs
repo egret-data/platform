@@ -917,3 +917,165 @@ async fn a_tie_on_created_at_is_broken_by_id_so_a_pager_cannot_repeat_a_row() {
          has, or a pager repeats one row and never shows another"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 7e read methods: distinct, average duration, latest per flow, export cursor.
+// ---------------------------------------------------------------------------
+
+/// Stamp the real start/end columns (`0183`); the insert helper leaves both NULL.
+async fn set_times(db: &Db, id: Uuid, started: DateTime<Utc>, ended: DateTime<Utc>) {
+    sqlx::query("UPDATE workflow.executions SET started_at = $2, ended_at = $3 WHERE id = $1")
+        .bind(id)
+        .bind(started)
+        .bind(ended)
+        .execute(&db.pool)
+        .await
+        .expect("stamp times");
+}
+
+#[tokio::test]
+async fn distinct_namespaces_and_flows_are_workspace_scoped_and_ordered() {
+    let Some(db) = common::db().await else { return };
+    let (ws_a, _) = common::seed_workspace(&db).await;
+    let (ws_b, _) = common::seed_workspace(&db).await;
+    for (ws, ns, key) in [
+        (ws_a, "ns2", "z"),
+        (ws_a, "ns1", "b"),
+        (ws_a, "ns1", "a"),
+        (ws_a, "ns1", "a"),
+        (ws_b, "other", "x"),
+    ] {
+        let e = Exec {
+            namespace: ns,
+            flow_key: key,
+            ..Exec::default()
+        };
+        insert_execution(&db, ws, &e).await;
+    }
+    let repo = ExecutionRepo::new(db.clone());
+    assert_eq!(
+        repo.distinct_namespaces(ws_a).await.unwrap(),
+        vec!["ns1", "ns2"]
+    );
+    assert_eq!(
+        repo.distinct_flows(ws_a, "ns1").await.unwrap(),
+        vec!["a", "b"]
+    );
+    assert!(repo.distinct_flows(ws_a, "other").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn average_duration_is_null_without_a_terminated_run_and_weighted_with_them() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let repo = ExecutionRepo::new(db.clone());
+    let now = Utc::now();
+
+    // No terminal execution yet: a running one only.
+    let running = Exec {
+        flow_key: "f",
+        created_at: now,
+        ..Exec::default()
+    };
+    insert_execution(&db, ws, &running).await;
+    let none = repo.average_duration(ws, "a.b", "f").await.unwrap();
+    assert_eq!((none.avg_duration_ms, none.count), (None, 0));
+
+    // Two in-window terminal runs: 2s and 4s -> mean 3000 ms.
+    for secs in [2, 4] {
+        let e = Exec {
+            state: "SUCCESS",
+            created_at: now,
+            ..Exec::default()
+        };
+        let id = insert_execution(&db, ws, &e).await;
+        set_times(&db, id, now, now + chrono::Duration::seconds(secs)).await;
+    }
+    // One terminal run older than 30 days: excluded.
+    let old_at = now - chrono::Duration::days(40);
+    let old = Exec {
+        state: "SUCCESS",
+        created_at: old_at,
+        ..Exec::default()
+    };
+    let id = insert_execution(&db, ws, &old).await;
+    set_times(&db, id, old_at, old_at + chrono::Duration::seconds(100)).await;
+
+    let got = repo.average_duration(ws, "a.b", "f").await.unwrap();
+    assert_eq!((got.avg_duration_ms, got.count), (Some(3000), 2));
+}
+
+#[tokio::test]
+async fn latest_per_flow_returns_the_newest_per_flow_and_omits_flows_with_none() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let t = |d| Utc.with_ymd_and_hms(2026, 1, d, 0, 0, 0).unwrap();
+    let mk = |key, d| Exec {
+        flow_key: key,
+        created_at: t(d),
+        ..Exec::default()
+    };
+    insert_execution(&db, ws, &mk("x", 1)).await;
+    let x_new = insert_execution(&db, ws, &mk("x", 2)).await;
+    let y = insert_execution(&db, ws, &mk("y", 1)).await;
+    let repo = ExecutionRepo::new(db.clone());
+
+    let flows: Vec<(String, String)> = ["x", "y", "z"]
+        .iter()
+        .map(|k| ("a.b".to_string(), k.to_string()))
+        .collect();
+    let mut got = repo.latest_per_flow(ws, &flows).await.unwrap();
+    got.sort_by(|a, b| a.flow_id.cmp(&b.flow_id));
+    assert_eq!(got.len(), 2);
+    assert_eq!((got[0].flow_id.as_str(), got[0].id), ("x", x_new));
+    assert_eq!((got[1].flow_id.as_str(), got[1].id), ("y", y));
+    assert_eq!(got[0].status, "RUNNING");
+    assert!(repo.latest_per_flow(ws, &[]).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn export_cursor_streams_every_matching_row() {
+    use futures_util::TryStreamExt;
+    let Some(db) = common::db().await else { return };
+    let (ws, _) = common::seed_workspace(&db).await;
+    let (other, _) = common::seed_workspace(&db).await;
+    for d in 1..=4 {
+        let e = Exec {
+            state: if d % 2 == 0 { "FAILED" } else { "SUCCESS" },
+            created_at: Utc.with_ymd_and_hms(2026, 1, d, 0, 0, 0).unwrap(),
+            ..Exec::default()
+        };
+        insert_execution(&db, ws, &e).await;
+    }
+    insert_execution(
+        &db,
+        other,
+        &Exec {
+            state: "FAILED",
+            ..Exec::default()
+        },
+    )
+    .await;
+    let repo = ExecutionRepo::new(db.clone());
+
+    let filter = ExecutionFilter {
+        states: Some(vec!["FAILED".into()]),
+        ..Default::default()
+    };
+    let rows: Vec<_> = repo.export_cursor(ws, &filter).try_collect().await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].created_at > rows[1].created_at, "newest first");
+    let listed = repo
+        .list(
+            ws,
+            &filter,
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let ids = |r: &[egret_workflow::repo::ExecutionRow]| r.iter().map(|x| x.id).collect::<Vec<_>>();
+    assert_eq!(ids(&rows), ids(&listed.rows));
+}

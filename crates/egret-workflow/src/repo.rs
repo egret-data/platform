@@ -1282,6 +1282,33 @@ const LIST_SQL: &str = concat!(
 #[doc(hidden)]
 pub const EXECUTION_LIST_SQL: &str = LIST_SQL;
 
+/// [`ExecutionRepo::average_duration`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvgDuration {
+    pub avg_duration_ms: Option<i64>,
+    pub count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct LatestRow {
+    id: Uuid,
+    flow_key: String,
+    namespace: String,
+    started_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    state: String,
+}
+
+/// One flow's newest execution, from [`ExecutionRepo::latest_per_flow`].
+#[derive(Debug, Clone)]
+pub struct LastExecution {
+    pub id: Uuid,
+    pub flow_id: String,
+    pub namespace: String,
+    pub start_date: DateTime<Utc>,
+    pub status: String,
+}
+
 /// The window [`ExecutionRepo::list`] returns, in rows.
 #[derive(Debug, Clone, Copy)]
 pub struct Page {
@@ -1440,6 +1467,133 @@ impl ExecutionRepo {
             .map_err(db_err)?;
 
         Ok(ExecutionPage { rows, total })
+    }
+
+    /// Every namespace `ws` has an execution in, sorted and deduplicated.
+    pub async fn distinct_namespaces(&self, ws: Uuid) -> Result<Vec<String>> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT namespace FROM workflow.executions \
+             WHERE workspace_id = $1 ORDER BY namespace",
+        )
+        .bind(ws)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
+    /// Every flow id (the YAML `id`, stored as `flow_key`; the `flow_id` column
+    /// is the draft's uuid) `ws` has an execution of in `namespace`, sorted and
+    /// deduplicated.
+    pub async fn distinct_flows(&self, ws: Uuid, namespace: &str) -> Result<Vec<String>> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT flow_key FROM workflow.executions \
+             WHERE workspace_id = $1 AND namespace = $2 ORDER BY flow_key",
+        )
+        .bind(ws)
+        .bind(namespace)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)
+    }
+
+    /// Mean wall-clock duration (`ended_at - started_at`) of a flow's
+    /// terminated executions created in the last 30 days. `avg_duration_ms`
+    /// is `None` when `count` is 0.
+    pub async fn average_duration(
+        &self,
+        ws: Uuid,
+        namespace: &str,
+        flow_id: &str,
+    ) -> Result<AvgDuration> {
+        let (avg_ms, count): (Option<i64>, i64) = sqlx::query_as(
+            "SELECT (EXTRACT(EPOCH FROM AVG(ended_at - started_at)) * 1000)::bigint, \
+                    COUNT(*) \
+             FROM workflow.executions \
+             WHERE workspace_id = $1 AND namespace = $2 AND flow_key = $3 \
+               AND workflow.state_is_terminal(state) \
+               AND started_at IS NOT NULL AND ended_at IS NOT NULL \
+               AND created_at >= now() - interval '30 days'",
+        )
+        .bind(ws)
+        .bind(namespace)
+        .bind(flow_id)
+        .fetch_one(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(AvgDuration {
+            avg_duration_ms: if count == 0 { None } else { avg_ms },
+            count,
+        })
+    }
+
+    /// The newest execution of each `(namespace, flow_id)` pair in `flows`;
+    /// a pair with no execution is absent. Empty input runs no query.
+    pub async fn latest_per_flow(
+        &self,
+        ws: Uuid,
+        flows: &[(String, String)],
+    ) -> Result<Vec<LastExecution>> {
+        if flows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let namespaces: Vec<String> = flows.iter().map(|(n, _)| n.clone()).collect();
+        let flow_ids: Vec<String> = flows.iter().map(|(_, f)| f.clone()).collect();
+        let rows: Vec<LatestRow> = sqlx::query_as(
+            "SELECT DISTINCT ON (namespace, flow_key) \
+                        id, flow_key, namespace, started_at, created_at, state \
+                 FROM workflow.executions \
+                 WHERE workspace_id = $1 \
+                   AND (namespace, flow_key) IN \
+                       (SELECT * FROM unnest($2::text[], $3::text[])) \
+                 ORDER BY namespace, flow_key, created_at DESC, id DESC",
+        )
+        .bind(ws)
+        .bind(&namespaces)
+        .bind(&flow_ids)
+        .fetch_all(&self.db.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| LastExecution {
+                id: r.id,
+                flow_id: r.flow_key,
+                namespace: r.namespace,
+                // `started_at` is NULL for a run that never reached RUNNING;
+                // `created_at` is then the only start there is.
+                start_date: r.started_at.unwrap_or(r.created_at),
+                status: r.state,
+            })
+            .collect())
+    }
+
+    /// Every execution matching `filter`, newest first, as a row stream --
+    /// [`Self::list`]'s statement without `LIMIT`/`OFFSET`, so an export
+    /// never holds the whole set in memory.
+    pub fn export_cursor(
+        &self,
+        ws: Uuid,
+        filter: &ExecutionFilter,
+    ) -> impl futures_util::Stream<Item = Result<ExecutionRow>> + '_ {
+        use futures_util::StreamExt;
+        sqlx::query_as(concat!(
+            "SELECT ",
+            execution_cols!(),
+            execution_list_where!(),
+            " ORDER BY created_at DESC, id DESC"
+        ))
+        .bind(ws)
+        .bind(filter.flow_id)
+        .bind(filter.namespace.clone())
+        .bind(filter.flow_key.clone())
+        .bind(filter.states.clone())
+        .bind(filter.since)
+        .bind(filter.until)
+        .bind(filter.root_only)
+        .bind(filter.parent)
+        .bind(filter.namespace_prefix.clone())
+        .fetch(&self.db.pool)
+        .map(|r| r.map_err(db_err))
     }
 
     /// One execution in `ws`, with its frozen source and every task run.
