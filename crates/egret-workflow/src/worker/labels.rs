@@ -29,6 +29,33 @@ pub enum LabelsRefused {
     Invalid(String),
 }
 
+/// What a labels edit needs of an execution, as a pure function of what was
+/// read: it is idle, and `body` breaks none of D5's rules against the labels it
+/// shows. Returns the visible labels. The write and the bulk pre-flight
+/// (`routes::labels_check`) BOTH call this, so they cannot drift.
+pub fn labels_precondition(
+    state: &str,
+    idle: bool,
+    source: &str,
+    own_json: Option<&serde_json::Value>,
+    labels_replaced: bool,
+    body: &[Label],
+) -> std::result::Result<Vec<Label>, LabelsRefused> {
+    if !idle {
+        return Err(LabelsRefused::NotIdle(state.to_string()));
+    }
+    // A frozen source that no longer parses contributes no flow labels.
+    let flow_labels = crate::spec::parse(source)
+        .map(|f| f.labels)
+        .unwrap_or_default();
+    let own = own_labels(own_json);
+    let visible = visible_labels(&flow_labels, &own, labels_replaced);
+    match edit_labels_refusal(body, &visible) {
+        Some(why) => Err(LabelsRefused::Invalid(why)),
+        None => Ok(visible),
+    }
+}
+
 /// `Err(NotFound)` for a missing or foreign id.
 pub async fn set_execution_labels(
     pool: &PgPool,
@@ -55,18 +82,18 @@ pub async fn set_execution_labels(
         .fetch_one(&mut *tx)
         .await
         .map_err(db_err)?;
-    if !idle {
-        return Ok(Err(LabelsRefused::NotIdle(row.get("state"))));
-    }
-    // A frozen source that no longer parses contributes no flow labels.
-    let flow_labels = crate::spec::parse(row.get::<&str, _>("source"))
-        .map(|f| f.labels)
-        .unwrap_or_default();
-    let own = own_labels(row.get::<Option<serde_json::Value>, _>("labels").as_ref());
-    let visible = visible_labels(&flow_labels, &own, row.get("labels_replaced"));
-    if let Some(why) = edit_labels_refusal(body, &visible) {
-        return Ok(Err(LabelsRefused::Invalid(why)));
-    }
+    let state: String = row.get("state");
+    let visible = match labels_precondition(
+        &state,
+        idle,
+        row.get::<&str, _>("source"),
+        row.get::<Option<serde_json::Value>, _>("labels").as_ref(),
+        row.get("labels_replaced"),
+        body,
+    ) {
+        Ok(v) => v,
+        Err(refused) => return Ok(Err(refused)),
+    };
     let stored = merge_system_labels(body, &visible);
     sqlx::query("UPDATE workflow.executions SET labels = $2, labels_replaced = true WHERE id = $1 AND workspace_id = $3")
         .bind(id)

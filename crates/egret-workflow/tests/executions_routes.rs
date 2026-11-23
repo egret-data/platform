@@ -4831,3 +4831,111 @@ async fn labels_bulk_needs_workflow_manage() {
     assert_eq!(by_query.status(), 403);
     assert_eq!(stored_labels(&db, id).await, before);
 }
+
+async fn bulk_labels_400(
+    app: &common::App,
+    ws: Uuid,
+    user: egret_core::UserId,
+    body: Value,
+) -> Value {
+    let res = common::post(
+        app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-ids"),
+        user,
+        body,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    common::json(res).await
+}
+
+#[tokio::test]
+async fn labels_by_ids_with_a_running_execution_changes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (a, b) = (ended_exec(&db, ws).await, ended_exec(&db, ws).await);
+    let running = insert_execution_with(
+        &db,
+        ws,
+        None,
+        "RUNNING",
+        &runnable_source("bulk-labels"),
+        serde_json::json!({}),
+    )
+    .await;
+    let before = (stored_labels(&db, a).await, stored_labels(&db, b).await);
+    let app = common::app(&db).await;
+    let body = bulk_labels_400(
+        &app,
+        ws,
+        user,
+        serde_json::json!({"ids": [a, running, b], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(body["invalids"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["invalids"][0]["id"], running.to_string());
+    assert_eq!(body["invalids"][0]["reason"], "not ended");
+    assert_eq!(
+        (stored_labels(&db, a).await, stored_labels(&db, b).await),
+        before,
+        "nothing may be applied when one id is refused"
+    );
+}
+
+#[tokio::test]
+async fn labels_by_ids_with_a_foreign_workspace_id_is_not_found_not_403() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (ws2, _other) = common::seed_workspace(&db).await;
+    let a = ended_exec(&db, ws).await;
+    let foreign = ended_exec(&db, ws2).await;
+    let (before_a, before_f) = (
+        stored_labels(&db, a).await,
+        stored_labels(&db, foreign).await,
+    );
+    let app = common::app(&db).await;
+    let body = bulk_labels_400(
+        &app,
+        ws,
+        user,
+        serde_json::json!({"ids": [a, foreign], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(body["invalids"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["invalids"][0]["id"], foreign.to_string());
+    assert_eq!(body["invalids"][0]["reason"], "not found");
+    assert_eq!(stored_labels(&db, a).await, before_a);
+    assert_eq!(stored_labels(&db, foreign).await, before_f);
+}
+
+#[tokio::test]
+async fn labels_bulk_with_invalid_labels_is_refused_and_applies_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let a = ended_exec(&db, ws).await;
+    let before = stored_labels(&db, a).await;
+    let bad = serde_json::json!([{"key": "Bad Key", "value": "x"}]);
+    let app = common::app(&db).await;
+    let body = bulk_labels_400(
+        &app,
+        ws,
+        user,
+        serde_json::json!({"ids": [a], "labels": bad}),
+    )
+    .await;
+    assert_eq!(body["invalids"][0]["reason"], "invalid labels", "{body}");
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-query?namespace=a.write"),
+        user,
+        bad,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    let body = common::json(res).await;
+    assert_eq!(body["invalids"][0]["reason"], "invalid labels", "{body}");
+    assert_eq!(stored_labels(&db, a).await, before);
+}

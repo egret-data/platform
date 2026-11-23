@@ -3275,19 +3275,22 @@ async fn labels_check(
     .fetch_optional(&st.db.pool)
     .await
     .map_err(|_| invalid("could not be checked"))?;
-    let Some((_state, source, own_json, replaced, idle)) = row else {
+    let Some((state, source, own_json, replaced, idle)) = row else {
         return Err(invalid("not found"));
     };
-    if !idle {
-        return Err(invalid("not ended"));
-    }
-    let flow_labels = crate::spec::parse(&source)
-        .map(|f| f.labels)
-        .unwrap_or_default();
-    let own = crate::labels::own_labels(own_json.as_ref());
-    let visible = crate::labels::visible_labels(&flow_labels, &own, replaced);
-    if crate::labels::edit_labels_refusal(labels, &visible).is_some() {
-        return Err(invalid("invalid labels"));
+    // The same precondition the write enforces (one function), so a pass here
+    // cannot be refused there.
+    match crate::worker::labels_precondition(
+        &state,
+        idle,
+        &source,
+        own_json.as_ref(),
+        replaced,
+        labels,
+    ) {
+        Ok(_) => {}
+        Err(crate::worker::LabelsRefused::NotIdle(_)) => return Err(invalid("not ended")),
+        Err(crate::worker::LabelsRefused::Invalid(_)) => return Err(invalid("invalid labels")),
     }
     Ok(())
 }
