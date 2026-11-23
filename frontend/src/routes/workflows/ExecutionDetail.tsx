@@ -140,8 +140,8 @@ function ExecutionLoader({ ws, id, tab }: { ws: string; id: string; tab: Executi
   // A stream that failed or ended while the run still goes leaves the timer unarmed: read now,
   // and the polling carries on. Never on load, and never for a run that finished.
   useEffect(() => {
-    if (stream.fallback) void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(id) });
-  }, [stream.fallback, queryClient, id]);
+    if (stream.dropped) void queryClient.invalidateQueries({ queryKey: workflowsKeys.execution(id) });
+  }, [stream.dropped, queryClient, id]);
   const listHref = `/explore/${ws}/workflows/executions`;
 
   // Error first (FE-STATE-1), while nothing has loaded; a failed poll keeps the last answer on screen.

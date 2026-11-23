@@ -26,7 +26,7 @@ describe("useEventSourceFollow", () => {
     const onEvent = vi.fn();
     const { result } = renderHook(() => useEventSourceFollow<{ n: number }>("/f", { enabled: true, onEvent }));
     expect(FakeEventSource.all[0].url).toBe("/f");
-    expect(result.current).toEqual({ live: true, fallback: false });
+    expect(result.current).toEqual({ live: true, fallback: false, dropped: false });
     act(() => FakeEventSource.all[0].onmessage!({ data: '{"n":1}' }));
     expect(onEvent).toHaveBeenCalledWith({ n: 1 });
   });
@@ -42,7 +42,7 @@ describe("useEventSourceFollow", () => {
     const { result } = renderHook(() => useEventSourceFollow("/f", { enabled: true, onEvent: vi.fn() }));
     act(() => FakeEventSource.all[0].onerror!());
     expect(FakeEventSource.all[0].closed).toBe(true);
-    expect(result.current).toEqual({ live: false, fallback: true });
+    expect(result.current).toEqual({ live: false, fallback: true, dropped: true });
     expect(FakeEventSource.all).toHaveLength(1);
   });
 
@@ -50,12 +50,13 @@ describe("useEventSourceFollow", () => {
     vi.stubGlobal("EventSource", undefined);
     const { result } = renderHook(() => useEventSourceFollow("/f", { enabled: true, onEvent: vi.fn() }));
     expect(result.current.fallback).toBe(true);
+    expect(result.current.dropped).toBe(false);
   });
 
   it("opens nothing while disabled, and closes on unmount", () => {
     const off = renderHook(() => useEventSourceFollow("/f", { enabled: false, onEvent: vi.fn() }));
     expect(FakeEventSource.all).toHaveLength(0);
-    expect(off.result.current).toEqual({ live: false, fallback: false });
+    expect(off.result.current).toEqual({ live: false, fallback: false, dropped: false });
     const on = renderHook(() => useEventSourceFollow("/g", { enabled: true, onEvent: vi.fn() }));
     on.unmount();
     expect(FakeEventSource.all[0].closed).toBe(true);

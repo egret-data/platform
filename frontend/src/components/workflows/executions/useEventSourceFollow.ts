@@ -7,12 +7,14 @@ import { useEffect, useRef, useState } from "react";
  * and sets `fallback`: the caller's polling takes over (a finished run needs no
  * more reads anyway). Where EventSource does not exist, `fallback` is set at once.
  *
- * `live` is true while the stream is open and has not failed.
+ * `live` is true while the stream is open and has not failed. `dropped` is true only for a
+ * stream that was open and then failed: the caller may read once at that moment (an absent
+ * EventSource is `fallback` but not `dropped`: there was never a stream to lose).
  */
 export function useEventSourceFollow<T>(
   url: string,
   { enabled, onEvent }: { enabled: boolean; onEvent: (event: T) => void },
-): { live: boolean; fallback: boolean } {
+): { live: boolean; fallback: boolean; dropped: boolean } {
   const handler = useRef(onEvent);
   useEffect(() => {
     handler.current = onEvent;
@@ -20,7 +22,8 @@ export function useEventSourceFollow<T>(
   // The url the stream failed on: a new url (another execution) starts afresh.
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const supported = typeof EventSource !== "undefined";
-  const failed = failedUrl === url || (enabled && !supported);
+  const dropped = enabled && failedUrl === url;
+  const failed = dropped || (enabled && !supported);
 
   useEffect(() => {
     if (!enabled || !supported) return;
@@ -41,5 +44,5 @@ export function useEventSourceFollow<T>(
     return () => source.close();
   }, [url, enabled, supported]);
 
-  return { live: enabled && !failed, fallback: enabled && failed };
+  return { live: enabled && !failed, fallback: enabled && failed, dropped };
 }
