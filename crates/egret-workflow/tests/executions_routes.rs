@@ -3813,3 +3813,210 @@ async fn the_execution_api_carries_the_outputs_masked_and_never_the_sealed_colum
         "the list carries no sealed column: {text}"
     );
 }
+
+// ── Package 7e: stats, listing helpers, CSV export ──────────────────────────
+
+/// Recent (the average only looks back 30 days) start and end, `secs` apart.
+fn ended(days_ago: i64, secs: i64) -> (DateTime<Utc>, DateTime<Utc>) {
+    let s = Utc::now() - chrono::Duration::days(days_ago);
+    (s, s + chrono::Duration::seconds(secs))
+}
+
+#[tokio::test]
+async fn distinct_namespaces_and_flows_are_workflow_read_gated_and_scoped() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (ws_b, user_b) = common::seed_workspace(&db).await;
+    let (_w, manager) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    common::grant(&db, ws, manager, &["workflow:manage"]).await;
+    common::grant(&db, ws_b, user_b, &["workflow:read"]).await;
+    insert_execution(&db, ws, None, "n.one", "f1", "SUCCESS", at(1)).await;
+    insert_execution(&db, ws, None, "n.one", "f2", "SUCCESS", at(2)).await;
+    insert_execution(&db, ws, None, "n.two", "f3", "SUCCESS", at(3)).await;
+    insert_execution(&db, ws_b, None, "n.theirs", "g", "SUCCESS", at(4)).await;
+
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    assert_eq!(
+        common::anon_get(&app, &format!("{base}/namespaces"))
+            .await
+            .status(),
+        401
+    );
+    for path in [
+        format!("{base}/namespaces"),
+        format!("{base}/namespaces/n.one/flows"),
+    ] {
+        assert_eq!(
+            common::get(&app, &path, manager).await.status(),
+            403,
+            "{path}"
+        );
+    }
+    let ns = common::json(common::get(&app, &format!("{base}/namespaces"), user).await).await;
+    assert_eq!(ns, serde_json::json!(["n.one", "n.two"]), "own ws only");
+    let flows =
+        common::json(common::get(&app, &format!("{base}/namespaces/n.one/flows"), user).await)
+            .await;
+    assert_eq!(flows, serde_json::json!(["f1", "f2"]));
+}
+
+#[tokio::test]
+async fn average_duration_is_null_without_terminated_and_a_number_with() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let url =
+        format!("/api/ws/{ws}/workflows/executions/namespaces/n.avg/flows/f/average-duration");
+    let app = common::app(&db).await;
+
+    insert_execution(&db, ws, None, "n.avg", "f", "RUNNING", at(1)).await;
+    let body = common::json(common::get(&app, &url, user).await).await;
+    assert_eq!(body["avgDurationMs"], Value::Null, "{body}");
+    assert_eq!(body["count"], 0, "{body}");
+
+    for (day, secs) in [(2, 10), (3, 20)] {
+        let (s, e) = ended(i64::from(day), secs);
+        let id = insert_execution(&db, ws, None, "n.avg", "f", "SUCCESS", s).await;
+        sqlx::query("UPDATE workflow.executions SET started_at=$2, ended_at=$3 WHERE id=$1")
+            .bind(id)
+            .bind(s)
+            .bind(e)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+    let body = common::json(common::get(&app, &url, user).await).await;
+    assert_eq!(body["avgDurationMs"], 15000, "{body}");
+    assert_eq!(body["count"], 2, "{body}");
+}
+
+#[tokio::test]
+async fn latest_returns_the_newest_execution_per_requested_flow() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    insert_execution(&db, ws, None, "n.l", "f", "FAILED", at(1)).await;
+    let newest = insert_execution(&db, ws, None, "n.l", "f", "SUCCESS", at(5)).await;
+    let app = common::app(&db).await;
+    let url = format!("/api/ws/{ws}/workflows/executions/latest");
+
+    let body = common::json(
+        common::post(
+            &app,
+            &url,
+            user,
+            serde_json::json!([
+                {"namespace": "n.l", "id": "f"},
+                {"namespace": "n.l", "id": "none"}
+            ]),
+        )
+        .await,
+    )
+    .await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "a flow with no execution is omitted: {body}");
+    assert_eq!(rows[0]["id"], newest.to_string());
+    assert_eq!(rows[0]["flowId"], "f");
+    assert_eq!(rows[0]["namespace"], "n.l");
+    assert_eq!(rows[0]["status"], "SUCCESS");
+
+    let empty = common::json(common::post(&app, &url, user, serde_json::json!([])).await).await;
+    assert_eq!(empty, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn export_csv_has_a_header_and_one_row_per_matching_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (_w, manager) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    common::grant(&db, ws, manager, &["workflow:manage"]).await;
+    insert_execution(&db, ws, None, "n.csv", "a", "SUCCESS", at(1)).await;
+    insert_execution(&db, ws, None, "n.csv", "b", "FAILED", at(2)).await;
+    insert_execution(&db, ws, None, "n.csv", "=cmd", "FAILED", at(3)).await;
+    let app = common::app(&db).await;
+    let url = format!("/api/ws/{ws}/workflows/executions/export.csv");
+
+    assert_eq!(common::get(&app, &url, manager).await.status(), 403);
+    assert_eq!(common::anon_get(&app, &url).await.status(), 401);
+
+    async fn lines(res: axum::response::Response) -> Vec<String> {
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.headers()["content-type"], "text/csv");
+        assert_eq!(
+            res.headers()["content-disposition"],
+            "attachment; filename=executions.csv"
+        );
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec())
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+    let all = lines(common::get(&app, &url, user).await).await;
+    assert_eq!(all.len(), 4, "{all:?}");
+    assert!(all[0].starts_with("id,namespace,flow_id,state"), "{all:?}");
+    assert!(
+        all[1].contains(",'=cmd,"),
+        "formula defused, newest first: {all:?}"
+    );
+    let failed = lines(common::get(&app, &format!("{url}?state=FAILED"), user).await).await;
+    assert_eq!(failed.len(), 3, "{failed:?}");
+    let one = lines(common::get(&app, &format!("{url}?flow_key=a"), user).await).await;
+    assert_eq!(one.len(), 2, "{one:?}");
+}
+
+#[tokio::test]
+async fn the_new_read_routes_are_404_for_a_foreign_workspace_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws_a, user_a) = common::seed_workspace(&db).await;
+    let (ws_b, _user_b) = common::seed_workspace(&db).await;
+    common::grant(&db, ws_a, user_a, &["workflow:read"]).await;
+    insert_execution(&db, ws_b, None, "n.foreign", "g", "SUCCESS", at(1)).await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws_a}/workflows/executions");
+
+    let flows = common::get(&app, &format!("{base}/namespaces/n.foreign/flows"), user_a).await;
+    assert_eq!(flows.status(), 200, "never a 403 that confirms it exists");
+    assert_eq!(common::json(flows).await, serde_json::json!([]));
+    let avg = common::json(
+        common::get(
+            &app,
+            &format!("{base}/namespaces/n.foreign/flows/g/average-duration"),
+            user_a,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(avg["count"], 0, "{avg}");
+    let latest = common::json(
+        common::post(
+            &app,
+            &format!("{base}/latest"),
+            user_a,
+            serde_json::json!([{"namespace": "n.foreign", "id": "g"}]),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(latest, serde_json::json!([]));
+    let ns = common::json(common::get(&app, &format!("{base}/namespaces"), user_a).await).await;
+    assert_eq!(ns, serde_json::json!([]));
+    // A workspace slug that is not the caller's is the 404.
+    let other = common::get(
+        &app,
+        &format!("/api/ws/{ws_b}/workflows/executions/namespaces"),
+        user_a,
+    )
+    .await;
+    assert!(
+        matches!(other.status().as_u16(), 403 | 404),
+        "{}",
+        other.status()
+    );
+}
