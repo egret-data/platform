@@ -41,6 +41,7 @@
 // `pub`, not `mod`: the ratchet that judges it (`tests/executor.rs`) is an
 // integration test, exactly as `tests/oracle.rs` is, and an integration test
 // sees only the public API.
+pub mod bulk;
 /// Package 7e (#1a, #1b): evaluate one Pebble expression against a stored
 /// execution or task-run context, with SECRET values sealed by construction.
 pub(crate) mod eval;
