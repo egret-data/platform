@@ -4020,3 +4020,224 @@ async fn the_new_read_routes_are_404_for_a_foreign_workspace_execution() {
         other.status()
     );
 }
+
+// ── Eval (package 7e #1a execution context, #1b task-run context) ────────────
+//
+// `POST …/executions/{id}/eval` and
+// `POST …/executions/{id}/task-runs/{task_run_id}/eval` render one Pebble
+// expression against the STORED context. A broken expression — including a
+// sealed `secret()` — is a 200 whose body carries `error`, never a 4xx.
+
+/// A flow source with one SECRET input and one Log task, so the plan builds and
+/// a masked input is declared.
+const EVAL_SOURCE: &str =
+    "id: ev\nnamespace: a.b\ninputs:\n  - id: pw\n    type: SECRET\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+
+/// Insert one `workflow.executions` row with a chosen `source` and `inputs`.
+async fn insert_execution_src(
+    db: &Db,
+    ws: Uuid,
+    namespace: &str,
+    flow_key: &str,
+    source: &str,
+    inputs: Value,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, inputs, created_at) \
+         VALUES ($1, $2, $3, $4, 'SUCCESS', $5, $6, $7) RETURNING id",
+    )
+    .bind(ws)
+    .bind(namespace)
+    .bind(flow_key)
+    .bind(source)
+    .bind(serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]))
+    .bind(inputs)
+    .bind(at(1))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert execution with source")
+}
+
+/// Insert one terminal `workflow.task_runs` row and return its id.
+async fn insert_task_run(db: &Db, execution: Uuid, task_id: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history, attempts) \
+         VALUES ($1, 0, 0, $2, 'io.kestra.plugin.core.log.Log', 'SUCCESS', \
+                 '[\"CREATED\",\"RUNNING\",\"SUCCESS\"]'::jsonb, '[{}]'::jsonb) RETURNING id",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert task run")
+}
+
+/// `POST {path}` with a `text/plain` body carrying the raw expression.
+async fn eval(
+    app: &common::App,
+    path: &str,
+    user: egret_core::UserId,
+    expr: &str,
+) -> axum::response::Response {
+    common::send_raw(app, "POST", path, user, "text/plain", expr.as_bytes().to_vec()).await
+}
+
+#[tokio::test]
+async fn eval_renders_in_execution_and_task_run_context() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution_src(&db, ws, "a.ev", "ev", EVAL_SOURCE, serde_json::json!({})).await;
+    let trid = insert_task_run(&db, id, "t").await;
+    let app = common::app(&db).await;
+
+    // #1a: the execution context. A literal, and a bound name.
+    let base = format!("/api/ws/{ws}/workflows/executions/{id}");
+    let lit = eval(&app, &format!("{base}/eval"), user, "{{ 1 + 1 }}").await;
+    assert_eq!(lit.status(), 200);
+    assert_eq!(
+        common::json(lit).await,
+        serde_json::json!({"result": "2", "error": null})
+    );
+    let exec_id = common::json(eval(&app, &format!("{base}/eval"), user, "{{ execution.id }}").await).await;
+    assert_eq!(exec_id["result"], serde_json::json!(id.to_string()));
+
+    // #1b: the task-run context binds `taskrun`.
+    let tr = common::json(
+        eval(
+            &app,
+            &format!("{base}/task-runs/{trid}/eval"),
+            user,
+            "{{ taskrun.id }}",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(tr["result"], serde_json::json!(trid.to_string()));
+    assert!(tr["error"].is_null());
+}
+
+#[tokio::test]
+async fn eval_returns_the_render_error_in_band_with_200() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution_src(&db, ws, "a.err", "ev", EVAL_SOURCE, serde_json::json!({})).await;
+    let app = common::app(&db).await;
+
+    let res = eval(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/eval"),
+        user,
+        "{{ nope.nope }}",
+    )
+    .await;
+    assert_eq!(res.status(), 200, "a broken expression is a result, not a 4xx");
+    let body = common::json(res).await;
+    assert!(body["result"].is_null(), "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(|s| !s.is_empty()),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn eval_seals_secrets_on_both_paths() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    // A SECRET input whose stored value is the mask.
+    let id = insert_execution_src(
+        &db,
+        ws,
+        "a.sec",
+        "ev",
+        EVAL_SOURCE,
+        serde_json::json!({ "pw": "******" }),
+    )
+    .await;
+    let trid = insert_task_run(&db, id, "t").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions/{id}");
+
+    for path in [format!("{base}/eval"), format!("{base}/task-runs/{trid}/eval")] {
+        // `secret()` is never wired here: it is an error, not a value.
+        let res = eval(&app, &path, user, "{{ secret('X') }}").await;
+        assert_eq!(res.status(), 200, "sealed secret is still a 200 with an error");
+        let body = common::json(res).await;
+        assert!(body["result"].is_null(), "{path} leaked a secret value: {body}");
+        assert!(body["error"].as_str().is_some(), "{path}: {body}");
+
+        // The masked input renders the mask, never a plaintext.
+        let masked = common::json(eval(&app, &path, user, "{{ inputs.pw }}").await).await;
+        assert_eq!(masked["result"], serde_json::json!("******"), "{path}: {masked}");
+    }
+}
+
+#[tokio::test]
+async fn eval_is_404_for_unknown_execution_or_task_run() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution_src(&db, ws, "a.nf", "ev", EVAL_SOURCE, serde_json::json!({})).await;
+    insert_task_run(&db, id, "t").await;
+    let app = common::app(&db).await;
+
+    // An execution that does not exist.
+    let ghost = Uuid::new_v4();
+    let miss_exec = eval(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{ghost}/eval"),
+        user,
+        "{{ 1 }}",
+    )
+    .await;
+    assert_eq!(miss_exec.status(), 404, "unknown execution");
+
+    // A task run that is not this execution's.
+    let miss_run = eval(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/task-runs/{}/eval", Uuid::new_v4()),
+        user,
+        "{{ 1 }}",
+    )
+    .await;
+    assert_eq!(miss_run.status(), 404, "unknown task run");
+
+    // Control: the real execution answers 200, so the 404s are about existence.
+    let ok = eval(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{id}/eval"),
+        user,
+        "{{ 1 }}",
+    )
+    .await;
+    assert_eq!(ok.status(), 200);
+}
+
+#[tokio::test]
+async fn eval_requires_workflow_read() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    // `workflow:manage` alone — NOT `workflow:read`.
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let id = insert_execution_src(&db, ws, "a.403", "ev", EVAL_SOURCE, serde_json::json!({})).await;
+    let trid = insert_task_run(&db, id, "t").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions/{id}");
+
+    assert_eq!(
+        eval(&app, &format!("{base}/eval"), user, "{{ 1 }}").await.status(),
+        403,
+        "the execution eval route requires workflow:read"
+    );
+    assert_eq!(
+        eval(&app, &format!("{base}/task-runs/{trid}/eval"), user, "{{ 1 }}")
+            .await
+            .status(),
+        403,
+        "the task-run eval route requires workflow:read"
+    );
+}

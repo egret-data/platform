@@ -2533,6 +2533,96 @@ async fn get_execution(
     )))
 }
 
+// ---------- Eval (package 7e #1a, #1b) ----------
+//
+// POST /api/ws/{workspace}/workflows/executions/{id}/eval
+// POST /api/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/eval
+//
+// Render one Pebble expression against the STORED execution (or task-run)
+// context — [`crate::eval`] builds it from the stored rows, mirroring the
+// worker's live `Surface::context`. A broken expression is a 200 whose body
+// carries `error`, never a request error; a SECRET expression is sealed by
+// construction and arrives in that same `error` field. `workflow:read` gates
+// both: eval only reads, so there is no `workflow:manage`/`egret.sql` gate.
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/eval",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    request_body(
+        content = String,
+        description = "The Pebble expression to render, as the raw request body",
+        content_type = "text/plain",
+    ),
+    responses(
+        (status = 200, description = "The render result in the execution context: `{result}` on success, or `{error}` when the expression does not render — a broken expression is a 200, not a 400. A SECRET expression (`{{ secret('X') }}`) is sealed and arrives as `error`, and `{{ inputs.<secret> }}` renders the mask.", body = crate::eval::EvalResultDto),
+        (status = 400, description = "`{id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Evaluate one Pebble expression against an execution's stored context (#1a).
+async fn eval_execution_expression(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    expr: String,
+) -> EgretResult<Json<crate::eval::EvalResultDto>> {
+    require_exec(&st, &ctx, id, WF_READ).await?;
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(crate::eval::eval_expression(&detail, None, &expr)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/eval",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        ("task_run_id" = Uuid, Path, description = "Task run id"),
+    ),
+    request_body(
+        content = String,
+        description = "The Pebble expression to render, as the raw request body",
+        content_type = "text/plain",
+    ),
+    responses(
+        (status = 200, description = "The render result in the task-run context: the execution context plus `task` and `taskrun`. `{result}` on success, `{error}` on a render error (200, not 400); a SECRET expression is sealed and arrives as `error`.", body = crate::eval::EvalResultDto),
+        (status = 400, description = "`{id}` or `{task_run_id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, or no task run of it with this id", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Evaluate one Pebble expression against a task-run's stored context (#1b).
+async fn eval_task_run_expression(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id, task_run_id)): Path<(String, Uuid, Uuid)>,
+    expr: String,
+) -> EgretResult<Json<crate::eval::EvalResultDto>> {
+    require_exec(&st, &ctx, id, WF_READ).await?;
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    // A task run that is not this execution's is a 404, as the detail route
+    // answers a foreign execution id. `stored_context` is the single place that
+    // decides "unknown run"; the subsequent render rebuilds the same context.
+    crate::eval::stored_context(&detail, Some(task_run_id))
+        .map_err(|_| Error::NotFound("task run".into()))?;
+    Ok(Json(crate::eval::eval_expression(
+        &detail,
+        Some(task_run_id),
+        &expr,
+    )))
+}
+
 // ---------- Execution logs (W11 Task 5, spec §6) ----------
 //
 // GET /api/ws/{workspace}/workflows/executions/{id}/logs
@@ -6388,6 +6478,14 @@ pub fn management_router() -> Router<WorkflowState> {
             get(get_execution).delete(delete_execution),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/{id}/eval",
+            post(eval_execution_expression),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/task-runs/{task_run_id}/eval",
+            post(eval_task_run_expression),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/graph",
             get(get_execution_graph),
         )
@@ -6555,6 +6653,8 @@ pub fn management_router() -> Router<WorkflowState> {
         latest_executions,
         export_executions_csv,
         get_execution,
+        eval_execution_expression,
+        eval_task_run_expression,
         get_execution_logs,
         delete_execution,
         set_execution_labels,
@@ -6622,6 +6722,7 @@ pub fn management_router() -> Router<WorkflowState> {
         ExecutionDto,
         ExecutionPageDto,
         AvgDurationDto,
+        crate::eval::EvalResultDto,
         FlowFilterDto,
         LastExecutionDto,
         StartExecutionRequest,
