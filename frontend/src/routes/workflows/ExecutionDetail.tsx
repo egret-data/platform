@@ -63,6 +63,7 @@ import { ChangeStateDialog } from "@/components/workflows/executions/ChangeState
 import { DeleteExecutionDialog } from "@/components/workflows/executions/DeleteExecutionDialog";
 import { EditLabelsDialog } from "@/components/workflows/executions/EditLabelsDialog";
 import { ResumeDialog } from "@/components/workflows/executions/ResumeDialog";
+import { EvalPanel } from "@/components/workflows/executions/EvalPanel";
 import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
 import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
 import { nextExecutionPollMs, staleNote, useNow } from "@/components/workflows/executions/polling";
@@ -201,6 +202,7 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
     () => ({
       logs: (run: TaskRunDto) => <RunLogs ws={ws} executionId={execution.id} run={run} endedAt={endedAt} />,
       // The panel is keyed by run, so the tree's open items start afresh for each run.
+      eval: (run: TaskRunDto) => <EvalPanel ws={ws} executionId={execution.id} taskRunId={run.id} />,
       outputs: (run: TaskRunDto) => <OutputsTree ws={ws} executionId={execution.id} run={run} loopValue={execution.loop_value} />,
     }),
     [ws, execution.id, execution.loop_value, endedAt],
@@ -219,6 +221,12 @@ function ExecutionFrame({ ws, tab, execution }: { ws: string; tab: ExecutionTab;
         </TabsList>
         <TabsContent value="overview" className="min-h-0 flex-1 overflow-auto p-4">
           <ExecutionOverview ws={ws} execution={execution} now={now} canManage={execution.can_manage} />
+          <section aria-label="Evaluate an expression" className="mt-6 max-w-2xl">
+            <h2 className="text-sm font-medium">Evaluate an expression</h2>
+            <div className="mt-1">
+              <EvalPanel ws={ws} executionId={execution.id} />
+            </div>
+          </section>
         </TabsContent>
         <TabsContent value="topology" className="min-h-0 flex-1 overflow-auto p-4">
           <LazyRouteArea area="Topology" fallback={<Skeleton className="h-[32rem] w-full" />}>

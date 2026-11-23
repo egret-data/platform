@@ -135,6 +135,8 @@ export default function ExecutionGanttTab({ execution, slots }: { execution: Exe
   const outputsSlot = slots.outputs;
   const logs = useMemo(() => (selectedRun ? logsSlot(selectedRun) : null), [selectedRun, logsSlot]);
   const outputs = useMemo(() => (selectedRun ? outputsSlot(selectedRun) : null), [selectedRun, outputsSlot]);
+  const evalSlot = slots.eval;
+  const evaluate = useMemo(() => (selectedRun && evalSlot ? evalSlot(selectedRun) : null), [selectedRun, evalSlot]);
 
   if (execution.runs.length === 0) {
     return (
@@ -160,7 +162,7 @@ export default function ExecutionGanttTab({ execution, slots }: { execution: Exe
       <GanttView ref={view} model={model} selectedRunIx={selected} onSelect={select} />
       {selected === null ? null : selectedRow ? (
         // Keyed by run: a slot's own state (a log cursor) starts afresh for each run.
-        <GanttRunPanel key={selectedRow.run.id} row={selectedRow} onClose={close} logs={logs} outputs={outputs} />
+        <GanttRunPanel key={selectedRow.run.id} row={selectedRow} onClose={close} logs={logs} outputs={outputs} evaluate={evaluate} />
       ) : (
         // Its sentence is also this module's marker in `scripts/assert-workflows-lazy.mjs`.
         <div className="mt-4 flex flex-wrap items-center gap-3 rounded-md border p-4 text-sm">

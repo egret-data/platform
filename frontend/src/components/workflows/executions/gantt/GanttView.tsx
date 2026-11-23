@@ -403,6 +403,8 @@ export function GanttView({ ref, model, selectedRunIx, onSelect }: GanttViewProp
 export interface GanttRunSlots {
   logs: (run: TaskRunDto) => ReactNode;
   outputs: (run: TaskRunDto) => ReactNode;
+  /** The run's expression evaluator (7e); a panel without it shows none. */
+  eval?: (run: TaskRunDto) => ReactNode;
 }
 
 function Fact({ term, children }: { term: string; children: ReactNode }) {
@@ -425,12 +427,14 @@ export function GanttRunPanel({
   onClose,
   logs,
   outputs,
+  evaluate,
 }: {
   row: GanttRow;
   onClose: () => void;
   /** The slots' content for this run, already rendered (see `GanttRunSlots`). */
   logs: ReactNode;
   outputs: ReactNode;
+  evaluate?: ReactNode;
 }) {
   const headingId = useId();
   const run = row.run;
@@ -518,6 +522,12 @@ export function GanttRunPanel({
           <div className="mt-1">{outputs}</div>
         </section>
       </div>
+      {evaluate ? (
+        <section aria-label="Evaluate an expression" data-testid="gantt-run-eval" className="mt-4">
+          <h3 className="text-sm font-medium">Evaluate an expression</h3>
+          <div className="mt-1">{evaluate}</div>
+        </section>
+      ) : null}
     </section>
   );
 }
