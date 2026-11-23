@@ -375,20 +375,45 @@ mod tests {
 
     #[test]
     fn secret_is_sealed_on_both_the_execution_and_the_task_run_path() {
-        let id = Uuid::new_v4();
-        // #1a: execution context.
-        let d = detail(id, SRC, json!({}), vec![]);
-        let exec = eval_expression(&d, None, "{{ secret('X') }}");
-        assert!(exec.result.is_none(), "execution path leaked a value: {exec:?}");
-        assert!(exec.error.is_some(), "{exec:?}");
+        // A distinctive plaintext that is REALLY sealed into `secret_inputs`, so
+        // this test fails if the code ever decrypts it: `{{ inputs.pw }}` would
+        // then render the sentinel instead of the mask. Masking alone — the old
+        // version of this test — would pass even against a decrypting bug.
+        const SENTINEL: &str = "SENTINEL-PLAINTEXT-d3adb33f";
+        crate::secret_inputs::install_for_tests();
+        let flow = crate::spec::parse(SRC).expect("parse");
+        let (masked, sealed) =
+            crate::secret_inputs::split(&flow, json!({ "pw": SENTINEL })).expect("seal");
+        assert_eq!(masked["pw"], json!(MASK), "split masks the input");
+        assert!(sealed.is_some(), "split seals the plaintext");
 
-        // #1b: task-run context.
+        let id = Uuid::new_v4();
         let run = run_row(id, 0, "t");
         let trid = run.id;
-        let d = detail(id, SRC, json!({}), vec![run]);
-        let tr = eval_expression(&d, Some(trid), "{{ secret('X') }}");
-        assert!(tr.result.is_none(), "task-run path leaked a value: {tr:?}");
-        assert!(tr.error.is_some(), "{tr:?}");
+        let d = ExecutionDetail {
+            execution: exec_row(id, masked),
+            source: SRC.into(),
+            runs: vec![run],
+            outputs: None,
+            variables: None,
+            secret_inputs: sealed,
+        };
+
+        // #1a (None) and #1b (Some(trid)): the sealed plaintext surfaces in NO
+        // rendered surface, and `secret()` is an error while the masked input is
+        // the mask.
+        for task_run in [None, Some(trid)] {
+            for expr in ["{{ secret('pw') }}", "{{ inputs.pw }}", "{{ inputs }}", "{{ outputs }}"] {
+                let r = eval_expression(&d, task_run, expr);
+                let seen = format!("{r:?}");
+                assert!(!seen.contains(SENTINEL), "{expr} leaked the sentinel: {seen}");
+            }
+            let secret = eval_expression(&d, task_run, "{{ secret('pw') }}");
+            assert!(secret.result.is_none(), "secret() leaked a value: {secret:?}");
+            assert!(secret.error.is_some(), "{secret:?}");
+            let input = eval_expression(&d, task_run, "{{ inputs.pw }}");
+            assert_eq!(input.result.as_deref(), Some(MASK), "{input:?}");
+        }
     }
 
     #[test]

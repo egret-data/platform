@@ -4059,6 +4059,35 @@ async fn insert_execution_src(
     .expect("insert execution with source")
 }
 
+/// Insert one `workflow.executions` row with a chosen `source`, masked `inputs`
+/// and a real sealed `secret_inputs`.
+async fn insert_execution_sealed(
+    db: &Db,
+    ws: Uuid,
+    namespace: &str,
+    flow_key: &str,
+    source: &str,
+    inputs: Value,
+    secret_inputs: Vec<u8>,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, inputs, secret_inputs, created_at) \
+         VALUES ($1, $2, $3, $4, 'SUCCESS', $5, $6, $7, $8) RETURNING id",
+    )
+    .bind(ws)
+    .bind(namespace)
+    .bind(flow_key)
+    .bind(source)
+    .bind(serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]))
+    .bind(inputs)
+    .bind(secret_inputs)
+    .bind(at(1))
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert sealed execution")
+}
+
 /// Insert one terminal `workflow.task_runs` row and return its id.
 async fn insert_task_run(db: &Db, execution: Uuid, task_id: &str) -> Uuid {
     sqlx::query_scalar(
@@ -4143,34 +4172,58 @@ async fn eval_returns_the_render_error_in_band_with_200() {
     );
 }
 
+/// The raw response body as a string — so a sentinel-absence assertion covers
+/// the WHOLE wire payload, not just the fields we thought to parse.
+async fn raw_body(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+}
+
 #[tokio::test]
 async fn eval_seals_secrets_on_both_paths() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:read"]).await;
-    // A SECRET input whose stored value is the mask.
-    let id = insert_execution_src(
-        &db,
-        ws,
-        "a.sec",
-        "ev",
-        EVAL_SOURCE,
-        serde_json::json!({ "pw": "******" }),
-    )
-    .await;
+
+    // A distinctive plaintext REALLY sealed into `secret_inputs`; `inputs.pw`
+    // holds only the mask. This test fails if eval ever decrypts the sealed
+    // column — the sentinel would then surface somewhere in the response. The
+    // cipher is the process-wide test key, so the handler (same process) would
+    // use it to decrypt if it tried; it does not.
+    const SENTINEL: &str = "SENTINEL-PLAINTEXT-d3adb33f";
+    egret_workflow::secret_inputs::install_for_tests();
+    let flow = egret_workflow::spec::parse(EVAL_SOURCE).expect("parse");
+    let (masked, sealed) =
+        egret_workflow::secret_inputs::split(&flow, serde_json::json!({ "pw": SENTINEL }))
+            .expect("seal the sentinel");
+    let sealed = sealed.expect("a sealed value");
+    assert_eq!(masked["pw"], serde_json::json!("******"), "split masks the input");
+
+    let id = insert_execution_sealed(&db, ws, "a.sec", "ev", EVAL_SOURCE, masked, sealed).await;
     let trid = insert_task_run(&db, id, "t").await;
     let app = common::app(&db).await;
     let base = format!("/api/ws/{ws}/workflows/executions/{id}");
 
     for path in [format!("{base}/eval"), format!("{base}/task-runs/{trid}/eval")] {
-        // `secret()` is never wired here: it is an error, not a value.
-        let res = eval(&app, &path, user, "{{ secret('X') }}").await;
+        // `secret()` is never wired here: it is an error, not a value — and the
+        // sentinel appears nowhere in the raw body.
+        let res = eval(&app, &path, user, "{{ secret('pw') }}").await;
         assert_eq!(res.status(), 200, "sealed secret is still a 200 with an error");
-        let body = common::json(res).await;
+        let raw = raw_body(res).await;
+        assert!(!raw.contains(SENTINEL), "{path}: secret() leaked the sentinel: {raw}");
+        let body: Value = serde_json::from_str(&raw).unwrap();
         assert!(body["result"].is_null(), "{path} leaked a secret value: {body}");
         assert!(body["error"].as_str().is_some(), "{path}: {body}");
 
-        // The masked input renders the mask, never a plaintext.
+        // Every surface an attacker might try — the sentinel is in none of them.
+        for expr in ["{{ inputs.pw }}", "{{ inputs }}", "{{ outputs }}"] {
+            let res = eval(&app, &path, user, expr).await;
+            assert_eq!(res.status(), 200);
+            let raw = raw_body(res).await;
+            assert!(!raw.contains(SENTINEL), "{path} {expr}: leaked the sentinel: {raw}");
+        }
+
+        // The masked input renders the mask, never the plaintext.
         let masked = common::json(eval(&app, &path, user, "{{ inputs.pw }}").await).await;
         assert_eq!(masked["result"], serde_json::json!("******"), "{path}: {masked}");
     }
