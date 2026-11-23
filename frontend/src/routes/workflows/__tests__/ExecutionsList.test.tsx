@@ -181,7 +181,7 @@ describe("ExecutionsList: columns", () => {
     await screen.findByTestId("executions-table");
     expect(screen.getByRole("heading", { level: 1, name: "Executions" })).toBeInTheDocument();
     const headers = within(screen.getByTestId("executions-table")).getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toEqual(["ID", "Flow", "Namespace", "State", "Start", "Duration", "Trigger"]);
+    expect(headers).toEqual(["", "ID", "Flow", "Namespace", "State", "Start", "Duration", "Trigger"]);
     expect(bodyRows()).toHaveLength(3);
   });
 
@@ -250,7 +250,7 @@ describe("ExecutionsList: the flow's Executions tab", () => {
     expect(lists[0].get("flow_id")).toBe(FLOW);
     expect(lists[0].get("namespace")).toBeNull();
     const headers = within(screen.getByTestId("executions-table")).getAllByRole("columnheader").map((h) => h.textContent);
-    expect(headers).toEqual(["ID", "Namespace", "State", "Start", "Duration", "Trigger"]);
+    expect(headers).toEqual(["", "ID", "Namespace", "State", "Start", "Duration", "Trigger"]);
     expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Flow" })).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Namespace" })).toBeNull();
