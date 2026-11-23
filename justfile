@@ -37,13 +37,13 @@ demo-up-ghcr tag="edge":
 # Stop the demo; removes engine containers egret provisioned (labels egret.managed=true and egret.project=egret-demo); keeps data volumes
 demo-down:
     -{{demo_compose}} stop egret
-    -EGRET_DEMO_PROJECT=egret-demo ./deploy/demo/remove-engines.sh
+    -EGRET_DEMO_PROJECT=${COMPOSE_PROJECT_NAME:-egret-demo} ./deploy/demo/remove-engines.sh
     {{demo_compose}} down
 
 # Stop the demo and DELETE its data volumes
 demo-reset:
     -{{demo_compose}} stop egret
-    -EGRET_DEMO_PROJECT=egret-demo ./deploy/demo/remove-engines.sh
+    -EGRET_DEMO_PROJECT=${COMPOSE_PROJECT_NAME:-egret-demo} ./deploy/demo/remove-engines.sh
     {{demo_compose}} down -v
 
 # Re-run the idempotent seed

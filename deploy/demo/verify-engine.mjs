@@ -244,7 +244,9 @@ try {
     await page.goto(`${BASE}/explore/${WS}/sql-lab`);
     // A fresh tab, so an earlier run's tab state (database, SQL) does not leak in.
     await page.getByRole("button", { name: "New tab" }).click();
-    await page.getByRole("combobox").filter({ hasText: /Select a database|\(/ }).first().click();
+    // The SQL Lab connection picker reads "Select a connection" until one is chosen, then the
+    // engine name (e.g. "demoeng (trino)"); match either so a fresh or a reused tab both work.
+    await page.getByRole("combobox").filter({ hasText: /Select a connection|\(/ }).first().click();
     await page.getByRole("option", { name: new RegExp(`^${ENGINE} \\(trino\\)`) }).click({ timeout: 30_000 });
     // 42, not 1: the grid's row-number cell would match 1.
     await runSql(`SELECT 41 + 1 AS ${MARK}`, /^\s*42\s*$/);

@@ -10,9 +10,15 @@ FROM rust:bookworm AS builder
 WORKDIR /src
 COPY . .
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+# Scope the compiled-target cache per build identity so parallel demo stacks
+# (different COMPOSE_PROJECT_NAME) or branches never share `/src/target`. A shared
+# target cache let one checkout's build leave another's crates looking up to date,
+# so the image shipped a stale binary (#816). The registry and git caches stay
+# shared: their contents are immutable per lockfile.
+ARG CARGO_TARGET_CACHE=egret-demo
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/src/target \
+    --mount=type=cache,id=egret-target-${CARGO_TARGET_CACHE},target=/src/target \
     cargo build --release -p egret-bin --locked \
  && cp target/release/egret /usr/local/bin/egret
 
