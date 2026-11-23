@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
 import dayjs from "dayjs";
 import { ArrowDown, ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Download, History, Loader2, RotateCw, ScrollText } from "lucide-react";
-import { getWorkflowDownloadExecutionLogsUrl } from "@/api/generated/workflow/workflow";
+import { getWorkflowDownloadExecutionLogsUrl, getWorkflowFollowExecutionLogsUrl } from "@/api/generated/workflow/workflow";
 import type { LogLevel, LogLineDto, TaskRunDto, WorkflowDownloadExecutionLogsParams } from "@/api/generated/model";
 import { EmptyState } from "@/components/explore/EmptyState";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -16,6 +16,7 @@ import {
   type LogGroup,
   type LogRow,
 } from "@/components/workflows/executions/logs/logRows";
+import { useEventSourceFollow } from "@/components/workflows/executions/useEventSourceFollow";
 import { useLogFollow, type LogFilters } from "@/components/workflows/executions/logs/useLogFollow";
 
 /**
@@ -133,7 +134,14 @@ export function LogView({
   downloadName,
   toolbar,
 }: LogViewProps) {
-  const follow = useLogFollow(ws, executionId, filters, { pageSize, windowLines, endedAt });
+  // An event stream says when lines exist; the cursor read still fetches them, filtered.
+  // If the stream fails, the timer polling carries on (7e #3).
+  const [nudge, setNudge] = useState(0);
+  const stream = useEventSourceFollow<unknown>(getWorkflowFollowExecutionLogsUrl(ws, executionId), {
+    enabled: true,
+    onEvent: () => setNudge((n) => n + 1),
+  });
+  const follow = useLogFollow(ws, executionId, filters, { pageSize, windowLines, endedAt, live: stream.live, nudge });
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const { rows, offsets } = useMemo(
     () => buildRows(follow.lines, { grouped, runs, collapsed }),
