@@ -5471,3 +5471,327 @@ async fn kill_by_ids_refuses_an_ended_execution_with_a_live_sibling_and_kills_no
     assert_eq!(state_of(&db, c).await, "RUNNING");
     assert_eq!(state_of(&db, stuck).await, "SUCCESS");
 }
+
+// -- restart and replay --
+
+/// A flow of its own and an execution of it, finished through the real
+/// worker as `ok` (`SUCCESS`) or not (`FAILED`). `tick` is global, so the
+/// callers finish one execution before they start the next.
+async fn finished_exec(
+    pool: &sqlx::PgPool,
+    ws: Uuid,
+    user: egret_core::UserId,
+    ok: bool,
+) -> (Uuid, Uuid) {
+    let db = Db { pool: pool.clone() };
+    let source = runnable_source(&format!("bulk-rerun-{}", Uuid::new_v4().simple()));
+    let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
+    let id = egret_workflow::worker::start_execution(
+        pool,
+        ws,
+        Some(flow),
+        &source,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let want = if ok { "SUCCESS" } else { "FAILED" };
+    common::drive_to(&db, id, want).await;
+    (id, flow)
+}
+
+async fn replays_of(db: &Db, ids: &[Uuid]) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions WHERE replayed_from_execution_id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count replays")
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_ids_restarts_every_listed_execution(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, false).await;
+    let (b, _) = finished_exec(&pool, ws, user, false).await;
+    let attempt_of = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT attempt_number FROM workflow.executions WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = [attempt_of(a).await, attempt_of(b).await];
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for (id, was) in [a, b].into_iter().zip(before) {
+        assert_ne!(state_of(&db, id).await, "FAILED");
+        assert_eq!(attempt_of(id).await, was + 1, "restarted in place");
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_ids_with_a_running_execution_changes_nothing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, false).await;
+    let (c, _) = finished_exec(&pool, ws, user, false).await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, running, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(running.to_string(), "not restartable".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, c).await, "FAILED");
+}
+
+/// The in-place restart's worker refusals are screened, not only its state: a
+/// loop-free FAILED execution whose files the pruner deleted is refused by the
+/// worker (D10), so the batch must refuse it up front and restart nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_ids_screens_the_workers_other_refusals_and_restarts_nothing(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, false).await;
+    let (pruned, _) = finished_exec(&pool, ws, user, false).await;
+    let (c, _) = finished_exec(&pool, ws, user, false).await;
+    sqlx::query("UPDATE workflow.executions SET files_pruned_at = now() WHERE id = $1")
+        .bind(pruned)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, pruned, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(pruned.to_string(), "files pruned".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, c).await, "FAILED");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_ids_on_the_current_source_makes_a_new_execution_each(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, false).await;
+    let (b, _) = finished_exec(&pool, ws, user, false).await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-ids?source=current"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    assert_eq!(replays_of(&db, &[a, b]).await, 2);
+    // The old executions are untouched.
+    assert_eq!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, b).await, "FAILED");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_query_applies_to_exactly_the_matched_set(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, flow_a) = finished_exec(&pool, ws, user, false).await;
+    let (bystander, _) = finished_exec(&pool, ws, user, false).await;
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-query?flow_id={flow_a}"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 1);
+    assert_ne!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, bystander).await, "FAILED");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn replay_by_ids_creates_a_new_execution_for_each(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, true).await;
+    let (b, _) = finished_exec(&pool, ws, user, true).await;
+    let app = common::app(&db).await;
+    let before = common::execution_count(&db, ws).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/replay/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    assert_eq!(common::execution_count(&db, ws).await, before + 2);
+    assert_eq!(replays_of(&db, &[a, b]).await, 2);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn replay_by_ids_with_a_running_execution_creates_nothing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, true).await;
+    let (c, _) = finished_exec(&pool, ws, user, true).await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let before = common::execution_count(&db, ws).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/replay/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, running, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(running.to_string(), "not finished".to_string())]
+    );
+    assert_eq!(common::execution_count(&db, ws).await, before);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn replay_by_query_applies_to_exactly_the_matched_set(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, flow_a) = finished_exec(&pool, ws, user, true).await;
+    let (bystander, _) = finished_exec(&pool, ws, user, true).await;
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/replay/by-query?flow_id={flow_a}"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 1);
+    assert_eq!(replays_of(&db, &[a]).await, 1);
+    assert_eq!(replays_of(&db, &[bystander]).await, 0);
+}
+
+/// `latestRevision` and `revision` are one source for the whole batch: the
+/// replay runs the flow's current draft, not the execution's frozen copy.
+#[sqlx::test(migrations = "../../migrations")]
+async fn replay_by_ids_honours_latest_revision_and_refuses_a_bad_source(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, flow) = finished_exec(&pool, ws, user, true).await;
+    let frozen: String = sqlx::query_scalar("SELECT source FROM workflow.executions WHERE id = $1")
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let edited = frozen.replace("message: hi", "message: edited");
+    sqlx::query("UPDATE workflow.flows SET source = $2 WHERE id = $1")
+        .bind(flow)
+        .bind(&edited)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions/replay/by-ids");
+    let source_of_replay = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT source FROM workflow.executions WHERE replayed_from_execution_id = $1 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let res = common::post(&app, &base, user, serde_json::json!({"ids": [a]})).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(source_of_replay().await, frozen, "default: the frozen copy");
+    let res = common::post(
+        &app,
+        &format!("{base}?latestRevision=true"),
+        user,
+        serde_json::json!({"ids": [a]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(
+        source_of_replay().await,
+        edited,
+        "latestRevision: the draft"
+    );
+    let before = common::execution_count(&db, ws).await;
+    let res = common::post(
+        &app,
+        &format!("{base}?revision=0"),
+        user,
+        serde_json::json!({"ids": [a]}),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    assert_eq!(common::execution_count(&db, ws).await, before);
+}
+
+#[tokio::test]
+async fn restart_and_replay_bulk_routes_need_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let id = exec_in(&db, ws, reader, "FAILED").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    for op in ["restart", "replay"] {
+        let by_ids = common::post(
+            &app,
+            &format!("{base}/{op}/by-ids"),
+            reader,
+            serde_json::json!({"ids": [id]}),
+        )
+        .await;
+        assert_eq!(by_ids.status(), 403, "{op} by-ids");
+        let by_query = common::post_no_body(&app, &format!("{base}/{op}/by-query"), reader).await;
+        assert_eq!(by_query.status(), 403, "{op} by-query");
+    }
+    assert_eq!(state_of(&db, id).await, "FAILED");
+}

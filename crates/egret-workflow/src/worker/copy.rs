@@ -166,66 +166,12 @@ async fn replay_locked(
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;
-    let row = sqlx::query(OLD_ROW)
-        .bind(req.from)
-        .bind(req.workspace_id)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(db_err)?;
-    let old = Old {
-        loop_root: row.get("loop_root"),
-        files_pruned: row.get("files_pruned"),
-        idle: row.get("idle"),
-        labels: row.get("labels"),
-        labels_replaced: row.get("labels_replaced"),
-        attempt_number: row.get("attempt_number"),
-        seq: row.get("seq"),
-        inputs: row.get("inputs"),
-        secret_inputs: row.get("secret_inputs"),
-        variables: row.get("variables"),
-        flow_id: row.get("flow_id"),
-    };
+    let old = load_old(conn, req).await?;
 
-    // 2. A loop iteration is replayed through its root.
-    if let Some(root) = old.loop_root {
-        return Ok(Err(ReplayRefused::LoopIteration { root }));
-    }
-    let last = state
-        .history
-        .last()
-        .copied()
-        .unwrap_or(crate::executor::RunState::Created);
-    let terminal = last.is_terminal();
-    // 3. A replay needs an ended execution.
-    if matches!(req.kind, ReplayKind::Whole | ReplayKind::FromTaskRun(_)) && !terminal {
-        return Ok(Err(ReplayRefused::NotTerminal(last.wire().to_string())));
-    }
-    // 4. S7: a copy carries the old runs' files and must not copy live runs.
-    if req.kind != ReplayKind::Whole {
-        if old.files_pruned {
-            return Ok(Err(ReplayRefused::FilesPruned));
-        }
-        if terminal && !old.idle {
-            return Ok(Err(ReplayRefused::AfterExecutionRunning));
-        }
-    }
-
-    // 5. The selection.
-    let selection = match select(conn, req, &old_ctx.plan, &state).await? {
-        Ok(selection) => selection,
+    // 2-6. The refusals, before the first write.
+    let copied = match screen(conn, req, &old_ctx.plan, &state, &old).await? {
+        Ok(copied) => copied,
         Err(refused) => return Ok(Err(refused)),
-    };
-    // 6. The copy onto the chosen source's plan (D5, S3).
-    let copied = match selection {
-        None => None,
-        Some(sel) => {
-            let target = crate::executor::build_plan(req.source)
-                .map_err(|e| Error::InvalidInput(format!("the flow does not plan: {e}")))?;
-            match crate::executor::copy_onto(&old_ctx.plan, &target, &state, &sel) {
-                Ok(copied) => Some((target, copied)),
-                Err(refusal) => return Ok(Err(refused(refusal))),
-            }
-        }
     };
 
     // 7. Inputs (D7).
@@ -352,6 +298,109 @@ async fn replay_locked(
         restart::copy_job(conn, ctx.id, Stack::Fresh(gate.clone()), &copied.reset, op).await?;
     claim::run_job(conn, job).await?;
     Ok(Ok(ctx.id))
+}
+
+/// The replayed execution's row (see [`OLD_ROW`]).
+async fn load_old(conn: &mut PgConnection, req: &ReplayRequest<'_>) -> Result<Old> {
+    let row = sqlx::query(OLD_ROW)
+        .bind(req.from)
+        .bind(req.workspace_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    Ok(Old {
+        loop_root: row.get("loop_root"),
+        files_pruned: row.get("files_pruned"),
+        idle: row.get("idle"),
+        labels: row.get("labels"),
+        labels_replaced: row.get("labels_replaced"),
+        attempt_number: row.get("attempt_number"),
+        seq: row.get("seq"),
+        inputs: row.get("inputs"),
+        secret_inputs: row.get("secret_inputs"),
+        variables: row.get("variables"),
+        flow_id: row.get("flow_id"),
+    })
+}
+
+/// **The one rule for whether a replay (or a restart on a source) is
+/// refused** by the execution and the chosen source, before any write: a loop
+/// iteration, an execution that has not ended, the files and a live
+/// `afterExecution:` (S7), the selection of runs, and the copy onto the
+/// chosen source's plan (D5, S3). The answer is the copy, or `None` for a
+/// whole replay. [`replay_locked`] (the write, under the lock) and
+/// [`replay_would_refuse`] (the bulk pre-flight, unlocked) BOTH call this, so
+/// they cannot drift.
+async fn screen(
+    conn: &mut PgConnection,
+    req: &ReplayRequest<'_>,
+    plan: &Plan,
+    state: &crate::executor::ExecutionState,
+    old: &Old,
+) -> Result<std::result::Result<Option<(Plan, CopiedRuns)>, ReplayRefused>> {
+    // 2. A loop iteration is replayed through its root.
+    if let Some(root) = old.loop_root {
+        return Ok(Err(ReplayRefused::LoopIteration { root }));
+    }
+    let last = state
+        .history
+        .last()
+        .copied()
+        .unwrap_or(crate::executor::RunState::Created);
+    let terminal = last.is_terminal();
+    // 3. A replay needs an ended execution.
+    if matches!(req.kind, ReplayKind::Whole | ReplayKind::FromTaskRun(_)) && !terminal {
+        return Ok(Err(ReplayRefused::NotTerminal(last.wire().to_string())));
+    }
+    // 4. S7: a copy carries the old runs' files and must not copy live runs.
+    if req.kind != ReplayKind::Whole {
+        if old.files_pruned {
+            return Ok(Err(ReplayRefused::FilesPruned));
+        }
+        if terminal && !old.idle {
+            return Ok(Err(ReplayRefused::AfterExecutionRunning));
+        }
+    }
+    // 5. The selection.
+    let selection = match select(conn, req, plan, state).await? {
+        Ok(selection) => selection,
+        Err(refused) => return Ok(Err(refused)),
+    };
+    // 6. The copy onto the chosen source's plan (D5, S3).
+    Ok(Ok(match selection {
+        None => None,
+        Some(sel) => {
+            let target = crate::executor::build_plan(req.source)
+                .map_err(|e| Error::InvalidInput(format!("the flow does not plan: {e}")))?;
+            match crate::executor::copy_onto(plan, &target, state, &sel) {
+                Ok(copied) => Some((target, copied)),
+                Err(refusal) => return Ok(Err(refused(refusal))),
+            }
+        }
+    }))
+}
+
+/// Why [`replay_execution`] would write nothing for `req`, read without
+/// locking and without writing: `Ok(None)` when it would proceed as far as the
+/// inputs. It runs [`screen`] on the unlocked load, then the refusals
+/// [`claim::insert_execution`] makes of the chosen source
+/// ([`claim::start_screen`]). `NotFound` for an execution outside
+/// `req.workspace_id`. The one thing it does not judge is `ReplayInputs`
+/// (`Reuse` reveals the stored SECRET values, which needs the master key).
+pub async fn replay_would_refuse(
+    conn: &mut PgConnection,
+    req: &ReplayRequest<'_>,
+) -> Result<Option<ReplayRefused>> {
+    let (ctx, state, _) = claim::load_with(conn, req.from, claim::Lock::No, Stack::Reader).await?;
+    if ctx.workspace_id != req.workspace_id {
+        return Err(Error::NotFound("execution".into()));
+    }
+    let old = load_old(conn, req).await?;
+    if let Err(refused) = screen(conn, req, &ctx.plan, &state, &old).await? {
+        return Ok(Some(refused));
+    }
+    claim::start_screen(conn, req.source, old.flow_id, Some(req.started_by)).await?;
+    Ok(None)
 }
 
 /// The old runs a copy keeps and resets, or `None` for a whole replay; or

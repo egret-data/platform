@@ -4370,6 +4370,41 @@ pub(super) async fn settle_new(conn: &mut PgConnection, ctx: &ExecutionCtx) -> R
     settle(conn, ctx, &empty, empty.clone(), Tick(0), None).await
 }
 
+/// **What every start refuses a source for**, before any row is written: it
+/// does not parse or plan, a task this deployment cannot serve, and the
+/// `egret.sql` creator door ([`sql_principal::check_start`]).
+/// [`insert_execution`] (the write) and the bulk restart/replay pre-flight
+/// ([`replay_would_refuse`](super::copy::replay_would_refuse)) BOTH call this,
+/// so they cannot drift.
+pub(super) async fn start_screen(
+    conn: &mut PgConnection,
+    source: &str,
+    flow_id: Option<Uuid>,
+    started_by: Option<Uuid>,
+) -> Result<(crate::models::Flow, Plan)> {
+    let flow = crate::spec::parse(source)
+        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
+    let plan = build_plan(source)
+        .map_err(|e| Error::InvalidInput(format!("the flow does not plan: {e}")))?;
+    // No-silent-stall §4.3 point 4: a task this deployment has no handler
+    // for would be claimed and never run. Every start passes here -- the
+    // API, the webhook, a schedule fire, a Flow trigger, replay -- and a
+    // refusal is the caller's, as a source that does not plan is.
+    let unserved = crate::spec::unrunnable(&flow, crate::runtime::served());
+    if !unserved.is_empty() {
+        return Err(Error::InvalidInput(format!(
+            "the flow cannot run on this deployment: {}",
+            crate::spec::describe(&unserved)
+        )));
+    }
+    // Spec D10 (user decision 2026-10-28, final review I1): `egret.sql` runs
+    // as the flow's creator, so a person who is not the creator cannot start
+    // such a flow, and a trigger can start only a source the creator
+    // published. Every start passes here, as the check above.
+    super::sql_principal::check_start(conn, &flow, flow_id, source, started_by).await?;
+    Ok((flow, plan))
+}
+
 /// **The row half of a start** (package 7b A3): everything
 /// [`start_execution_in_on`] does before its settle -- parse, plan, the
 /// served check, `sql_principal::check_start`, the input check, the INSERT
@@ -4401,26 +4436,7 @@ pub(super) async fn insert_execution(
         started_by,
     } = new;
 
-    let flow = crate::spec::parse(source)
-        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
-    let plan = build_plan(source)
-        .map_err(|e| Error::InvalidInput(format!("the flow does not plan: {e}")))?;
-    // No-silent-stall §4.3 point 4: a task this deployment has no handler
-    // for would be claimed and never run. Every start passes here -- the
-    // API, the webhook, a schedule fire, a Flow trigger, replay -- and a
-    // refusal is the caller's, as a source that does not plan is.
-    let unserved = crate::spec::unrunnable(&flow, crate::runtime::served());
-    if !unserved.is_empty() {
-        return Err(Error::InvalidInput(format!(
-            "the flow cannot run on this deployment: {}",
-            crate::spec::describe(&unserved)
-        )));
-    }
-    // Spec D10 (user decision 2026-10-28, final review I1): `egret.sql` runs
-    // as the flow's creator, so a person who is not the creator cannot start
-    // such a flow, and a trigger can start only a source the creator
-    // published. Every start passes here, as the check above.
-    super::sql_principal::check_start(conn, &flow, flow_id, source, started_by).await?;
+    let (flow, plan) = start_screen(conn, source, flow_id, started_by).await?;
 
     let inputs = if inputs.is_object() {
         inputs

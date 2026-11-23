@@ -5767,43 +5767,10 @@ async fn replay_execution(
     }
     let choice = source_choice(q.source.as_deref(), q.revision.as_deref()).map_err(op)?;
     let ws = ctx.workspace_id.0;
-    let caller = ctx.principal.user_id.0;
     let detail = st.executions.get(ws, id).await.map_err(core_refusal)?;
-    // **A loop iteration is not replayed** (user ruling, W9a Task 3 fix round
-    // 1): it is a part of its loop root's run, not a run of the flow, and
-    // `replay::spawn_due` never replays one either. Its loop root is.
-    if let (Some(root), Some(index)) = (
-        detail.execution.parent_execution_id,
-        detail.execution.loop_index,
-    ) {
-        return Err(core_refusal(Error::InvalidInput(format!(
-            "execution {id} is iteration {index} of a Loop in execution {root}, not a run of \
-             the flow, and cannot be replayed on its own; replay its loop root {root}"
-        ))));
-    }
-    // **The same gate `start_flow_execution` passes** (fix round 1): a replay
-    // is a run of the flow, so it answers to the flow's current state. An
-    // execution whose `flow_id` is NULL names no flow (purged, KI-119), so
-    // neither door can be asked: refused, as a stronger "gone" than the trash.
-    let flow_id = detail
-        .execution
-        .flow_id
-        .ok_or_else(|| core_refusal(Error::NotFound("flow".into())))?;
-    let flow = startable_flow(&st, ws, flow_id)
-        .await
-        .map_err(core_refusal)?;
-    // An unknown spelling is refused with the non-terminal ones rather than
-    // treated as terminal: guessing "finished" is the over-accepting half.
-    if !crate::worker::from_wire(&detail.execution.state).is_some_and(RunState::is_terminal) {
-        return Err(core_refusal(Error::Conflict(format!(
-            "execution {id} is {} and has not finished; only a terminal execution can be replayed",
-            detail.execution.state
-        ))));
-    }
-    let source = source_text(&st, ws, &detail, &flow, choice)
+    let source = replay_gate(&st, ws, id, &detail, choice)
         .await
         .map_err(op)?;
-    refuse_disabled_source(choice, &source).map_err(core_refusal)?;
 
     // Which replay (D2, D9). The scoped read answers for this execution's
     // runs; a run of another execution is looked for under its `Loop` runs.
@@ -5873,39 +5840,133 @@ async fn replay_execution(
         };
         (inputs, Vec::new(), None)
     };
-    let inputs_replaced = matches!(inputs, crate::worker::ReplayInputs::Replace(_));
+    let replacement = replay_write(
+        &st,
+        &ctx,
+        id,
+        choice,
+        &source,
+        kind,
+        inputs,
+        input_files,
+        new_id,
+    )
+    .await
+    .map_err(op);
+    // Nothing was created: what the body stored goes too.
+    if let (Err(_), Some(parsed)) = (&replacement, &uploaded_for) {
+        discard_sink(ws, parsed, &PartSink::Start { execution: new_id }).await;
+    }
+    let replacement = replacement?;
+    let detail = st
+        .executions
+        .get(ws, replacement)
+        .await
+        .map_err(core_refusal)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(ExecutionDto::new(
+            detail,
+            true,
+            st.trigger_flags.worker_enabled,
+        )),
+    ))
+}
 
-    let replayed = crate::worker::replay_execution(
+/// A replay's route-level refusals, read-only: the single route and the bulk
+/// pre-flight ([`replay_check`]) BOTH call this. A loop iteration (400), the
+/// flow's state ([`startable_flow`]), an execution that has not ended
+/// ([`replayable_state`]), the source and its own `disabled:`. The answer is
+/// the text of the source it replays on. The worker's own refusals are
+/// [`replay_write`]'s, pre-screened by `worker::replay_would_refuse`.
+async fn replay_gate(
+    st: &WorkflowState,
+    ws: Uuid,
+    id: Uuid,
+    detail: &ExecutionDetail,
+    choice: SourceChoice,
+) -> std::result::Result<String, ExecOpError> {
+    // **A loop iteration is not replayed** (user ruling, W9a Task 3 fix round
+    // 1): it is a part of its loop root's run, not a run of the flow, and
+    // `replay::spawn_due` never replays one either. Its loop root is.
+    if let (Some(root), Some(index)) = (
+        detail.execution.parent_execution_id,
+        detail.execution.loop_index,
+    ) {
+        return Err(Error::InvalidInput(format!(
+            "execution {id} is iteration {index} of a Loop in execution {root}, not a run of \
+             the flow, and cannot be replayed on its own; replay its loop root {root}"
+        ))
+        .into());
+    }
+    // **The same gate `start_flow_execution` passes** (fix round 1): a replay
+    // is a run of the flow, so it answers to the flow's current state. An
+    // execution whose `flow_id` is NULL names no flow (purged, KI-119), so
+    // neither door can be asked: refused, as a stronger "gone" than the trash.
+    let flow_id = detail
+        .execution
+        .flow_id
+        .ok_or_else(|| Error::NotFound("flow".into()))?;
+    let flow = startable_flow(st, ws, flow_id).await?;
+    if !replayable_state(&detail.execution.state) {
+        return Err(Error::Conflict(format!(
+            "execution {id} is {} and has not finished; only a terminal execution can be replayed",
+            detail.execution.state
+        ))
+        .into());
+    }
+    let source = source_text(st, ws, detail, &flow, choice).await?;
+    refuse_disabled_source(choice, &source)?;
+    Ok(source)
+}
+
+/// Whether an execution in this state (wire spelling) has ended. An unknown
+/// spelling is refused with the non-terminal ones rather than treated as
+/// terminal: guessing "finished" is the over-accepting half.
+fn replayable_state(state: &str) -> bool {
+    crate::worker::from_wire(state).is_some_and(RunState::is_terminal)
+}
+
+/// The replay and its audit: the new execution's id. Every refusal of the
+/// worker is the answer's.
+#[allow(clippy::too_many_arguments)]
+async fn replay_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    choice: SourceChoice,
+    source: &str,
+    kind: crate::worker::ReplayKind,
+    inputs: crate::worker::ReplayInputs,
+    input_files: Vec<crate::storage::StoredFile>,
+    new_id: Uuid,
+) -> std::result::Result<Uuid, ExecOpError> {
+    let ws = ctx.workspace_id.0;
+    let inputs_replaced = matches!(inputs, crate::worker::ReplayInputs::Replace(_));
+    let replacement = crate::worker::replay_execution(
         &st.db.pool,
         &crate::worker::ReplayRequest {
             workspace_id: ws,
             from: id,
-            source: &source,
+            source,
             kind,
             inputs,
-            started_by: caller,
+            started_by: ctx.principal.user_id.0,
             id: new_id,
             input_files,
         },
     )
-    .await;
-    let replacement = match replayed {
-        Ok(Ok(replacement)) => Ok(replacement),
-        Ok(Err(r)) => Err(op(ExecOpError::from_replay_refusal(
+    .await?
+    .map_err(|r| {
+        ExecOpError::from_replay_refusal(
             id,
             r,
             match kind {
                 crate::worker::ReplayKind::FromTaskRun(t) => Some(t),
                 _ => None,
             },
-        ))),
-        Err(e) => Err(core_refusal(e)),
-    };
-    // Nothing was created: what the body stored goes too.
-    if let (Err(_), Some(parsed)) = (&replacement, &uploaded_for) {
-        discard_sink(ws, parsed, &PartSink::Start { execution: new_id }).await;
-    }
-    let replacement = replacement?;
+        )
+    })?;
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ws),
@@ -5925,19 +5986,157 @@ async fn replay_execution(
             "inputs_replaced": inputs_replaced,
         }),
     ));
+    Ok(replacement)
+}
+
+/// Bulk pre-flight of a replay for one id: read-only. Existence and the
+/// `workflow:manage` gate, [`replay_gate`] (the single route's own gates),
+/// then `worker::replay_would_refuse`: the worker's `screen` and start
+/// refusals the write applies under the lock, shared with it. A bulk replay is
+/// the default one, the whole execution with its own inputs (no `taskRunId`:
+/// Kestra's `replay/by-ids` takes none).
+async fn replay_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    choice: SourceChoice,
+) -> std::result::Result<(), bulk::Invalid> {
+    let ws = ctx.workspace_id.0;
+    if let Err(e) = require_exec(st, ctx, id, WF_MANAGE).await {
+        return Err(invalid_id(id, rerun_reason(&ExecOpError::Core(e))));
+    }
     let detail = st
         .executions
-        .get(ws, replacement)
+        .get(ws, id)
         .await
-        .map_err(core_refusal)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(ExecutionDto::new(
-            detail,
-            true,
-            st.trigger_flags.worker_enabled,
-        )),
-    ))
+        .map_err(|e| invalid_id(id, rerun_reason(&ExecOpError::Core(e))))?;
+    // Both are refused by the gate too; named here so the reason says which.
+    if detail.execution.parent_execution_id.is_some() && detail.execution.loop_index.is_some() {
+        return Err(invalid_id(id, "loop iteration"));
+    }
+    if !replayable_state(&detail.execution.state) {
+        return Err(invalid_id(id, "not finished"));
+    }
+    let source = replay_gate(st, ws, id, &detail, choice)
+        .await
+        .map_err(|e| invalid_id(id, rerun_reason(&e)))?;
+    let req = crate::worker::ReplayRequest {
+        workspace_id: ws,
+        from: id,
+        source: &source,
+        kind: crate::worker::ReplayKind::Whole,
+        inputs: crate::worker::ReplayInputs::Reuse,
+        started_by: ctx.principal.user_id.0,
+        id: Uuid::new_v4(),
+        input_files: Vec::new(),
+    };
+    let mut conn = st
+        .db
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| invalid_id(id, "could not be checked"))?;
+    match crate::worker::replay_would_refuse(&mut conn, &req).await {
+        Ok(None) => Ok(()),
+        Ok(Some(r)) => Err(invalid_id(id, replay_refused_reason(&r))),
+        Err(e) => Err(invalid_id(id, worker_error_reason(&e))),
+    }
+}
+
+/// The default replay and its audit for one execution, as a core error (what
+/// a bulk apply reports). The caller has run [`replay_check`].
+async fn replay_apply(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    choice: SourceChoice,
+) -> EgretResult<()> {
+    let ws = ctx.workspace_id.0;
+    let detail = st.executions.get(ws, id).await?;
+    let source = replay_gate(st, ws, id, &detail, choice)
+        .await
+        .map_err(op_error_to_core)?;
+    replay_write(
+        st,
+        ctx,
+        id,
+        choice,
+        &source,
+        crate::worker::ReplayKind::Whole,
+        crate::worker::ReplayInputs::Reuse,
+        Vec::new(),
+        Uuid::new_v4(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(op_error_to_core)
+}
+
+async fn replay_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+    choice: SourceChoice,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| replay_check(st, ctx, id, choice),
+        |id| replay_apply(st, ctx, id, choice),
+    )
+    .await?)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/replay/by-ids",
+    tag = "workflow",
+    params(WorkspacePath, BulkRerunQuery),
+    request_body = BulkIds,
+    responses(
+        (status = 200, description = "Every listed execution was replayed from the start into a NEW execution, with its own inputs (the default replay of the single route; no `taskRunId`).", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was replayed: `too_many` (more than 1000 ids), an invalid `source`/`revision`/`latestRevision`, or an `invalids` list naming every id that is missing, not yours to manage, a loop iteration, not finished, or that the chosen source cannot run.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Replay several executions, all or none (package 7f; Kestra `POST /replay/by-ids`).
+async fn replay_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<BulkRerunQuery>,
+    Json(body): Json<BulkIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    let choice = bulk_source_choice(&q)?;
+    replay_bulk(&st, &ctx, body.ids, choice).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/replay/by-query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery, BulkRerunQuery),
+    responses(
+        (status = 200, description = "Every matched execution was replayed into a new execution.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was replayed: `too_many` (the filter matches more than 1000), an invalid source, or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Replay every execution a filter matches, all or none (package 7f).
+async fn replay_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+    Query(r): Query<BulkRerunQuery>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let choice = bulk_source_choice(&r)?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    replay_bulk(&st, &ctx, ids, choice).await
 }
 
 /// `POST .../executions/{id}/kill`'s query.
@@ -6791,33 +6990,47 @@ async fn restart_execution(
     require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let choice = source_choice(q.source.as_deref(), q.revision.as_deref())?;
     let ws = ctx.workspace_id.0;
-    let caller = ctx.principal.user_id.0;
     let before = st.executions.get(ws, id).await?;
+    let target = restart_gate(&st, &ctx, id, &before, choice).await?;
+    let (status, shown) = restart_write(&st, &ctx, id, choice, target, &before).await?;
+    let detail = st.executions.get(ws, shown).await?;
+    Ok((
+        status,
+        Json(ExecutionDto::new(
+            detail,
+            true,
+            st.trigger_flags.worker_enabled,
+        )),
+    ))
+}
+
+/// What a restart will do, once [`restart_gate`] has passed it.
+enum RestartTarget {
+    /// In place, on the execution's own frozen source (200).
+    InPlace,
+    /// Into a new execution of this source (201).
+    OnSource(String),
+}
+
+/// A restart's route-level refusals, read-only: the single route and the bulk
+/// pre-flight ([`restart_check`]) BOTH call this. The frozen restart is gated
+/// by [`rerun_gate`]; a restart on another source by the loop-iteration
+/// refusal, the flow's state, the source and [`rerun_gate`] against it. The
+/// worker's refusals (state, files, `afterExecution:`, the copy) are
+/// [`restart_write`]'s, pre-screened by `worker::restart_would_refuse` /
+/// `worker::replay_would_refuse`.
+async fn restart_gate(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    before: &ExecutionDetail,
+    choice: SourceChoice,
+) -> std::result::Result<RestartTarget, ExecOpError> {
+    let ws = ctx.workspace_id.0;
+    let caller = ctx.principal.user_id.0;
     if choice == SourceChoice::Frozen {
-        rerun_gate(&st, ws, caller, &before, &before.source).await?;
-        match crate::worker::restart_execution(&st.db.pool, id).await? {
-            crate::worker::Restarted::Done => {}
-            crate::worker::Restarted::Refused(r) => {
-                return Err(ExecOpError::from_restart_refusal(id, r));
-            }
-        }
-        st.audit.emit(egret_audit::mutation_for(
-            &ctx.principal,
-            Some(ws),
-            "workflow_execution:restart",
-            "workflow_execution",
-            Some(id.to_string()),
-            serde_json::json!({ "from_state": before.execution.state }),
-        ));
-        let detail = st.executions.get(ws, id).await?;
-        return Ok((
-            StatusCode::OK,
-            Json(ExecutionDto::new(
-                detail,
-                true,
-                st.trigger_flags.worker_enabled,
-            )),
-        ));
+        rerun_gate(st, ws, caller, before, &before.source).await?;
+        return Ok(RestartTarget::InPlace);
     }
     // Into a new execution (D3). A loop iteration has no flow of its own to
     // choose a source of: refused naming its root, as the in-place restart is.
@@ -6831,10 +7044,45 @@ async fn restart_execution(
         .execution
         .flow_id
         .ok_or_else(|| Error::NotFound("flow".into()))?;
-    let flow = startable_flow(&st, ws, flow_id).await?;
-    let source = source_text(&st, ws, &before, &flow, choice).await?;
+    let flow = startable_flow(st, ws, flow_id).await?;
+    let source = source_text(st, ws, before, &flow, choice).await?;
     refuse_disabled_source(choice, &source)?;
-    rerun_gate(&st, ws, caller, &before, &source).await?;
+    rerun_gate(st, ws, caller, before, &source).await?;
+    Ok(RestartTarget::OnSource(source))
+}
+
+/// The restart and its audit. The answer is the status and the id of the
+/// execution that now shows the restart (the same one in place, the new one
+/// on another source).
+async fn restart_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    choice: SourceChoice,
+    target: RestartTarget,
+    before: &ExecutionDetail,
+) -> std::result::Result<(StatusCode, Uuid), ExecOpError> {
+    let ws = ctx.workspace_id.0;
+    let source = match target {
+        RestartTarget::InPlace => {
+            match crate::worker::restart_execution(&st.db.pool, id).await? {
+                crate::worker::Restarted::Done => {}
+                crate::worker::Restarted::Refused(r) => {
+                    return Err(ExecOpError::from_restart_refusal(id, r));
+                }
+            }
+            st.audit.emit(egret_audit::mutation_for(
+                &ctx.principal,
+                Some(ws),
+                "workflow_execution:restart",
+                "workflow_execution",
+                Some(id.to_string()),
+                serde_json::json!({ "from_state": before.execution.state }),
+            ));
+            return Ok((StatusCode::OK, id));
+        }
+        RestartTarget::OnSource(source) => source,
+    };
     let new_id = Uuid::new_v4();
     let replaced = crate::worker::replay_execution(
         &st.db.pool,
@@ -6844,7 +7092,7 @@ async fn restart_execution(
             source: &source,
             kind: crate::worker::ReplayKind::RestartOnSource,
             inputs: crate::worker::ReplayInputs::Reuse,
-            started_by: caller,
+            started_by: ctx.principal.user_id.0,
             id: new_id,
             input_files: Vec::new(),
         },
@@ -6866,15 +7114,234 @@ async fn restart_execution(
             "source": choice.wire(),
         }),
     ));
-    let detail = st.executions.get(ws, replaced).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(ExecutionDto::new(
-            detail,
-            true,
-            st.trigger_flags.worker_enabled,
-        )),
-    ))
+    Ok((StatusCode::CREATED, replaced))
+}
+
+/// The reason a bulk restart or replay pre-flight gives for a route-level
+/// refusal. Fixed strings, no internal error text.
+fn rerun_reason(e: &ExecOpError) -> &'static str {
+    match e {
+        ExecOpError::Core(Error::NotFound(_) | Error::Forbidden) => "not found",
+        ExecOpError::Core(Error::Conflict(_)) => "flow disabled",
+        ExecOpError::Core(Error::InvalidInput(_)) => "not runnable",
+        ExecOpError::Coded(_, code, _) if *code == FLOW_VERSION_NOT_FOUND_CODE => {
+            "flow version not found"
+        }
+        _ => "could not be checked",
+    }
+}
+
+/// [`rerun_reason`] for a worker's refusal of a restart in place.
+fn restart_refused_reason(r: &crate::worker::RestartRefused) -> &'static str {
+    use crate::worker::RestartRefused as R;
+    match r {
+        R::NotRestartable(_) => "not restartable",
+        R::NothingToRestart => "nothing to restart",
+        R::AfterExecutionRunning => "after-execution running",
+        R::FilesPruned => "files pruned",
+        R::LoopIteration { .. } => "loop iteration",
+    }
+}
+
+/// [`rerun_reason`] for a worker's refusal of a replay or a restart on a source.
+fn replay_refused_reason(r: &crate::worker::ReplayRefused) -> &'static str {
+    use crate::worker::ReplayRefused as R;
+    match r {
+        R::LoopIteration { .. } => "loop iteration",
+        R::NotTerminal(_) => "not finished",
+        R::NotRestartable(_) => "not restartable",
+        R::NothingToRestart => "nothing to restart",
+        R::FilesPruned => "files pruned",
+        R::AfterExecutionRunning => "after-execution running",
+        R::TaskRunNotFound | R::InsideWorkingDirectory => "could not be checked",
+        R::TaskNotInSource { .. } => "task not in source",
+    }
+}
+
+/// A worker pre-flight's own error (not a refusal) as a reason.
+fn worker_error_reason(e: &Error) -> &'static str {
+    match e {
+        Error::NotFound(_) => "not found",
+        Error::InvalidInput(_) => "not runnable",
+        _ => "could not be checked",
+    }
+}
+
+/// Bulk pre-flight of a restart for one id: read-only. Existence and the
+/// `workflow:manage` gate, then [`restart_gate`] (the single route's own
+/// gates), then the worker's refusal rules, which the write applies under the
+/// lock and which are shared with it: `worker::restart_would_refuse` for an
+/// in-place restart, `worker::replay_would_refuse` for a restart on a source.
+async fn restart_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    choice: SourceChoice,
+) -> std::result::Result<(), bulk::Invalid> {
+    let ws = ctx.workspace_id.0;
+    if let Err(e) = require_exec(st, ctx, id, WF_MANAGE).await {
+        return Err(invalid_id(id, rerun_reason(&ExecOpError::Core(e))));
+    }
+    let before = st
+        .executions
+        .get(ws, id)
+        .await
+        .map_err(|e| invalid_id(id, rerun_reason(&ExecOpError::Core(e))))?;
+    // A loop iteration is refused on every path; say so before the gates that
+    // would name another reason.
+    if before.execution.parent_execution_id.is_some() && before.execution.loop_index.is_some() {
+        return Err(invalid_id(id, "loop iteration"));
+    }
+    let target = restart_gate(st, ctx, id, &before, choice)
+        .await
+        .map_err(|e| invalid_id(id, rerun_reason(&e)))?;
+    let mut conn = st
+        .db
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| invalid_id(id, "could not be checked"))?;
+    match target {
+        RestartTarget::InPlace => {
+            match crate::worker::restart_would_refuse(&mut conn, ws, id).await {
+                Ok(None) => Ok(()),
+                Ok(Some(r)) => Err(invalid_id(id, restart_refused_reason(&r))),
+                Err(e) => Err(invalid_id(id, worker_error_reason(&e))),
+            }
+        }
+        RestartTarget::OnSource(source) => {
+            let req = crate::worker::ReplayRequest {
+                workspace_id: ws,
+                from: id,
+                source: &source,
+                kind: crate::worker::ReplayKind::RestartOnSource,
+                inputs: crate::worker::ReplayInputs::Reuse,
+                started_by: ctx.principal.user_id.0,
+                id: Uuid::new_v4(),
+                input_files: Vec::new(),
+            };
+            match crate::worker::replay_would_refuse(&mut conn, &req).await {
+                Ok(None) => Ok(()),
+                Ok(Some(r)) => Err(invalid_id(id, replay_refused_reason(&r))),
+                Err(e) => Err(invalid_id(id, worker_error_reason(&e))),
+            }
+        }
+    }
+}
+
+/// The restart and its audit for one execution, as a core error (what a bulk
+/// apply reports). The caller has run [`restart_check`].
+async fn restart_apply(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    choice: SourceChoice,
+) -> EgretResult<()> {
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    let target = restart_gate(st, ctx, id, &before, choice)
+        .await
+        .map_err(op_error_to_core)?;
+    restart_write(st, ctx, id, choice, target, &before)
+        .await
+        .map(|_| ())
+        .map_err(op_error_to_core)
+}
+
+/// The query of the bulk restart and replay routes: one source for the whole
+/// batch, as the single routes' `source` and `revision`, plus Kestra's
+/// `latestRevision` (the flow's current draft, as `source=current`).
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+pub struct BulkRerunQuery {
+    /// `frozen` (the default), `current` or `version:N`.
+    pub source: Option<String>,
+    /// Kestra's spelling of `version:N`: an integer N ≥ 1. Not with `source`.
+    pub revision: Option<String>,
+    /// Kestra's `latestRevision`: `true` is `source=current`. Not with
+    /// `source` or `revision`.
+    #[serde(rename = "latestRevision")]
+    pub latest_revision: Option<bool>,
+}
+
+/// The one source a bulk restart or replay runs every execution on.
+fn bulk_source_choice(q: &BulkRerunQuery) -> std::result::Result<SourceChoice, Error> {
+    let choice = if q.latest_revision == Some(true) {
+        if q.source.is_some() || q.revision.is_some() {
+            return Err(Error::InvalidInput(
+                "invalid_source: pass `latestRevision`, `source` or `revision`, not several".into(),
+            ));
+        }
+        SourceChoice::Current
+    } else {
+        source_choice(q.source.as_deref(), q.revision.as_deref()).map_err(op_error_to_core)?
+    };
+    Ok(choice)
+}
+
+async fn restart_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+    choice: SourceChoice,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| restart_check(st, ctx, id, choice),
+        |id| restart_apply(st, ctx, id, choice),
+    )
+    .await?)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/restart/by-ids",
+    tag = "workflow",
+    params(WorkspacePath, BulkRerunQuery),
+    request_body = BulkIds,
+    responses(
+        (status = 200, description = "Every listed execution was restarted, as the single route does (in place on its frozen source by default, else into a new execution of the chosen source).", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was restarted: `too_many` (more than 1000 ids), an invalid `source`/`revision`/`latestRevision`, or an `invalids` list naming every id that is missing, not yours to manage, a loop iteration, not `FAILED`/`PAUSED`, with nothing to restart, still running its `afterExecution:`, with pruned files, or that the chosen source cannot run.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Restart several executions, all or none (package 7f; Kestra `POST /restart/by-ids`).
+async fn restart_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<BulkRerunQuery>,
+    Json(body): Json<BulkIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    let choice = bulk_source_choice(&q)?;
+    restart_bulk(&st, &ctx, body.ids, choice).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/restart/by-query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery, BulkRerunQuery),
+    responses(
+        (status = 200, description = "Every matched execution was restarted.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was restarted: `too_many` (the filter matches more than 1000), an invalid source, or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Restart every execution a filter matches, all or none (package 7f).
+async fn restart_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+    Query(r): Query<BulkRerunQuery>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let choice = bulk_source_choice(&r)?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    restart_bulk(&st, &ctx, ids, choice).await
 }
 
 #[utoipa::path(
@@ -7779,6 +8246,22 @@ pub fn management_router() -> Router<WorkflowState> {
             axum::routing::delete(kill_executions_by_query),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/restart/by-ids",
+            post(restart_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/restart/by-query",
+            post(restart_executions_by_query),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/replay/by-ids",
+            post(replay_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/replay/by-query",
+            post(replay_executions_by_query),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/pause/by-ids",
             post(pause_executions_by_ids),
         )
@@ -7843,6 +8326,10 @@ pub fn management_router() -> Router<WorkflowState> {
         change_status_executions_by_query,
         kill_executions_by_ids,
         kill_executions_by_query,
+        restart_executions_by_ids,
+        restart_executions_by_query,
+        replay_executions_by_ids,
+        replay_executions_by_query,
         pause_executions_by_ids,
         pause_executions_by_query,
         resume_executions_by_ids,

@@ -243,21 +243,9 @@ async fn prepare(
     } = lock(conn, id, stack).await?;
 
     // The checks, in the spec's order (D10, then the executor's).
-    if let Some(refused) = d10_refusal(&row, &state, nested) {
-        return Ok(Err(refused.into()));
-    }
-    let cmds = match crate::executor::restart(&ctx.plan, &state, now) {
+    let cmds = match restart_refusal(&ctx.plan, &state, now, &row, nested)? {
         Ok(cmds) => cmds,
-        Err(RestartRefusal::NothingToRestart) => return Ok(Err(RestartRefused::NothingToRestart)),
-        Err(RestartRefusal::NotRestartable(s)) => {
-            return Ok(Err(RestartRefused::NotRestartable(s.wire().to_string())))
-        }
-        Err(RestartRefusal::InsideWorkingDirectory) => {
-            return Err(Error::Internal(anyhow::anyhow!(
-                "executor::restart refused InsideWorkingDirectory, which only mark_as returns \
-                 (execution {id})"
-            )))
-        }
+        Err(refused) => return Ok(Err(refused)),
     };
     // A reset `Subflow` run (`cmds.subflows`) needs nothing here: the
     // settle's walk opens it, and `subflow::spawn_one` looks up its earlier
@@ -270,6 +258,49 @@ async fn prepare(
         labels: row.labels,
         op: Op::Restart,
     }))
+}
+
+/// **The one rule for whether an execution can be restarted in place**:
+/// D10's refusals, then the executor's (`FAILED`/`PAUSED` state, something to
+/// restart). The commands are the restart's when it is not refused. [`prepare`]
+/// (the write, under the lock) and [`restart_would_refuse`] (the bulk
+/// pre-flight, unlocked and read-only) BOTH call this, so they cannot drift.
+fn restart_refusal(
+    plan: &crate::executor::Plan,
+    state: &crate::executor::ExecutionState,
+    now: crate::executor::Tick,
+    row: &Row0225,
+    nested: Nested,
+) -> Result<std::result::Result<RestartCommands, RestartRefused>> {
+    if let Some(refused) = d10_refusal(row, state, nested) {
+        return Ok(Err(refused.into()));
+    }
+    match crate::executor::restart(plan, state, now) {
+        Ok(cmds) => Ok(Ok(cmds)),
+        Err(RestartRefusal::NothingToRestart) => Ok(Err(RestartRefused::NothingToRestart)),
+        Err(RestartRefusal::NotRestartable(s)) => {
+            Ok(Err(RestartRefused::NotRestartable(s.wire().to_string())))
+        }
+        Err(RestartRefusal::InsideWorkingDirectory) => Err(Error::Internal(anyhow::anyhow!(
+            "executor::restart refused InsideWorkingDirectory, which only mark_as returns"
+        ))),
+    }
+}
+
+/// [`restart_refusal`] for `id` in `workspace`, read without locking and
+/// without writing: `Ok(None)` when [`restart_execution`] would proceed.
+/// `NotFound` for an execution that is not in `workspace`.
+pub async fn restart_would_refuse(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    id: Uuid,
+) -> Result<Option<RestartRefused>> {
+    let (ctx, state, now) = claim::load_with(conn, id, claim::Lock::No, Stack::Reader).await?;
+    if ctx.workspace_id != workspace {
+        return Err(Error::NotFound("execution".into()));
+    }
+    let row = row_facts(conn, id).await?;
+    Ok(restart_refusal(&ctx.plan, &state, now, &row, Nested::No)?.err())
 }
 
 /// Which label a copy's reset job adds (package 7b).
@@ -337,6 +368,17 @@ async fn lock(conn: &mut PgConnection, id: Uuid, stack: Stack) -> Result<Locked>
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;
+    let row = row_facts(conn, id).await?;
+    Ok(Locked {
+        ctx,
+        state,
+        now,
+        row,
+    })
+}
+
+/// The facts of `id`'s row the restart's checks read.
+async fn row_facts(conn: &mut PgConnection, id: Uuid) -> Result<Row0225> {
     let row = sqlx::query(
         "SELECT CASE WHEN loop_index IS NOT NULL THEN parent_execution_id END AS loop_root, \
                 files_pruned_at IS NOT NULL AS files_pruned, \
@@ -348,16 +390,11 @@ async fn lock(conn: &mut PgConnection, id: Uuid, stack: Stack) -> Result<Locked>
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
-    Ok(Locked {
-        ctx,
-        state,
-        now,
-        row: Row0225 {
-            loop_root: row.get("loop_root"),
-            files_pruned: row.get("files_pruned"),
-            idle: row.get("idle"),
-            labels: row.get("labels"),
-        },
+    Ok(Row0225 {
+        loop_root: row.get("loop_root"),
+        files_pruned: row.get("files_pruned"),
+        idle: row.get("idle"),
+        labels: row.get("labels"),
     })
 }
 

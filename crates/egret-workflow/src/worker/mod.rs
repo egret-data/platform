@@ -152,7 +152,9 @@ pub fn stamps_entered(before: &[&str], after: &[&str]) -> (bool, bool) {
     let e = stamps::Entered::of(&parse(before), &parse(after), false);
     (e.running, e.terminal)
 }
-pub use copy::{replay_execution, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest};
+pub use copy::{
+    replay_execution, replay_would_refuse, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest,
+};
 pub use delete::{delete_execution, DeleteRefused, DeleteRequest, Deleted};
 pub use kill::{
     kill_execution, kill_execution_reporting, kill_refusal, kill_would_refuse, KillOutcome,
@@ -164,9 +166,9 @@ pub use registry::Handlers;
 pub use release::HeldLeases;
 pub use render::execution_render_context;
 pub use restart::{
-    restart_execution, set_execution_status, set_task_run_state, status_change_refusal,
-    RestartRefused, Restarted, StateChangeRefused, NO_RESTARTABLE_ITERATION, REPLAY_LABEL_KEY,
-    REPLAY_LABEL_VALUE, RESTARTED_LABEL_KEY, RESTARTED_LABEL_VALUE,
+    restart_execution, restart_would_refuse, set_execution_status, set_task_run_state,
+    status_change_refusal, RestartRefused, Restarted, StateChangeRefused, NO_RESTARTABLE_ITERATION,
+    REPLAY_LABEL_KEY, REPLAY_LABEL_VALUE, RESTARTED_LABEL_KEY, RESTARTED_LABEL_VALUE,
 };
 /// **How far down a chain of child executions this worker will spawn** — the
 /// backstop beside `subflow`'s cycle guard, and the second half of the one
