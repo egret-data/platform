@@ -3131,7 +3131,15 @@ async fn delete_execution(
             r.body_text()
         )))
     })?;
-    // Q5: logs cascade with the row; keeping them is not possible.
+    let delete_storage = delete_flags(&q)?;
+    delete_write(&st, &ctx, id, delete_storage).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The request-level half of a delete, shared by the single route and the
+/// bulk routes: `deleteLogs=false` is refused (Q5: logs cascade with the row;
+/// keeping them is not possible). Returns `deleteStorage` (default true).
+fn delete_flags(q: &DeleteExecutionQuery) -> std::result::Result<bool, ExecOpError> {
     if q.delete_logs == Some(false) {
         return Err(ExecOpError::Coded(
             StatusCode::BAD_REQUEST,
@@ -3140,16 +3148,25 @@ async fn delete_execution(
                 .to_string(),
         ));
     }
+    Ok(q.delete_storage.unwrap_or(true))
+}
+
+/// The delete and its audit, with the single route's coded refusals. Every
+/// check is the worker's, under the lock (plan S5); a foreign or missing id
+/// is its `NotFound`, a 404.
+async fn delete_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    delete_storage: bool,
+) -> std::result::Result<(), ExecOpError> {
     let ws = ctx.workspace_id.0;
-    let delete_storage = q.delete_storage.unwrap_or(true);
     let fs = crate::storage::current();
     let req = crate::worker::DeleteRequest {
         workspace: ws,
         id,
         delete_storage,
     };
-    // Every check is the worker's, under the lock (plan S5); a foreign or
-    // missing id is its `NotFound`, a 404.
     let done = match crate::worker::delete_execution(&st.db.pool, fs.as_deref(), req).await? {
         Ok(done) => done,
         Err(refused) => return Err(ExecOpError::from_delete_refusal(id, refused)),
@@ -3172,7 +3189,119 @@ async fn delete_execution(
             "detached": done.detached,
         }),
     ));
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
+}
+
+/// Bulk pre-flight of a delete for one id: read-only. Existence and the
+/// `workflow:manage` gate, then the worker's own refusal
+/// ([`worker::delete_would_refuse`](crate::worker::delete_would_refuse): the
+/// very function the write runs under its locks, rolled back), so a pass here
+/// is not refused there. The `deleteLogs` rule is request-level, checked once
+/// by the caller.
+async fn delete_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ws: Uuid,
+    id: Uuid,
+) -> std::result::Result<(), bulk::Invalid> {
+    use crate::worker::DeleteRefused as R;
+    if let Err(e) = require_exec(st, ctx, id, WF_MANAGE).await {
+        return Err(invalid_id(id, gate_reason(&ExecOpError::Core(e))));
+    }
+    match crate::worker::delete_would_refuse(&st.db.pool, ws, id).await {
+        Ok(None) => Ok(()),
+        Ok(Some(R::NotARoot { .. })) => Err(invalid_id(id, "not a root")),
+        Ok(Some(R::NotIdle { .. } | R::ListenersPending)) => Err(invalid_id(id, "not terminated")),
+        Ok(Some(R::HasDependents { .. })) => Err(invalid_id(id, "has dependents")),
+        Err(Error::NotFound(_)) => Err(invalid_id(id, "not found")),
+        Err(_) => Err(invalid_id(id, "could not be checked")),
+    }
+}
+
+/// The delete and its audit for one execution, as a core error (what a bulk
+/// apply reports). The caller has run [`delete_check`].
+async fn delete_apply(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    delete_storage: bool,
+) -> EgretResult<()> {
+    delete_write(st, ctx, id, delete_storage)
+        .await
+        .map_err(|e| match e {
+            ExecOpError::Core(e) => e,
+            ExecOpError::Coded(_, _, m) | ExecOpError::Detailed(_, _, m, _) => Error::Conflict(m),
+        })
+}
+
+async fn delete_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    mut ids: Vec<Uuid>,
+    q: &DeleteExecutionQuery,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    let delete_storage = delete_flags(q).map_err(BulkRouteError::Exec)?;
+    // A repeated id would find its row gone on the second delete.
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(*id));
+    let ws = ctx.workspace_id.0;
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| delete_check(st, ctx, ws, id),
+        |id| delete_apply(st, ctx, id, delete_storage),
+    )
+    .await?)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/workflows/executions/by-ids",
+    tag = "workflow",
+    params(WorkspacePath, DeleteExecutionQuery),
+    request_body = BulkIds,
+    responses(
+        (status = 200, description = "Every listed execution was deleted, each as the single route does (its family, logs and, with `deleteStorage`, files).", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was deleted: `delete_logs_required` (`deleteLogs=false`), `too_many` (more than 1000 ids) or an `invalids` list naming every id that is missing, not yours to manage, not terminated, not a root or has dependents.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Delete several executions, all or none (package 7f; Kestra `DELETE /by-ids`).
+async fn delete_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<DeleteExecutionQuery>,
+    Json(body): Json<BulkIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    delete_bulk(&st, &ctx, body.ids, &q).await
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/workflows/executions/by-query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery, DeleteExecutionQuery),
+    responses(
+        (status = 200, description = "Every matched execution was deleted.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was deleted: `delete_logs_required`, `too_many` (the filter matches more than 1000) or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Delete every execution a filter matches, all or none (package 7f).
+async fn delete_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+    Query(d): Query<DeleteExecutionQuery>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    delete_bulk(&st, &ctx, ids, &d).await
 }
 
 #[utoipa::path(
@@ -3405,6 +3534,8 @@ pub struct BulkLabelsByIds {
 enum BulkRouteError {
     Bulk(bulk::BulkError),
     Core(Error),
+    /// A request-level refusal with its code (`delete_logs_required`).
+    Exec(ExecOpError),
 }
 
 impl From<Error> for BulkRouteError {
@@ -3424,6 +3555,7 @@ impl axum::response::IntoResponse for BulkRouteError {
         match self {
             Self::Bulk(b) => b.into_response(),
             Self::Core(e) => e.into_response(),
+            Self::Exec(e) => e.into_response(),
         }
     }
 }
@@ -8246,6 +8378,14 @@ pub fn management_router() -> Router<WorkflowState> {
             axum::routing::delete(kill_executions_by_query),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/by-ids",
+            axum::routing::delete(delete_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/by-query",
+            axum::routing::delete(delete_executions_by_query),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/restart/by-ids",
             post(restart_executions_by_ids),
         )
@@ -8326,6 +8466,8 @@ pub fn management_router() -> Router<WorkflowState> {
         change_status_executions_by_query,
         kill_executions_by_ids,
         kill_executions_by_query,
+        delete_executions_by_ids,
+        delete_executions_by_query,
         restart_executions_by_ids,
         restart_executions_by_query,
         replay_executions_by_ids,

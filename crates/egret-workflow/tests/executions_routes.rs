@@ -5795,3 +5795,176 @@ async fn restart_and_replay_bulk_routes_need_workflow_manage() {
     }
     assert_eq!(state_of(&db, id).await, "FAILED");
 }
+
+// -- delete --
+
+async fn exists(db: &Db, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM workflow.executions WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("exists")
+}
+
+#[tokio::test]
+async fn delete_by_ids_deletes_every_listed_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "SUCCESS").await,
+        exec_in(&db, ws, user, "FAILED").await,
+    );
+    let bystander = exec_in(&db, ws, user, "SUCCESS").await;
+    let app = common::app(&db).await;
+    let res = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-ids?deleteStorage=false"),
+        user,
+        serde_json::json!({"ids": [a, b, a]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    assert!(!exists(&db, a).await && !exists(&db, b).await);
+    assert!(exists(&db, bystander).await);
+}
+
+#[tokio::test]
+async fn delete_by_ids_refuses_every_bad_id_and_deletes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let ok1 = exec_in(&db, ws, user, "SUCCESS").await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let root = exec_in(&db, ws, user, "SUCCESS").await;
+    let retry = insert_retry(&db, ws, root, at(2)).await;
+    let parent = exec_in(&db, ws, user, "SUCCESS").await;
+    insert_child(&db, ws, None, Some((parent, 0)), at(2)).await;
+    let ok2 = exec_in(&db, ws, user, "SUCCESS").await;
+    let app = common::app(&db).await;
+    let res = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-ids"),
+        user,
+        serde_json::json!({"ids": [ok1, running, retry, parent, ok2]}),
+    )
+    .await;
+    let mut got = invalids_of(res).await;
+    got.sort();
+    let mut want = vec![
+        (running.to_string(), "not terminated".to_string()),
+        (retry.to_string(), "not a root".to_string()),
+        (parent.to_string(), "has dependents".to_string()),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+    // The atomicity proof: the valid ones still exist, nothing was deleted.
+    for id in [ok1, running, root, retry, parent, ok2] {
+        assert!(exists(&db, id).await, "{id} still exists");
+    }
+}
+
+#[tokio::test]
+async fn delete_by_query_deletes_exactly_the_matched_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "SUCCESS").await,
+        exec_in(&db, ws, user, "SUCCESS").await,
+    );
+    let other: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history) \
+         VALUES ($1, 'zzz.other', 'frozen', $2, 'SUCCESS', $3) RETURNING id",
+    )
+    .bind(ws)
+    .bind(runnable_source("bulk-del"))
+    .bind(serde_json::json!(["CREATED", "SUCCESS"]))
+    .fetch_one(&db.pool)
+    .await
+    .expect("other");
+    let app = common::app(&db).await;
+    let res = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-query?namespace=a.write"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    assert!(!exists(&db, a).await && !exists(&db, b).await);
+    assert!(exists(&db, other).await);
+}
+
+#[tokio::test]
+async fn delete_logs_false_is_refused_once_and_deletes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let a = exec_in(&db, ws, user, "SUCCESS").await;
+    let app = common::app(&db).await;
+    let by_ids = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-ids?deleteLogs=false"),
+        user,
+        serde_json::json!({"ids": [a]}),
+    )
+    .await;
+    assert_eq!(by_ids.status(), 400);
+    assert_eq!(common::json(by_ids).await["code"], "delete_logs_required");
+    let by_query = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-query?deleteLogs=false"),
+        user,
+    )
+    .await;
+    assert_eq!(by_query.status(), 400);
+    assert_eq!(common::json(by_query).await["code"], "delete_logs_required");
+    assert!(exists(&db, a).await);
+}
+
+#[tokio::test]
+async fn delete_bulk_needs_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let id = exec_in(&db, ws, reader, "SUCCESS").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    let by_ids = json_delete(
+        &app,
+        &format!("{base}/by-ids"),
+        reader,
+        serde_json::json!({"ids": [id]}),
+    )
+    .await;
+    assert_eq!(by_ids.status(), 403);
+    let by_query = common::delete(&app, &format!("{base}/by-query"), reader).await;
+    assert_eq!(by_query.status(), 403);
+    assert!(exists(&db, id).await);
+}
+
+/// `.../executions/by-ids` is the bulk route and `.../executions/{uuid}` is
+/// still the single delete: a static segment beats the `{id}` capture.
+#[tokio::test]
+async fn delete_bulk_paths_do_not_collide_with_the_single_delete() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (single, bulk_one) = (
+        exec_in(&db, ws, user, "SUCCESS").await,
+        exec_in(&db, ws, user, "SUCCESS").await,
+    );
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    let res = common::delete(&app, &format!("{base}/{single}"), user).await;
+    assert_eq!(res.status(), 204);
+    assert!(!exists(&db, single).await && exists(&db, bulk_one).await);
+    let res = json_delete(
+        &app,
+        &format!("{base}/by-ids"),
+        user,
+        serde_json::json!({"ids": [bulk_one]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 1);
+    assert!(!exists(&db, bulk_one).await);
+}
