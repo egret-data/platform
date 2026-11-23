@@ -2421,19 +2421,28 @@ fn csv_field(v: &str) -> String {
     }
 }
 
-const EXECUTIONS_CSV_HEADER: &str = "id,namespace,flow_id,state,created_at,started_at,ended_at\n";
+const EXECUTIONS_CSV_HEADER: &str =
+    "id,namespace,flow_id,flow_key,state,created_at,started_at,ended_at,duration_ms,labels\n";
 
 fn execution_csv_line(r: &crate::repo::ExecutionRow) -> String {
     let ts = |t: Option<DateTime<Utc>>| t.map(|t| t.to_rfc3339()).unwrap_or_default();
+    let duration_ms = match (r.started_at, r.ended_at) {
+        (Some(s), Some(e)) => (e - s).num_milliseconds().to_string(),
+        _ => String::new(),
+    };
+    let labels = r.labels.as_ref().map(|v| v.to_string()).unwrap_or_default();
     format!(
-        "{},{},{},{},{},{},{}\n",
+        "{},{},{},{},{},{},{},{},{},{}\n",
         r.id,
         csv_field(&r.namespace),
+        r.flow_id.map(|u| u.to_string()).unwrap_or_default(),
         csv_field(&r.flow_key),
         csv_field(&r.state),
         r.created_at.to_rfc3339(),
         ts(r.started_at),
         ts(r.ended_at),
+        duration_ms,
+        csv_field(&labels),
     )
 }
 
@@ -2622,8 +2631,7 @@ async fn follow_execution(
                 return None;
             };
             let state = detail.execution.state.clone();
-            let terminal =
-                crate::worker::from_wire(&state).is_some_and(RunState::is_terminal);
+            let terminal = crate::worker::from_wire(&state).is_some_and(RunState::is_terminal);
             let dto = ExecutionDto::new(detail, s.can_manage, s.worker_enabled);
             let json = serde_json::to_string(&dto).unwrap_or_default();
             let changed = s.last.as_deref() != Some(json.as_str());
@@ -2977,21 +2985,20 @@ async fn follow_execution_logs(
             } else {
                 tokio::time::sleep(s.interval).await;
             }
-            let Ok(lines) = s
-                .st
-                .logs
-                .page(
-                    s.ws,
-                    s.id,
-                    &LogQuery {
-                        after: s.after,
-                        limit: MAX_LOG_PAGE_LIMIT,
-                        task_id: None,
-                        task_run_id: None,
-                        min_level: None,
-                    },
-                )
-                .await
+            let Ok(lines) =
+                s.st.logs
+                    .page(
+                        s.ws,
+                        s.id,
+                        &LogQuery {
+                            after: s.after,
+                            limit: MAX_LOG_PAGE_LIMIT,
+                            task_id: None,
+                            task_run_id: None,
+                            min_level: None,
+                        },
+                    )
+                    .await
             else {
                 return None;
             };

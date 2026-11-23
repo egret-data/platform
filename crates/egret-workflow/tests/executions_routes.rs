@@ -3935,7 +3935,24 @@ async fn export_csv_has_a_header_and_one_row_per_matching_execution() {
     common::grant(&db, ws, manager, &["workflow:manage"]).await;
     insert_execution(&db, ws, None, "n.csv", "a", "SUCCESS", at(1)).await;
     insert_execution(&db, ws, None, "n.csv", "b", "FAILED", at(2)).await;
-    insert_execution(&db, ws, None, "n.csv", "=cmd", "FAILED", at(3)).await;
+    let cmd = insert_execution(&db, ws, None, "n.csv", "=cmd", "FAILED", at(3)).await;
+    // `a` carries a duration and comma/quote-bearing labels; `b` is terminal
+    // with no timestamps and null labels; `=cmd` is started but never ended.
+    let a_id = insert_execution(&db, ws, None, "n.csv", "a2", "SUCCESS", at(4)).await;
+    sqlx::query("UPDATE workflow.executions SET started_at=$2, ended_at=$3, labels=$4 WHERE id=$1")
+        .bind(a_id)
+        .bind(at(4))
+        .bind(at(4) + chrono::Duration::milliseconds(12_345))
+        .bind(serde_json::json!([{"key": "a,b", "value": "say \"hi\""}]))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workflow.executions SET started_at=$2 WHERE id=$1")
+        .bind(cmd)
+        .bind(at(3))
+        .execute(&db.pool)
+        .await
+        .unwrap();
     let app = common::app(&db).await;
     let url = format!("/api/ws/{ws}/workflows/executions/export.csv");
 
@@ -3959,11 +3976,28 @@ async fn export_csv_has_a_header_and_one_row_per_matching_execution() {
             .collect()
     }
     let all = lines(common::get(&app, &url, user).await).await;
-    assert_eq!(all.len(), 4, "{all:?}");
-    assert!(all[0].starts_with("id,namespace,flow_id,state"), "{all:?}");
+    assert_eq!(all.len(), 5, "{all:?}");
+    assert_eq!(
+        all[0],
+        "id,namespace,flow_id,flow_key,state,created_at,started_at,ended_at,duration_ms,labels"
+    );
+    // Newest first: a2 (12.345 s, quoted labels), then =cmd, b, a.
+    assert!(all[1].contains(",a2,SUCCESS,"), "{all:?}");
+    assert!(all[1].contains(",12345,"), "exact ms difference: {all:?}");
+    let labels_json = r#"[{"key":"a,b","value":"say \"hi\""}]"#;
+    let quoted = format!("\"{}\"", labels_json.replace('"', "\"\""));
     assert!(
-        all[1].contains(",'=cmd,"),
-        "formula defused, newest first: {all:?}"
+        all[1].ends_with(&format!(",12345,{quoted}")),
+        "labels compact JSON, quoted + doubled quotes: {all:?}"
+    );
+    assert!(all[2].contains(",'=cmd,"), "formula defused: {all:?}");
+    assert!(
+        all[2].ends_with(",,,"),
+        "started but not ended: empty duration + null labels: {all:?}"
+    );
+    assert!(
+        all[3].ends_with(",,,,"),
+        "no timestamps, null labels: empty cells: {all:?}"
     );
     let failed = lines(common::get(&app, &format!("{url}?state=FAILED"), user).await).await;
     assert_eq!(failed.len(), 3, "{failed:?}");
@@ -4110,7 +4144,15 @@ async fn eval(
     user: egret_core::UserId,
     expr: &str,
 ) -> axum::response::Response {
-    common::send_raw(app, "POST", path, user, "text/plain", expr.as_bytes().to_vec()).await
+    common::send_raw(
+        app,
+        "POST",
+        path,
+        user,
+        "text/plain",
+        expr.as_bytes().to_vec(),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -4130,7 +4172,8 @@ async fn eval_renders_in_execution_and_task_run_context() {
         common::json(lit).await,
         serde_json::json!({"result": "2", "error": null})
     );
-    let exec_id = common::json(eval(&app, &format!("{base}/eval"), user, "{{ execution.id }}").await).await;
+    let exec_id =
+        common::json(eval(&app, &format!("{base}/eval"), user, "{{ execution.id }}").await).await;
     assert_eq!(exec_id["result"], serde_json::json!(id.to_string()));
 
     // #1b: the task-run context binds `taskrun`.
@@ -4163,7 +4206,11 @@ async fn eval_returns_the_render_error_in_band_with_200() {
         "{{ nope.nope }}",
     )
     .await;
-    assert_eq!(res.status(), 200, "a broken expression is a result, not a 4xx");
+    assert_eq!(
+        res.status(),
+        200,
+        "a broken expression is a result, not a 4xx"
+    );
     let body = common::json(res).await;
     assert!(body["result"].is_null(), "{body}");
     assert!(
@@ -4175,7 +4222,9 @@ async fn eval_returns_the_render_error_in_band_with_200() {
 /// The raw response body as a string — so a sentinel-absence assertion covers
 /// the WHOLE wire payload, not just the fields we thought to parse.
 async fn raw_body(res: axum::response::Response) -> String {
-    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
     String::from_utf8(bytes.to_vec()).expect("utf-8 body")
 }
 
@@ -4197,22 +4246,39 @@ async fn eval_seals_secrets_on_both_paths() {
         egret_workflow::secret_inputs::split(&flow, serde_json::json!({ "pw": SENTINEL }))
             .expect("seal the sentinel");
     let sealed = sealed.expect("a sealed value");
-    assert_eq!(masked["pw"], serde_json::json!("******"), "split masks the input");
+    assert_eq!(
+        masked["pw"],
+        serde_json::json!("******"),
+        "split masks the input"
+    );
 
     let id = insert_execution_sealed(&db, ws, "a.sec", "ev", EVAL_SOURCE, masked, sealed).await;
     let trid = insert_task_run(&db, id, "t").await;
     let app = common::app(&db).await;
     let base = format!("/api/ws/{ws}/workflows/executions/{id}");
 
-    for path in [format!("{base}/eval"), format!("{base}/task-runs/{trid}/eval")] {
+    for path in [
+        format!("{base}/eval"),
+        format!("{base}/task-runs/{trid}/eval"),
+    ] {
         // `secret()` is never wired here: it is an error, not a value — and the
         // sentinel appears nowhere in the raw body.
         let res = eval(&app, &path, user, "{{ secret('pw') }}").await;
-        assert_eq!(res.status(), 200, "sealed secret is still a 200 with an error");
+        assert_eq!(
+            res.status(),
+            200,
+            "sealed secret is still a 200 with an error"
+        );
         let raw = raw_body(res).await;
-        assert!(!raw.contains(SENTINEL), "{path}: secret() leaked the sentinel: {raw}");
+        assert!(
+            !raw.contains(SENTINEL),
+            "{path}: secret() leaked the sentinel: {raw}"
+        );
         let body: Value = serde_json::from_str(&raw).unwrap();
-        assert!(body["result"].is_null(), "{path} leaked a secret value: {body}");
+        assert!(
+            body["result"].is_null(),
+            "{path} leaked a secret value: {body}"
+        );
         assert!(body["error"].as_str().is_some(), "{path}: {body}");
 
         // Every surface an attacker might try — the sentinel is in none of them.
@@ -4220,12 +4286,19 @@ async fn eval_seals_secrets_on_both_paths() {
             let res = eval(&app, &path, user, expr).await;
             assert_eq!(res.status(), 200);
             let raw = raw_body(res).await;
-            assert!(!raw.contains(SENTINEL), "{path} {expr}: leaked the sentinel: {raw}");
+            assert!(
+                !raw.contains(SENTINEL),
+                "{path} {expr}: leaked the sentinel: {raw}"
+            );
         }
 
         // The masked input renders the mask, never the plaintext.
         let masked = common::json(eval(&app, &path, user, "{{ inputs.pw }}").await).await;
-        assert_eq!(masked["result"], serde_json::json!("******"), "{path}: {masked}");
+        assert_eq!(
+            masked["result"],
+            serde_json::json!("******"),
+            "{path}: {masked}"
+        );
     }
 }
 
@@ -4252,7 +4325,10 @@ async fn eval_is_404_for_unknown_execution_or_task_run() {
     // A task run that is not this execution's.
     let miss_run = eval(
         &app,
-        &format!("/api/ws/{ws}/workflows/executions/{id}/task-runs/{}/eval", Uuid::new_v4()),
+        &format!(
+            "/api/ws/{ws}/workflows/executions/{id}/task-runs/{}/eval",
+            Uuid::new_v4()
+        ),
         user,
         "{{ 1 }}",
     )
@@ -4282,14 +4358,21 @@ async fn eval_requires_workflow_read() {
     let base = format!("/api/ws/{ws}/workflows/executions/{id}");
 
     assert_eq!(
-        eval(&app, &format!("{base}/eval"), user, "{{ 1 }}").await.status(),
+        eval(&app, &format!("{base}/eval"), user, "{{ 1 }}")
+            .await
+            .status(),
         403,
         "the execution eval route requires workflow:read"
     );
     assert_eq!(
-        eval(&app, &format!("{base}/task-runs/{trid}/eval"), user, "{{ 1 }}")
-            .await
-            .status(),
+        eval(
+            &app,
+            &format!("{base}/task-runs/{trid}/eval"),
+            user,
+            "{{ 1 }}"
+        )
+        .await
+        .status(),
         403,
         "the task-run eval route requires workflow:read"
     );
@@ -4379,11 +4462,13 @@ async fn follow_execution_emits_a_snapshot_then_closes_on_terminal() {
     let pool = db.pool.clone();
     let flip = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        sqlx::query("UPDATE workflow.executions SET state = 'SUCCESS', updated_at = now() WHERE id = $1")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .expect("flip to terminal");
+        sqlx::query(
+            "UPDATE workflow.executions SET state = 'SUCCESS', updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("flip to terminal");
     });
 
     let res = common::get(&app, &path, user).await;
@@ -4404,7 +4489,10 @@ async fn follow_execution_emits_a_snapshot_then_closes_on_terminal() {
     assert_eq!(first["source"], SEEDED_SOURCE, "{first}");
     assert!(first["runs"].is_array(), "{first}");
     let last = events.last().unwrap();
-    assert_eq!(last["state"], "SUCCESS", "the final event is the terminal snapshot");
+    assert_eq!(
+        last["state"], "SUCCESS",
+        "the final event is the terminal snapshot"
+    );
     assert_eq!(last["id"], id.to_string(), "{last}");
 }
 
@@ -4419,11 +4507,13 @@ async fn follow_logs_emits_appended_lines_then_closes_when_drained() {
     common::grant(&db, ws, user, &["workflow:read"]).await;
     // Terminal, and idle longer ago than the settle lag -> `complete` is true.
     let id = insert_execution(&db, ws, None, "a.logs", "f", "SUCCESS", at(1)).await;
-    sqlx::query("UPDATE workflow.executions SET updated_at = now() - interval '5 seconds' WHERE id = $1")
-        .bind(id)
-        .execute(&db.pool)
-        .await
-        .expect("backdate updated_at");
+    sqlx::query(
+        "UPDATE workflow.executions SET updated_at = now() - interval '5 seconds' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .expect("backdate updated_at");
     insert_log_line(&db, ws, id, 2, "one").await;
     insert_log_line(&db, ws, id, 4, "two").await;
     insert_log_line(&db, ws, id, 2, "three").await;
@@ -4438,7 +4528,10 @@ async fn follow_logs_emits_appended_lines_then_closes_when_drained() {
     let body = common::body_text(res).await;
 
     let events = sse_events(&body);
-    assert!(!events.is_empty(), "expected at least one log page event, got {events:#?}");
+    assert!(
+        !events.is_empty(),
+        "expected at least one log page event, got {events:#?}"
+    );
     // Every seeded line, in order, across whatever pages the stream emitted.
     let messages: Vec<String> = events
         .iter()
@@ -4447,7 +4540,11 @@ async fn follow_logs_emits_appended_lines_then_closes_when_drained() {
         .collect();
     assert_eq!(messages, vec!["one", "two", "three"], "{events:#?}");
     let last = events.last().unwrap();
-    assert_eq!(last["complete"], Value::Bool(true), "the final page reports complete");
+    assert_eq!(
+        last["complete"],
+        Value::Bool(true),
+        "the final page reports complete"
+    );
     assert_eq!(last["execution_state"], "SUCCESS", "{last}");
 }
 
@@ -4477,7 +4574,8 @@ async fn follow_is_404_before_the_stream_opens_for_a_foreign_execution() {
             "a foreign execution must 404 before the {suffix} stream opens"
         );
         assert_ne!(
-            res.headers()["content-type"], "text/event-stream",
+            res.headers()["content-type"],
+            "text/event-stream",
             "the 404 must be a plain response, not an event inside a stream ({suffix})"
         );
     }
