@@ -84,6 +84,7 @@
 //! would tell an author their flow still has an error they already fixed —
 //! or hide one they just introduced.
 
+use crate::bulk;
 use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, Query, State};
@@ -3204,7 +3205,7 @@ async fn set_execution_labels(
     Path((_ws, id)): Path<(String, Uuid)>,
     body: std::result::Result<Json<Vec<LabelDto>>, axum::extract::rejection::JsonRejection>,
 ) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
-    require_exec(&st, &ctx, id, WF_MANAGE).await?;
+    labels_gate(&st, &ctx, id).await?;
     let Json(body) = body.map_err(|r| {
         ExecOpError::Core(Error::InvalidInput(format!(
             "the body is not a JSON list of `{{\"key\": …, \"value\": …}}`: {}",
@@ -3212,14 +3213,94 @@ async fn set_execution_labels(
         )))
     })?;
     let ws = ctx.workspace_id.0;
-    let labels: Vec<crate::models::Label> = body
-        .into_iter()
+    labels_write(&st, &ctx, id, &to_labels(body)).await?;
+    let detail = st.executions.get(ws, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+fn to_labels(body: Vec<LabelDto>) -> Vec<crate::models::Label> {
+    body.into_iter()
         .map(|l| crate::models::Label {
             key: l.key,
             value: l.value,
         })
-        .collect();
-    let set = match crate::worker::set_execution_labels(&st.db.pool, ws, id, &labels).await? {
+        .collect()
+}
+
+/// The authorisation of a labels edit: the execution exists in this workspace
+/// and the caller may manage it (the per-object PDP). Shared by the single
+/// route and the bulk check, so the two cannot drift.
+async fn labels_gate(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> EgretResult<()> {
+    require_exec(st, ctx, id, WF_MANAGE).await
+}
+
+/// Bulk pre-flight for one id: read-only, never writes. Everything the write
+/// would refuse and can be known without the row lock -- foreign, missing or
+/// denied (all `not found`), not ended, or labels that break D5's rules --
+/// so a bulk call refuses before it changes anything. The reasons are fixed,
+/// safe strings: no internal error text reaches the response.
+async fn labels_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ws: Uuid,
+    id: Uuid,
+    labels: &[crate::models::Label],
+) -> std::result::Result<(), bulk::Invalid> {
+    let invalid = |reason: &str| bulk::Invalid {
+        id: id.to_string(),
+        reason: reason.to_string(),
+    };
+    // 404-not-403: a denied id is indistinguishable from a missing one.
+    if let Err(e) = labels_gate(st, ctx, id).await {
+        return Err(invalid(match e {
+            Error::NotFound(_) | Error::Forbidden => "not found",
+            _ => "could not be checked",
+        }));
+    }
+    let row: Option<(String, String, Option<serde_json::Value>, bool, bool)> = sqlx::query_as(
+        "SELECT state, source, labels, labels_replaced, \
+                COALESCE(workflow.execution_is_idle(id), false) \
+           FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(id)
+    .bind(ws)
+    .fetch_optional(&st.db.pool)
+    .await
+    .map_err(|_| invalid("could not be checked"))?;
+    let Some((_state, source, own_json, replaced, idle)) = row else {
+        return Err(invalid("not found"));
+    };
+    if !idle {
+        return Err(invalid("not ended"));
+    }
+    let flow_labels = crate::spec::parse(&source)
+        .map(|f| f.labels)
+        .unwrap_or_default();
+    let own = crate::labels::own_labels(own_json.as_ref());
+    let visible = crate::labels::visible_labels(&flow_labels, &own, replaced);
+    if crate::labels::edit_labels_refusal(labels, &visible).is_some() {
+        return Err(invalid("invalid labels"));
+    }
+    Ok(())
+}
+
+/// The write and its audit, with the single route's coded refusals.
+async fn labels_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    labels: &[crate::models::Label],
+) -> std::result::Result<(), ExecOpError> {
+    let ws = ctx.workspace_id.0;
+    let set = match crate::worker::set_execution_labels(&st.db.pool, ws, id, labels).await? {
         Ok(set) => set,
         Err(crate::worker::LabelsRefused::NotIdle(state)) => {
             return Err(ExecOpError::conflict(
@@ -3239,8 +3320,7 @@ async fn set_execution_labels(
         }
     };
     // Keys only: a label value can carry anything a person typed. The audit
-    // precedes the read-back, so a delete in between gives a 404 after an
-    // audited (committed) write.
+    // follows the committed write.
     st.audit.emit(egret_audit::mutation_for(
         &ctx.principal,
         Some(ws),
@@ -3249,12 +3329,135 @@ async fn set_execution_labels(
         Some(id.to_string()),
         serde_json::json!({ "keys_before": set.keys_before, "keys_after": set.keys_after }),
     ));
-    let detail = st.executions.get(ws, id).await?;
-    Ok(Json(ExecutionDto::new(
-        detail,
-        true,
-        st.trigger_flags.worker_enabled,
-    )))
+    Ok(())
+}
+
+/// The label replacement and its audit for one execution, as a core error
+/// (what a bulk apply reports). The caller has run [`labels_check`].
+async fn labels_apply(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    labels: &[crate::models::Label],
+) -> EgretResult<()> {
+    labels_write(st, ctx, id, labels)
+        .await
+        .map_err(|e| match e {
+            ExecOpError::Core(e) => e,
+            ExecOpError::Coded(_, _, m) | ExecOpError::Detailed(_, _, m, _) => {
+                Error::InvalidInput(m)
+            }
+        })
+}
+
+/// `POST …/executions/labels/by-ids`' body.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkLabelsByIds {
+    /// At most 1000 execution ids.
+    pub ids: Vec<Uuid>,
+    /// The whole list each execution shows afterwards (as the single route).
+    pub labels: Vec<LabelDto>,
+}
+
+/// A bulk route's refusal: the `400` listing every bad id, or a plain error.
+enum BulkRouteError {
+    Bulk(bulk::BulkError),
+    Core(Error),
+}
+
+impl From<Error> for BulkRouteError {
+    fn from(e: Error) -> Self {
+        Self::Core(e)
+    }
+}
+
+impl From<bulk::BulkError> for BulkRouteError {
+    fn from(e: bulk::BulkError) -> Self {
+        Self::Bulk(e)
+    }
+}
+
+impl axum::response::IntoResponse for BulkRouteError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Bulk(b) => b.into_response(),
+            Self::Core(e) => e.into_response(),
+        }
+    }
+}
+
+async fn labels_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+    labels: Vec<LabelDto>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    let ws = ctx.workspace_id.0;
+    let labels = to_labels(labels);
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| labels_check(st, ctx, ws, id, &labels),
+        |id| labels_apply(st, ctx, id, &labels),
+    )
+    .await?)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/labels/by-ids",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = BulkLabelsByIds,
+    responses(
+        (status = 200, description = "Every listed execution's labels were replaced.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was changed: `too_many` (more than 1000 ids) or an `invalids` list naming every id that is missing, not yours to manage, not ended, or whose labels break the rules.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Replace the labels of several executions, all or none (package 7f).
+async fn labels_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<BulkLabelsByIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    if body.ids.len() > bulk::MAX_BULK {
+        return Err(Error::InvalidInput(format!(
+            "too_many: at most {} ids per call",
+            bulk::MAX_BULK
+        ))
+        .into());
+    }
+    labels_bulk(&st, &ctx, body.ids, body.labels).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/labels/by-query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery),
+    request_body(content = Vec<LabelDto>, description = "The whole list each matched execution shows afterwards."),
+    responses(
+        (status = 200, description = "Every matched execution's labels were replaced.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was changed: `too_many` (the filter matches more than 1000) or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Replace the labels of every execution a filter matches, all or none (package 7f).
+async fn labels_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+    Json(labels): Json<Vec<LabelDto>>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    labels_bulk(&st, &ctx, ids, labels).await
 }
 
 #[utoipa::path(
@@ -6861,6 +7064,14 @@ pub fn management_router() -> Router<WorkflowState> {
             "/ws/{workspace}/workflows/executions/{id}/labels",
             post(set_execution_labels),
         )
+        .route(
+            "/ws/{workspace}/workflows/executions/labels/by-ids",
+            post(labels_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/labels/by-query",
+            post(labels_executions_by_query),
+        )
 }
 
 #[derive(utoipa::OpenApi)]
@@ -6896,6 +7107,8 @@ pub fn management_router() -> Router<WorkflowState> {
         get_execution_logs,
         delete_execution,
         set_execution_labels,
+        labels_executions_by_ids,
+        labels_executions_by_query,
         download_execution_logs,
         delete_execution_logs,
         crate::storage::routes::download_execution_file,
@@ -6942,6 +7155,10 @@ pub fn management_router() -> Router<WorkflowState> {
         crate::storage::kv::routes::delete_kv_values,
     ),
     components(schemas(
+        bulk::BulkResponse,
+        bulk::BulkErrorResponse,
+        bulk::Invalid,
+        BulkLabelsByIds,
         FindingDto,
         ValidationReportDto,
         FlowDto,

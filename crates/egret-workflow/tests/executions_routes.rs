@@ -4663,3 +4663,171 @@ async fn follow_requires_workflow_read() {
         );
     }
 }
+
+// ── Package 7f: bulk labels ────────────────────────────────────────────────
+
+async fn ended_exec(db: &Db, ws: Uuid) -> Uuid {
+    insert_execution_with(
+        db,
+        ws,
+        None,
+        "SUCCESS",
+        &runnable_source("bulk-labels"),
+        serde_json::json!({}),
+    )
+    .await
+}
+
+async fn stored_labels(db: &Db, id: Uuid) -> Option<Value> {
+    sqlx::query_scalar("SELECT labels FROM workflow.executions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("labels")
+}
+
+fn team(v: &str) -> Value {
+    serde_json::json!([{"key": "team", "value": v}])
+}
+
+#[tokio::test]
+async fn labels_by_ids_applies_to_every_listed_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (a, b) = (ended_exec(&db, ws).await, ended_exec(&db, ws).await);
+    let untouched = ended_exec(&db, ws).await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(stored_labels(&db, id).await, Some(team("x")));
+    }
+    assert_ne!(stored_labels(&db, untouched).await, Some(team("x")));
+}
+
+#[tokio::test]
+async fn labels_by_ids_with_one_unknown_id_changes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (a, b) = (ended_exec(&db, ws).await, ended_exec(&db, ws).await);
+    let ghost = Uuid::new_v4();
+    let before = stored_labels(&db, a).await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, ghost, b], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    let body = common::json(res).await;
+    assert_eq!(body["invalids"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["invalids"][0]["id"], ghost.to_string());
+    assert_eq!(body["invalids"][0]["reason"], "not found");
+    for id in [a, b] {
+        assert_eq!(stored_labels(&db, id).await, before, "all-or-nothing");
+    }
+}
+
+#[tokio::test]
+async fn labels_by_query_applies_to_exactly_the_matched_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (a, b) = (ended_exec(&db, ws).await, ended_exec(&db, ws).await);
+    let other: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history) \
+         VALUES ($1, 'zzz.other', 'frozen', $2, 'SUCCESS', $3) RETURNING id",
+    )
+    .bind(ws)
+    .bind(runnable_source("bulk-labels"))
+    .bind(serde_json::json!(["CREATED", "SUCCESS"]))
+    .fetch_one(&db.pool)
+    .await
+    .expect("other");
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-query?namespace=a.write"),
+        user,
+        team("q"),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(stored_labels(&db, id).await, Some(team("q")));
+    }
+    assert_ne!(stored_labels(&db, other).await, Some(team("q")));
+}
+
+#[tokio::test]
+async fn labels_bulk_refuses_more_than_max_bulk_ids_and_serves_an_empty_list() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/executions/labels/by-ids");
+    let many: Vec<Uuid> = (0..=egret_workflow::bulk::MAX_BULK)
+        .map(|_| Uuid::new_v4())
+        .collect();
+    let res = common::post(
+        &app,
+        &path,
+        user,
+        serde_json::json!({"ids": many, "labels": []}),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    assert!(common::json(res).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("too_many"));
+    let res = common::post(
+        &app,
+        &path,
+        user,
+        serde_json::json!({"ids": [], "labels": []}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 0);
+}
+
+#[tokio::test]
+async fn labels_bulk_needs_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let id = ended_exec(&db, ws).await;
+    let before = stored_labels(&db, id).await;
+    let app = common::app(&db).await;
+    let by_ids = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-ids"),
+        reader,
+        serde_json::json!({"ids": [id], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(by_ids.status(), 403);
+    let by_query = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-query"),
+        reader,
+        team("x"),
+    )
+    .await;
+    assert_eq!(by_query.status(), 403);
+    assert_eq!(stored_labels(&db, id).await, before);
+}
