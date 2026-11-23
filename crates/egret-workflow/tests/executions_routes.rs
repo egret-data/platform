@@ -4412,6 +4412,44 @@ fn sse_events(body: &str) -> Vec<Value> {
     out
 }
 
+/// Pull from a streamed SSE body until one complete `data:` event (terminated by
+/// a blank line) is buffered, then parse and return it; `None` once the stream
+/// ends with no further event. Reading events as they arrive — rather than
+/// buffering the whole body with `common::body_text` — lets a test observe the
+/// first event BEFORE it mutates the row, so there is no wall-clock race between
+/// the handler's first emit and the mutation (the
+/// [`time-dependent-test-assertions`] lesson).
+///
+/// `buf` carries bytes across calls (a chunk can split or join events). Keep-
+/// alive comment frames (no `data:`) are skipped.
+async fn next_sse_event(body: &mut axum::body::BodyDataStream, buf: &mut String) -> Option<Value> {
+    use futures_util::StreamExt as _;
+    loop {
+        if let Some(idx) = buf.find("\n\n") {
+            let block: String = buf.drain(..idx + 2).collect();
+            let mut data = String::new();
+            for line in block.lines() {
+                if let Some(rest) = line.strip_prefix("data:") {
+                    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                    if !data.is_empty() {
+                        data.push('\n');
+                    }
+                    data.push_str(rest);
+                }
+            }
+            if data.is_empty() {
+                continue; // a keep-alive comment frame; read on
+            }
+            return Some(serde_json::from_str(&data).expect("an SSE event's data is JSON"));
+        }
+        match body.next().await {
+            Some(Ok(chunk)) => buf.push_str(&String::from_utf8_lossy(&chunk)),
+            Some(Err(e)) => panic!("SSE stream error: {e}"),
+            None => return None,
+        }
+    }
+}
+
 /// Seed one exec-level log line (no task/run), returning nothing.
 async fn insert_log_line(db: &Db, ws: Uuid, ex: Uuid, level: i16, message: &str) {
     sqlx::query(
@@ -4443,10 +4481,15 @@ async fn settle_logs(db: &Db, ex: Uuid) {
 }
 
 /// **#2: the execution stream emits the current snapshot, a fresh event when it
-/// changes, and one final event as it goes terminal, then closes.** A RUNNING
-/// execution is flipped to SUCCESS mid-stream, concurrently with draining the
-/// body (which blocks until the stream ends — so a stream that never closed on a
-/// terminal state would hang this test rather than pass it).
+/// changes, and one final event as it goes terminal, then closes.**
+///
+/// Deterministic by construction — **no wall-clock race**. The body is read as a
+/// stream: the RUNNING snapshot is observed FIRST, and only then is the row
+/// flipped to SUCCESS, so the initial emit is guaranteed to have already
+/// happened regardless of CPU load (the earlier timer-vs-poll version flaked
+/// under full-suite contention; see `time-dependent-test-assertions`). The flip
+/// is the single mutation, and the stream must then deliver one terminal event
+/// and close.
 #[tokio::test]
 async fn follow_execution_emits_a_snapshot_then_closes_on_terminal() {
     let Some(db) = common::db().await else { return };
@@ -4456,39 +4499,40 @@ async fn follow_execution_emits_a_snapshot_then_closes_on_terminal() {
     let app = common::app(&db).await;
     let path = format!("/api/ws/{ws}/workflows/executions/{id}/follow");
 
-    // Flip RUNNING -> SUCCESS after the first snapshot has been emitted. The
-    // delay is far longer than the 20 ms poll interval, so the stream emits at
-    // least one RUNNING snapshot before it sees the terminal state.
-    let pool = db.pool.clone();
-    let flip = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-        sqlx::query(
-            "UPDATE workflow.executions SET state = 'SUCCESS', updated_at = now() WHERE id = $1",
-        )
-        .bind(id)
-        .execute(&pool)
-        .await
-        .expect("flip to terminal");
-    });
-
     let res = common::get(&app, &path, user).await;
     assert_eq!(res.status(), 200);
     assert_eq!(res.headers()["content-type"], "text/event-stream");
-    let body = common::body_text(res).await;
-    flip.await.unwrap();
 
-    let events = sse_events(&body);
-    assert!(
-        events.len() >= 2,
-        "expected an initial RUNNING snapshot and a terminal event, got {events:#?}"
-    );
-    let first = &events[0];
+    let mut body = res.into_body().into_data_stream();
+    let mut buf = String::new();
+
+    // Observe the initial RUNNING snapshot BEFORE mutating the row. Reading the
+    // first event is what proves the handler emitted it; the flip cannot race it.
+    let first = next_sse_event(&mut body, &mut buf)
+        .await
+        .expect("an initial snapshot event");
     assert_eq!(first["id"], id.to_string(), "{first}");
     assert_eq!(first["state"], "RUNNING", "the first event is the snapshot");
     // Same shape as `get_execution`: the frozen source and task-run list are here.
     assert_eq!(first["source"], SEEDED_SOURCE, "{first}");
     assert!(first["runs"].is_array(), "{first}");
-    let last = events.last().unwrap();
+
+    // Only now go terminal. The next poll tick (20 ms) sees SUCCESS, emits one
+    // final event, and ends the stream.
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .expect("flip to terminal");
+
+    // Drain to completion; the last event is the terminal snapshot, then close.
+    let mut last = None;
+    while let Some(ev) = next_sse_event(&mut body, &mut buf).await {
+        last = Some(ev);
+    }
+    let last = last.expect("a terminal event after the flip, then the stream closes");
     assert_eq!(
         last["state"], "SUCCESS",
         "the final event is the terminal snapshot"
