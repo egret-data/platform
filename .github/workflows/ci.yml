@@ -93,7 +93,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Link with mold (installed by setup-mold below) in every cargo invocation of this job.
-      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      # A `RUSTFLAGS` env var REPLACES `.cargo/config.toml`'s `[build] rustflags` (it does not
+      # append), so the mold flag must carry that file's cfgs too — `--cfg tracing_unstable`
+      # and `--cfg tokio_unstable`, which lakekeeper's embedded crates (iceberg-ext's
+      # `tracing::field::valuable`, tokio-metrics) require to compile. Keep this in sync with
+      # `.cargo/config.toml`.
+      RUSTFLAGS: "--cfg tracing_unstable --cfg tokio_unstable -C link-arg=-fuse-ld=mold"
     services:
       postgres:
         image: postgres:16
