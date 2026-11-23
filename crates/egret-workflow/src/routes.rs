@@ -3345,12 +3345,51 @@ async fn labels_apply(
 ) -> EgretResult<()> {
     labels_write(st, ctx, id, labels)
         .await
-        .map_err(|e| match e {
-            ExecOpError::Core(e) => e,
-            ExecOpError::Coded(_, _, m) | ExecOpError::Detailed(_, _, m, _) => {
-                Error::InvalidInput(m)
-            }
-        })
+        .map_err(op_error_to_core)
+}
+
+/// An operation's coded refusal as the core error a bulk apply reports.
+fn op_error_to_core(e: ExecOpError) -> Error {
+    match e {
+        ExecOpError::Core(e) => e,
+        ExecOpError::Coded(_, _, m) | ExecOpError::Detailed(_, _, m, _) => Error::InvalidInput(m),
+    }
+}
+
+/// The reason a bulk pre-flight gives for a gate's refusal. Fixed strings:
+/// no internal error text reaches the response. A denied id is
+/// indistinguishable from a missing one (404-not-403).
+fn gate_reason(e: &ExecOpError) -> &'static str {
+    match e {
+        ExecOpError::Core(Error::NotFound(_) | Error::Forbidden) => "not found",
+        ExecOpError::Core(Error::InvalidInput(_)) => "loop iteration",
+        ExecOpError::Coded(_, code, _) if *code == NOT_PAUSED_CODE => "not paused",
+        _ => "could not be checked",
+    }
+}
+
+fn invalid_id(id: Uuid, reason: &str) -> bulk::Invalid {
+    bulk::Invalid {
+        id: id.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+/// A bulk route's shared first steps: `workflow:manage`, then the cap.
+async fn bulk_gate(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    count: usize,
+) -> std::result::Result<(), BulkRouteError> {
+    egret_core::authz::require(&*st.pdp, ctx, WF_MANAGE).await?;
+    if count > bulk::MAX_BULK {
+        return Err(Error::InvalidInput(format!(
+            "too_many: at most {} ids per call",
+            bulk::MAX_BULK
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// `POST …/executions/labels/by-ids`' body.
@@ -4819,10 +4858,28 @@ async fn pause_execution(
     WsContext(ctx): WsContext,
     Path((_ws, id)): Path<(String, Uuid)>,
 ) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
-    require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let ws = ctx.workspace_id.0;
-    // The scoped read first: a foreign id is a 404 here and never reaches
-    // the worker.
+    let before = pause_gate(&st, &ctx, id).await?;
+    pause_write(&st, &ctx, id, &before.execution.state).await?;
+    let detail = st.executions.get(ws, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+/// What a pause needs before it reads any state: the caller may manage the
+/// execution, it is in this workspace (the scoped read keeps a foreign id
+/// from ever reaching the unscoped worker), it is not a loop iteration, and
+/// its flow is live. Shared by the single route and the bulk pre-flight.
+async fn pause_gate(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> std::result::Result<crate::repo::ExecutionDetail, ExecOpError> {
+    require_exec(st, ctx, id, WF_MANAGE).await?;
+    let ws = ctx.workspace_id.0;
     let before = st.executions.get(ws, id).await?;
     if let (Some(root), Some(_)) = (
         before.execution.parent_execution_id,
@@ -4830,7 +4887,18 @@ async fn pause_execution(
     ) {
         return Err(ExecOpError::loop_iteration(id, root, "cannot be paused"));
     }
-    live_flow_of(&st, ws, &before).await?;
+    live_flow_of(st, ws, &before).await?;
+    Ok(before)
+}
+
+/// The pause and its audit, with the single route's coded refusals.
+async fn pause_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    from_state: &str,
+) -> std::result::Result<(), ExecOpError> {
+    let ws = ctx.workspace_id.0;
     match crate::worker::pause_by_hand(&st.db.pool, ws, id).await? {
         crate::worker::Paused::Done => {}
         crate::worker::Paused::NotRunning(state) => {
@@ -4859,14 +4927,118 @@ async fn pause_execution(
         "workflow_execution:pause",
         "workflow_execution",
         Some(id.to_string()),
-        serde_json::json!({ "from_state": before.execution.state }),
+        serde_json::json!({ "from_state": from_state }),
     ));
-    let detail = st.executions.get(ws, id).await?;
-    Ok(Json(ExecutionDto::new(
-        detail,
-        true,
-        st.trigger_flags.worker_enabled,
-    )))
+    Ok(())
+}
+
+/// Bulk pre-flight of a pause for one id: read-only. The single route's gate
+/// ([`pause_gate`]), then the executor's own refusal rule
+/// ([`executor::pause_refusal_of`](crate::executor::pause_refusal_of), the
+/// one `pause_by_hand` applies under the lock). Fixed, safe reasons.
+async fn pause_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> std::result::Result<(), bulk::Invalid> {
+    let before = pause_gate(st, ctx, id)
+        .await
+        .map_err(|e| invalid_id(id, gate_reason(&e)))?;
+    use crate::executor::PauseRefusal as R;
+    match crate::executor::pause_refusal_of(
+        crate::worker::from_wire(&before.execution.state),
+        before
+            .runs
+            .iter()
+            .map(|r| crate::worker::from_wire(&r.state)),
+    ) {
+        None => Ok(()),
+        Some(R::NotRunning(_)) => Err(invalid_id(id, "not running")),
+        Some(R::TaskWaiting) => Err(invalid_id(id, "task waiting")),
+    }
+}
+
+/// The pause and its audit for one execution, as a core error (what a bulk
+/// apply reports). The caller has run [`pause_check`].
+async fn pause_apply(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> EgretResult<()> {
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    pause_write(st, ctx, id, &before.execution.state)
+        .await
+        .map_err(op_error_to_core)
+}
+
+async fn pause_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| pause_check(st, ctx, id),
+        |id| pause_apply(st, ctx, id),
+    )
+    .await?)
+}
+
+/// `POST …/executions/pause/by-ids`' body.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BulkIds {
+    /// At most 1000 execution ids.
+    pub ids: Vec<Uuid>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/pause/by-ids",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = BulkIds,
+    responses(
+        (status = 200, description = "Every listed execution is `PAUSED`.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was paused: `too_many` (more than 1000 ids) or an `invalids` list naming every id that is missing, not yours to manage, a loop iteration, not `RUNNING`/`RESTARTED`, or already has a `Pause`/`LoopUntil` waiting.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Pause several running executions by hand, all or none (package 7f).
+async fn pause_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<BulkIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    pause_bulk(&st, &ctx, body.ids).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/pause/by-query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery),
+    responses(
+        (status = 200, description = "Every matched execution is `PAUSED`.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was paused: `too_many` (the filter matches more than 1000) or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Pause every execution a filter matches, all or none (package 7f).
+async fn pause_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    pause_bulk(&st, &ctx, ids).await
 }
 
 /// What a resume finds waiting, read from the scoped detail before any body
@@ -4940,49 +5112,112 @@ fn resume_inputs_unexpected(id: Uuid) -> ExecOpError {
     )
 }
 
-/// The worker's answer to a resume, as the response (D5). `no_body_for` is
+/// The worker's answer to a resume, as a coded refusal (D5). `no_body_for` is
 /// the waiting `Pause`'s task id when the request carried no inputs at all,
 /// so a refusal of a required `onResume` input says the body was missing.
+fn resume_outcome(
+    id: Uuid,
+    outcome: EgretResult<crate::worker::Resumed>,
+    no_body_for: Option<&str>,
+) -> std::result::Result<crate::worker::Resumed, ExecOpError> {
+    use crate::worker::{ResumeRefused, Resumed};
+    Ok(match outcome? {
+        r @ (Resumed::Released(_) | Resumed::ByHand) => r,
+        Resumed::NotPaused => {
+            return Err(ExecOpError::conflict(
+                NOT_PAUSED_CODE,
+                format!(
+                    "execution {id} is no longer PAUSED; its pause ended before the resume \
+                     reached it"
+                ),
+            ))
+        }
+        // An execution paused only by a waiting `LoopUntil` (W7b Task 3 fix
+        // round 2): a 409, never a 200 that changed nothing.
+        Resumed::NoPauseWaiting => {
+            return Err(ExecOpError::Core(Error::Conflict(
+                "Nothing to resume: no Pause task is waiting. The execution is waiting on a loop \
+                 condition, which ends on its own schedule."
+                    .to_string(),
+            )))
+        }
+        Resumed::Refused(ResumeRefused::InputsUnexpected) => {
+            return Err(resume_inputs_unexpected(id))
+        }
+        Resumed::Refused(ResumeRefused::Invalid(m)) => {
+            return Err(ExecOpError::Core(Error::InvalidInput(match no_body_for {
+                Some(task) => format!(
+                    "{m}: the Pause `{task}` waits for onResume inputs, and the resume sent none; \
+                     send them in its body"
+                ),
+                None => m,
+            })))
+        }
+        Resumed::Refused(ResumeRefused::Moved) => {
+            return Err(ExecOpError::Core(Error::Conflict(format!(
+                "what execution {id} waits on changed between this request's read and its lock \
+                 (another resume, a pause by hand, or a Pause that started waiting); reload it \
+                 and resume again"
+            ))))
+        }
+    })
+}
+
+/// [`resume_outcome`] as the response.
 #[allow(clippy::result_large_err)]
 fn resume_answer(
     id: Uuid,
     outcome: EgretResult<crate::worker::Resumed>,
     no_body_for: Option<&str>,
 ) -> std::result::Result<crate::worker::Resumed, axum::response::Response> {
-    use crate::worker::{ResumeRefused, Resumed};
     use axum::response::IntoResponse as _;
-    let refused = match outcome.map_err(core_refusal)? {
-        r @ (Resumed::Released(_) | Resumed::ByHand) => return Ok(r),
-        Resumed::NotPaused => ExecOpError::conflict(
-            NOT_PAUSED_CODE,
-            format!(
-                "execution {id} is no longer PAUSED; its pause ended before the resume reached it"
-            ),
-        ),
-        // An execution paused only by a waiting `LoopUntil` (W7b Task 3 fix
-        // round 2): a 409, never a 200 that changed nothing.
-        Resumed::NoPauseWaiting => ExecOpError::Core(Error::Conflict(
-            "Nothing to resume: no Pause task is waiting. The execution is waiting on a loop \
-             condition, which ends on its own schedule."
-                .to_string(),
-        )),
-        Resumed::Refused(ResumeRefused::InputsUnexpected) => resume_inputs_unexpected(id),
-        Resumed::Refused(ResumeRefused::Invalid(m)) => {
-            ExecOpError::Core(Error::InvalidInput(match no_body_for {
-                Some(task) => format!(
-                    "{m}: the Pause `{task}` waits for onResume inputs, and the resume sent none; \
-                     send them in its body"
-                ),
-                None => m,
-            }))
-        }
-        Resumed::Refused(ResumeRefused::Moved) => ExecOpError::Core(Error::Conflict(format!(
-            "what execution {id} waits on changed between this request's read and its lock \
-             (another resume, a pause by hand, or a Pause that started waiting); reload it and \
-             resume again"
-        ))),
-    };
-    Err(refused.into_response())
+    resume_outcome(id, outcome, no_body_for).map_err(|e| e.into_response())
+}
+
+/// What a resume reads before it looks at a body: the caller may manage the
+/// execution, it is in this workspace, its flow is live, it is `PAUSED`, and
+/// what it waits on. Shared by the single route and the bulk pre-flight.
+async fn resume_read(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> std::result::Result<(crate::repo::ExecutionDetail, Waiting), ExecOpError> {
+    require_exec(st, ctx, id, WF_MANAGE).await?;
+    let ws = ctx.workspace_id.0;
+    let before = st.executions.get(ws, id).await?;
+    live_flow_of(st, ws, &before).await?;
+    if crate::worker::from_wire(&before.execution.state) != Some(RunState::Paused) {
+        return Err(ExecOpError::not_paused(id, &before.execution.state));
+    }
+    let waiting = waiting_of(&before)?;
+    Ok((before, waiting))
+}
+
+/// The resume's audit record (never the input values: a SECRET may be among
+/// them).
+fn resume_audit(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    from_state: &str,
+    resumed: &crate::worker::Resumed,
+    expected: Option<Uuid>,
+    inputs_given: bool,
+) {
+    let by_hand = matches!(resumed, crate::worker::Resumed::ByHand);
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ctx.workspace_id.0),
+        "workflow_execution:resume",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({
+            "from_state": from_state,
+            "by_hand": by_hand,
+            "task_run_id": if by_hand { None } else { expected },
+            "inputs_given": inputs_given,
+        }),
+    ));
 }
 
 #[utoipa::path(
@@ -5033,16 +5268,8 @@ async fn resume_execution(
 ) -> std::result::Result<Json<ExecutionDto>, axum::response::Response> {
     use axum::response::IntoResponse as _;
     let op = |e: ExecOpError| e.into_response();
-    require_exec(&st, &ctx, id, WF_MANAGE)
-        .await
-        .map_err(core_refusal)?;
     let ws = ctx.workspace_id.0;
-    let before = st.executions.get(ws, id).await.map_err(core_refusal)?;
-    live_flow_of(&st, ws, &before).await.map_err(core_refusal)?;
-    if crate::worker::from_wire(&before.execution.state) != Some(RunState::Paused) {
-        return Err(op(ExecOpError::not_paused(id, &before.execution.state)));
-    }
-    let waiting = waiting_of(&before).map_err(core_refusal)?;
+    let (before, waiting) = resume_read(&st, &ctx, id).await.map_err(op)?;
     let (expected, task_id, on_resume) = match &waiting {
         Waiting::Pause {
             run,
@@ -5153,27 +5380,208 @@ async fn resume_execution(
         }
     }
     let resumed = answered?;
-    let by_hand = matches!(resumed, crate::worker::Resumed::ByHand);
-    st.audit.emit(egret_audit::mutation_for(
-        &ctx.principal,
-        Some(ws),
-        "workflow_execution:resume",
-        "workflow_execution",
-        Some(id.to_string()),
-        // Whether inputs were given, never their values (a SECRET among them).
-        serde_json::json!({
-            "from_state": before.execution.state,
-            "by_hand": by_hand,
-            "task_run_id": if by_hand { None } else { expected },
-            "inputs_given": inputs.as_ref().is_some_and(|m| !m.is_empty()),
-        }),
-    ));
+    resume_audit(
+        &st,
+        &ctx,
+        id,
+        &before.execution.state,
+        &resumed,
+        expected,
+        inputs.as_ref().is_some_and(|m| !m.is_empty()),
+    );
     let detail = st.executions.get(ws, id).await.map_err(core_refusal)?;
     Ok(Json(ExecutionDto::new(
         detail,
         true,
         st.trigger_flags.worker_enabled,
     )))
+}
+
+/// What a bulk resume gives every execution: the `inputs` as the single
+/// route's JSON body reads them (`None` = no inputs).
+fn bulk_resume_inputs(
+    inputs: Option<serde_json::Value>,
+) -> EgretResult<Option<serde_json::Map<String, serde_json::Value>>> {
+    Ok(
+        match start_inputs(Some(Json(StartExecutionRequest { inputs })))? {
+            serde_json::Value::Object(m) if !m.is_empty() => Some(m),
+            _ => None,
+        },
+    )
+}
+
+/// Bulk pre-flight of a resume for one id: read-only. The single route's
+/// reads ([`resume_read`]: manage, exists, live flow, `PAUSED`), a Pause (or
+/// a hand pause) that a resume ends, and the SAME inputs judged against that
+/// execution's own waiting `Pause` by the worker's own rule
+/// ([`worker::resume_values`](crate::worker::resume_values), plus the D7
+/// `egret.sql` gate), so a pass here cannot be refused there for a bad
+/// input. A FILE input cannot be sent in a JSON bulk body. Fixed, safe reasons.
+async fn resume_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    inputs: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> std::result::Result<(), bulk::Invalid> {
+    let (before, waiting) = resume_read(st, ctx, id)
+        .await
+        .map_err(|e| invalid_id(id, gate_reason(&e)))?;
+    let (task_id, on_resume) = match &waiting {
+        Waiting::LoopOnly => return Err(invalid_id(id, "nothing to resume")),
+        Waiting::ByHand => (None, &[][..]),
+        Waiting::Pause {
+            task_id, on_resume, ..
+        } => (Some(task_id.as_str()), on_resume.as_slice()),
+    };
+    let posted = inputs.cloned().unwrap_or_default();
+    if on_resume.is_empty() {
+        return if posted.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid_id(id, "inputs not accepted"))
+        };
+    }
+    let task_id = task_id.unwrap_or_default();
+    let flow = parse(&before.source).map_err(|_| invalid_id(id, "could not be checked"))?;
+    if on_resume.iter().any(|i| {
+        i.r#type == crate::models::InputType::File
+            && posted.get(&i.id).is_some_and(|v| !v.is_null())
+    }) {
+        return Err(invalid_id(id, "invalid inputs"));
+    }
+    crate::worker::resume_values(&flow, task_id, on_resume, &posted)
+        .map_err(|_| invalid_id(id, "invalid inputs"))?;
+    let mut conn = st
+        .db
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| invalid_id(id, "could not be checked"))?;
+    crate::worker::sql_principal::check_resume_inputs(
+        &mut conn,
+        &flow,
+        before.execution.flow_id,
+        ctx.principal.user_id.0,
+    )
+    .await
+    .map_err(|_| invalid_id(id, "not permitted"))?;
+    Ok(())
+}
+
+/// The resume and its audit for one execution, as a core error (what a bulk
+/// apply reports). The caller has run [`resume_check`]; the worker decides
+/// again under the lock.
+async fn resume_apply(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    inputs: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> EgretResult<()> {
+    let (before, waiting) = resume_read(st, ctx, id).await.map_err(op_error_to_core)?;
+    let expected = match &waiting {
+        Waiting::Pause { run, .. } => Some(*run),
+        Waiting::ByHand | Waiting::LoopOnly => None,
+    };
+    let outcome = crate::worker::resume_with(
+        &st.db.pool,
+        &crate::worker::ResumeRequest {
+            id,
+            inputs,
+            files: &[],
+            expected,
+        },
+    )
+    .await;
+    let resumed = resume_outcome(id, outcome, None).map_err(op_error_to_core)?;
+    resume_audit(
+        st,
+        ctx,
+        id,
+        &before.execution.state,
+        &resumed,
+        expected,
+        inputs.is_some_and(|m| !m.is_empty()),
+    );
+    Ok(())
+}
+
+async fn resume_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+    inputs: Option<serde_json::Value>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    let inputs = bulk_resume_inputs(inputs)?;
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| resume_check(st, ctx, id, inputs.as_ref()),
+        |id| resume_apply(st, ctx, id, inputs.as_ref()),
+    )
+    .await?)
+}
+
+/// `POST …/executions/resume/by-ids`' body.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BulkResumeByIds {
+    /// At most 1000 execution ids.
+    pub ids: Vec<Uuid>,
+    /// The `onResume` inputs, a JSON object, given to EVERY resumed
+    /// execution (Kestra's semantic) and checked against each one's own
+    /// waiting `Pause`. Omit for none. FILE inputs cannot be sent here.
+    #[schema(value_type = Option<Object>)]
+    pub inputs: Option<serde_json::Value>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/resume/by-ids",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = BulkResumeByIds,
+    responses(
+        (status = 200, description = "Every listed execution was resumed.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was resumed: `too_many` (more than 1000 ids), `inputs` that is not a JSON object, or an `invalids` list naming every id that is missing, not yours to manage, not `PAUSED`, waiting only on a `LoopUntil`, or whose waiting Pause refuses the inputs.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Resume several paused executions, all or none (package 7f).
+async fn resume_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<BulkResumeByIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    resume_bulk(&st, &ctx, body.ids, body.inputs).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/resume/by-query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery),
+    request_body(content = StartExecutionRequest, description = "Optional. `inputs`: the `onResume` inputs given to every matched execution."),
+    responses(
+        (status = 200, description = "Every matched execution was resumed.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was resumed: `too_many` (the filter matches more than 1000) or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Resume every execution a filter matches, all or none (package 7f).
+async fn resume_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+    body: Option<Json<StartExecutionRequest>>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    resume_bulk(&st, &ctx, ids, body.and_then(|Json(b)| b.inputs)).await
 }
 
 #[utoipa::path(
@@ -5642,7 +6050,33 @@ async fn kill_execution(
     // is still running is killable, and only its plan can tell.
     require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
-    let cascade = q.cascade.unwrap_or(true);
+    kill_write(
+        &st,
+        &ctx,
+        id,
+        q.cascade.unwrap_or(true),
+        &before.execution.state,
+    )
+    .await?;
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ExecutionDto::new(
+            detail,
+            true,
+            st.trigger_flags.worker_enabled,
+        )),
+    ))
+}
+
+/// The kill and its audit, with the single route's coded refusals.
+async fn kill_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    cascade: bool,
+    from_state: &str,
+) -> std::result::Result<(), KillError> {
     let (outcome, forced) =
         crate::worker::kill_execution_reporting(&st.db.pool, ctx.workspace_id.0, id, cascade)
             .await?;
@@ -5666,7 +6100,7 @@ async fn kill_execution(
         crate::worker::KillOutcome::NotApplied(_) => return Err(KillError::NotApplied(id)),
     };
     let mut audited = serde_json::json!({
-        "from_state": before.execution.state,
+        "from_state": from_state,
         "cascade": cascade,
         "outcome": outcome.wire(),
     });
@@ -5686,15 +6120,132 @@ async fn kill_execution(
         Some(id.to_string()),
         audited,
     ));
-    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(ExecutionDto::new(
-            detail,
-            true,
-            st.trigger_flags.worker_enabled,
-        )),
-    ))
+    Ok(())
+}
+
+/// Bulk pre-flight of a kill for one id: read-only. Existence and the
+/// `workflow:manage` gate, then the worker's own rule: an execution that is
+/// idle (ended, with no `afterExecution:` task live) has nothing to kill --
+/// the worker's `Terminated` under the lock, read here off the same
+/// `execution_is_idle` the state-change and labels routes use. A kill that
+/// still cannot apply (`NotApplied`, a retryable race) is the apply's.
+async fn kill_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ws: Uuid,
+    id: Uuid,
+) -> std::result::Result<(), bulk::Invalid> {
+    if let Err(e) = require_exec(st, ctx, id, WF_MANAGE).await {
+        return Err(invalid_id(id, gate_reason(&ExecOpError::Core(e))));
+    }
+    let idle: Option<bool> = sqlx::query_scalar(
+        "SELECT COALESCE(workflow.execution_is_idle(id), false) \
+           FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(id)
+    .bind(ws)
+    .fetch_optional(&st.db.pool)
+    .await
+    .map_err(|_| invalid_id(id, "could not be checked"))?;
+    match idle {
+        None => Err(invalid_id(id, "not found")),
+        Some(true) => Err(invalid_id(id, "already ended")),
+        Some(false) => Ok(()),
+    }
+}
+
+/// The kill and its audit for one execution, as a core error (what a bulk
+/// apply reports). The caller has run [`kill_check`].
+async fn kill_apply(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    cascade: bool,
+) -> EgretResult<()> {
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    kill_write(st, ctx, id, cascade, &before.execution.state)
+        .await
+        .map_err(|e| match e {
+            KillError::Core(e) => e,
+            KillError::Terminated(..) => Error::Conflict("already ended".to_string()),
+            KillError::NotApplied(_) => {
+                Error::Conflict("the kill did not apply yet; retry".to_string())
+            }
+        })
+}
+
+async fn kill_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+    cascade: bool,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    let ws = ctx.workspace_id.0;
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| kill_check(st, ctx, ws, id),
+        |id| kill_apply(st, ctx, id, cascade),
+    )
+    .await?)
+}
+
+/// `DELETE …/executions/kill/by-ids`' body.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkKillByIds {
+    /// At most 1000 execution ids.
+    pub ids: Vec<Uuid>,
+    /// As the single route's `cascade` (default `true`).
+    pub cascade: Option<bool>,
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/workflows/executions/kill/by-ids",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = BulkKillByIds,
+    responses(
+        (status = 200, description = "Every listed execution was killed (as the single route: `KILLING` while a worker still has to stop a task, else `KILLED`).", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was killed: `too_many` (more than 1000 ids) or an `invalids` list naming every id that is missing, not yours to manage, or already ended.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Kill several executions, all or none (package 7f; Kestra `DELETE /kill/by-ids`).
+async fn kill_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<BulkKillByIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    kill_bulk(&st, &ctx, body.ids, body.cascade.unwrap_or(true)).await
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/ws/{workspace}/workflows/executions/kill/by-query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery, KillQuery),
+    responses(
+        (status = 200, description = "Every matched execution was killed.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was killed: `too_many` (the filter matches more than 1000) or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Kill every execution a filter matches, all or none (package 7f).
+async fn kill_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+    Query(k): Query<KillQuery>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    kill_bulk(&st, &ctx, ids, k.cascade.unwrap_or(true)).await
 }
 
 // ---------- Execution operations (package 7a, spec D10, D11, D13) ----------
@@ -6431,7 +6982,30 @@ async fn set_execution_status(
     require_exec(&st, &ctx, id, WF_MANAGE).await?;
     let Json(body) = body.map_err(state_change_body_refusal)?;
     let before = st.executions.get(ctx.workspace_id.0, id).await?;
-    let target = body.state.run_state();
+    status_write(
+        &st,
+        &ctx,
+        id,
+        body.state.run_state(),
+        &before.execution.state,
+    )
+    .await?;
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+/// The status change and its audit, with the single route's coded refusals.
+async fn status_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    target: RunState,
+    from_state: &str,
+) -> std::result::Result<(), ExecOpError> {
     match crate::worker::set_execution_status(&st.db.pool, id, target).await? {
         Ok(()) => {}
         Err(r) => return Err(ExecOpError::from_state_change_refusal(id, r)),
@@ -6443,16 +7017,139 @@ async fn set_execution_status(
         "workflow_execution",
         Some(id.to_string()),
         serde_json::json!({
-            "from_state": before.execution.state,
+            "from_state": from_state,
             "to_state": target.wire(),
         }),
     ));
-    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
-    Ok(Json(ExecutionDto::new(
-        detail,
-        true,
-        st.trigger_flags.worker_enabled,
-    )))
+    Ok(())
+}
+
+/// Bulk pre-flight of a status change for one id: read-only. Existence and
+/// the `workflow:manage` gate, then the worker's own refusal rule
+/// ([`worker::status_change_refusal`](crate::worker::status_change_refusal),
+/// one function shared with the write). Fixed, safe reasons.
+async fn status_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ws: Uuid,
+    id: Uuid,
+    target: RunState,
+) -> std::result::Result<(), bulk::Invalid> {
+    if let Err(e) = require_exec(st, ctx, id, WF_MANAGE).await {
+        return Err(invalid_id(id, gate_reason(&ExecOpError::Core(e))));
+    }
+    let row: Option<(String, Option<Uuid>, bool)> = sqlx::query_as(
+        "SELECT state, CASE WHEN loop_index IS NOT NULL THEN parent_execution_id END, \
+                COALESCE(workflow.execution_is_idle(id), false) \
+           FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+    )
+    .bind(id)
+    .bind(ws)
+    .fetch_optional(&st.db.pool)
+    .await
+    .map_err(|_| invalid_id(id, "could not be checked"))?;
+    let Some((state, loop_root, idle)) = row else {
+        return Err(invalid_id(id, "not found"));
+    };
+    let current = crate::worker::from_wire(&state).unwrap_or(RunState::Created);
+    use crate::worker::StateChangeRefused as R;
+    match crate::worker::status_change_refusal(current, loop_root, idle, target) {
+        None => Ok(()),
+        Some(R::LoopIteration { .. }) => Err(invalid_id(id, "loop iteration")),
+        Some(R::AfterExecutionRunning) => Err(invalid_id(id, "after-execution running")),
+        Some(_) => Err(invalid_id(id, "illegal transition")),
+    }
+}
+
+/// The status change and its audit for one execution, as a core error (what
+/// a bulk apply reports). The caller has run [`status_check`].
+async fn status_apply(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    target: RunState,
+) -> EgretResult<()> {
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    status_write(st, ctx, id, target, &before.execution.state)
+        .await
+        .map_err(op_error_to_core)
+}
+
+async fn status_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+    target: StateChangeTarget,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    let ws = ctx.workspace_id.0;
+    let target = target.run_state();
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| status_check(st, ctx, ws, id, target),
+        |id| status_apply(st, ctx, id, target),
+    )
+    .await?)
+}
+
+/// `POST …/executions/change-status/by-ids`' body.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BulkStatusByIds {
+    /// At most 1000 execution ids.
+    pub ids: Vec<Uuid>,
+    /// The state every listed execution takes, as the single route's body.
+    pub state: StateChangeTarget,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/change-status/by-ids",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = BulkStatusByIds,
+    responses(
+        (status = 200, description = "Every listed execution took the status.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was changed: `too_many` (more than 1000 ids) or an `invalids` list naming every id that is missing, not yours to manage, a loop iteration, not ended (or KILLED), still running its afterExecution tasks, or already in that state.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Change the status of several finished executions, all or none (package 7f).
+async fn change_status_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<BulkStatusByIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    status_bulk(&st, &ctx, body.ids, body.state).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/change-status/by-query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery),
+    request_body = StateChangeBody,
+    responses(
+        (status = 200, description = "Every matched execution took the status.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was changed: `too_many` (the filter matches more than 1000) or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Change the status of every execution a filter matches, all or none (package 7f).
+async fn change_status_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+    Json(body): Json<StateChangeBody>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    status_bulk(&st, &ctx, ids, body.state).await
 }
 
 /// One namespace of the workspace (W7d spec §3.1). egret has no namespace
@@ -7068,6 +7765,38 @@ pub fn management_router() -> Router<WorkflowState> {
             post(set_execution_labels),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/change-status/by-ids",
+            post(change_status_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/change-status/by-query",
+            post(change_status_executions_by_query),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/kill/by-ids",
+            axum::routing::delete(kill_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/kill/by-query",
+            axum::routing::delete(kill_executions_by_query),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/pause/by-ids",
+            post(pause_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/pause/by-query",
+            post(pause_executions_by_query),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/resume/by-ids",
+            post(resume_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/resume/by-query",
+            post(resume_executions_by_query),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/labels/by-ids",
             post(labels_executions_by_ids),
         )
@@ -7112,6 +7841,14 @@ pub fn management_router() -> Router<WorkflowState> {
         set_execution_labels,
         labels_executions_by_ids,
         labels_executions_by_query,
+        change_status_executions_by_ids,
+        change_status_executions_by_query,
+        kill_executions_by_ids,
+        kill_executions_by_query,
+        pause_executions_by_ids,
+        pause_executions_by_query,
+        resume_executions_by_ids,
+        resume_executions_by_query,
         download_execution_logs,
         delete_execution_logs,
         crate::storage::routes::download_execution_file,
@@ -7162,6 +7899,10 @@ pub fn management_router() -> Router<WorkflowState> {
         bulk::BulkErrorResponse,
         bulk::Invalid,
         BulkLabelsByIds,
+        BulkStatusByIds,
+        BulkKillByIds,
+        BulkIds,
+        BulkResumeByIds,
         FindingDto,
         ValidationReportDto,
         FlowDto,

@@ -840,6 +840,31 @@ pub async fn set_execution_status(
     }
 }
 
+/// Why an execution in `current` cannot take `target` as its status, in the
+/// order the worker checks: loop iteration, not ended (or `KILLED`), its
+/// `afterExecution:` still running (D10; the pruned files do not matter:
+/// nothing runs again), already in that state. The write and the bulk
+/// pre-flight (`routes::status_check`) BOTH call this.
+pub fn status_change_refusal(
+    current: RunState,
+    loop_root: Option<Uuid>,
+    idle: bool,
+    target: RunState,
+) -> Option<StateChangeRefused> {
+    if let Some(root) = loop_root {
+        return Some(StateChangeRefused::LoopIteration { root });
+    }
+    if !current.is_terminal() || current == RunState::Killed {
+        return Some(StateChangeRefused::NotChangeable(
+            current.wire().to_string(),
+        ));
+    }
+    if !idle {
+        return Some(StateChangeRefused::AfterExecutionRunning);
+    }
+    (current == target).then_some(StateChangeRefused::StateUnchanged)
+}
+
 async fn set_execution_status_locked(
     conn: &mut PgConnection,
     id: Uuid,
@@ -852,19 +877,9 @@ async fn set_execution_status_locked(
         now,
         row,
     } = lock(conn, id, stack).await?;
-    if let Some(root) = row.loop_root {
-        return Ok(Err(StateChangeRefused::LoopIteration { root }));
-    }
-    if let Some(refused) = not_changeable(&state) {
+    let current = state.history.last().copied().unwrap_or(RunState::Created);
+    if let Some(refused) = status_change_refusal(current, row.loop_root, row.idle, target) {
         return Ok(Err(refused));
-    }
-    // An execution whose `afterExecution:` still runs has not ended (D10).
-    // The pruned files do not matter here: nothing runs again.
-    if !row.idle {
-        return Ok(Err(StateChangeRefused::AfterExecutionRunning));
-    }
-    if state.history.last() == Some(&target) {
-        return Ok(Err(StateChangeRefused::StateUnchanged));
     }
     let before = state.clone();
     apply(&mut state, &Command::SetExecutionState { state: target });

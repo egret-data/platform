@@ -201,6 +201,57 @@ pub async fn resume_with(pool: &PgPool, req: &ResumeRequest<'_>) -> Result<Resum
     })
 }
 
+/// D5, S6, S7: the posted values against `declared`, as far as they can be
+/// judged without the database: no value where nothing is declared, no key
+/// that is not declared (refused, not dropped), every value valid, and a
+/// SECRET only where this deployment can seal it. Answers the checked values.
+///
+/// The resume (`checked_on_resume`) and the bulk resume's pre-flight
+/// (`routes::resume_check`) BOTH call this, so a pass there cannot be refused
+/// here.
+pub fn resume_values(
+    flow: &crate::models::Flow,
+    task_id: &str,
+    declared: &[crate::models::Input],
+    posted: &Map<String, Value>,
+) -> std::result::Result<Map<String, Value>, ResumeRefused> {
+    if declared.is_empty() {
+        return if posted.is_empty() {
+            Ok(Map::new())
+        } else {
+            Err(ResumeRefused::InputsUnexpected)
+        };
+    }
+    // S6: refused, not dropped (the no-silent-drops rule).
+    if let Some(k) = posted
+        .keys()
+        .find(|k| !declared.iter().any(|i| &i.id == *k))
+    {
+        return Err(ResumeRefused::Invalid(format!(
+            "Invalid value for input `{k}`: the Pause `{task_id}` declares no such onResume input"
+        )));
+    }
+    let values = match claim::checked_inputs_for(flow, declared, &Value::Object(posted.clone())) {
+        Ok(Value::Object(m)) => m,
+        Ok(_) => return Err(ResumeRefused::Invalid("the input check failed".to_string())),
+        Err(e) => return Err(ResumeRefused::Invalid(e.message)),
+    };
+    let secret_ids: Vec<&str> = declared
+        .iter()
+        .filter(|i| i.r#type == crate::models::InputType::Secret)
+        .filter(|i| values.get(&i.id).is_some_and(|v| !v.is_null()))
+        .map(|i| i.id.as_str())
+        .collect();
+    if !secret_ids.is_empty() && !crate::secret_inputs::can_seal() {
+        return Err(ResumeRefused::Invalid(format!(
+            "egret refuses input {}: a SECRET value cannot be stored on this deployment: \
+             set secrets.master_key",
+            secret_ids.join(", ")
+        )));
+    }
+    Ok(values)
+}
+
 /// D5, D6, S6, S7: the posted values against `declared`. `Ok(Err(_))` is the
 /// caller's refusal; `Err` is the database's. Answers the values to store
 /// (SECRET ones masked) and, when a SECRET was given, their seal.
@@ -214,30 +265,9 @@ async fn checked_on_resume(
     posted: &Map<String, Value>,
     files: &[crate::storage::StoredFile],
 ) -> Result<std::result::Result<(Map<String, Value>, Option<Vec<u8>>), ResumeRefused>> {
-    if declared.is_empty() {
-        return Ok(if posted.is_empty() {
-            Ok((Map::new(), None))
-        } else {
-            Err(ResumeRefused::InputsUnexpected)
-        });
-    }
-    // S6: refused, not dropped (the no-silent-drops rule).
-    if let Some(k) = posted
-        .keys()
-        .find(|k| !declared.iter().any(|i| &i.id == *k))
-    {
-        return Ok(Err(ResumeRefused::Invalid(format!(
-            "Invalid value for input `{k}`: the Pause `{task_id}` declares no such onResume input"
-        ))));
-    }
-    let values = match claim::checked_inputs_for(flow, declared, &Value::Object(posted.clone())) {
-        Ok(Value::Object(m)) => m,
-        Ok(other) => {
-            return Err(Error::Internal(anyhow::anyhow!(
-                "the input check answered {other}, not an object"
-            )))
-        }
-        Err(e) => return Ok(Err(ResumeRefused::Invalid(e.message))),
+    let values = match resume_values(flow, task_id, declared, posted) {
+        Ok(values) => values,
+        Err(refused) => return Ok(Err(refused)),
     };
     if let Err(why) = crate::storage::inputs::check_file_values(
         conn,
@@ -259,13 +289,6 @@ async fn checked_on_resume(
         .collect();
     if secret_ids.is_empty() {
         return Ok(Ok((values, None)));
-    }
-    if !crate::secret_inputs::can_seal() {
-        return Ok(Err(ResumeRefused::Invalid(format!(
-            "egret refuses input {}: a SECRET value cannot be stored on this deployment: \
-             set secrets.master_key",
-            secret_ids.join(", ")
-        ))));
     }
     let (masked, sealed) = crate::secret_inputs::split_outputs(&values, &secret_ids)?;
     Ok(Ok((masked, sealed)))
