@@ -17,15 +17,20 @@ export function FacetSelect({
   value,
   onChange,
   options,
+  disabled,
+  disabledReason,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   options: FacetOption[];
+  /** Not offered now; `disabledReason` says why (FE-ACTION-4). */
+  disabled?: boolean;
+  disabledReason?: string;
 }) {
   return (
-    <Select value={value || FACET_ALL} onValueChange={onChange}>
-      <SelectTrigger className="h-9 w-auto min-w-32" aria-label={label}>
+    <Select value={value || FACET_ALL} onValueChange={onChange} disabled={disabled}>
+      <SelectTrigger className="h-9 w-auto min-w-32" aria-label={label} title={disabled ? disabledReason : undefined}>
         <span className="text-muted-foreground">{label}:</span>
         <SelectValue />
       </SelectTrigger>

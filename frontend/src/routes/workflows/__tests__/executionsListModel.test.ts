@@ -136,7 +136,7 @@ describe("toQueryParams", () => {
     expect(toQueryParams({ ...DEFAULT_FILTERS, states: ["RUNNING", "FAILED"], namespace: "company", flow: "f-1", page: 3 }, NOW)).toEqual({
       state: "RUNNING,FAILED",
       namespace: "company",
-      flow_id: "f-1",
+      flow_key: "f-1",
       root_only: true,
       limit: PAGE_SIZE,
       offset: 2 * PAGE_SIZE,
@@ -200,6 +200,6 @@ describe("the namespace's own Executions tab (W7d)", () => {
     const req = toQueryParams({ ...DEFAULT_FILTERS, namespace: "x", flow: "f-1" }, NOW, { pinnedNamespace: "company" });
     expect(req.namespace_prefix).toBe("company");
     expect(req).not.toHaveProperty("namespace");
-    expect(req.flow_id).toBe("f-1");
+    expect(req.flow_key).toBe("f-1");
   });
 });
