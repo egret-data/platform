@@ -438,6 +438,10 @@ fn app_with_dbs_and_pdp(
         upload_total_timeout,
         export_total_timeout,
         trigger_flags,
+        // Package 7e: the follow streams re-poll this often. A short interval
+        // so a test that drives a RUNNING execution to terminal, or waits for a
+        // log to drain, resolves in tens of milliseconds rather than seconds.
+        follow_poll_interval: std::time::Duration::from_millis(20),
     };
     let router = axum::Router::new()
         .nest("/api", egret_workflow::management_router())
@@ -876,6 +880,7 @@ pub async fn webhook_app_with_guard(
         upload_total_timeout: egret_workflow::routes::UPLOAD_TOTAL_TIMEOUT,
         export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
         trigger_flags: Default::default(),
+        follow_poll_interval: egret_workflow::http::follow::FOLLOW_POLL_INTERVAL,
     };
     WebhookApp {
         router: axum::Router::new()

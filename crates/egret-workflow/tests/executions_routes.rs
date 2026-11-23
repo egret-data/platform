@@ -4294,3 +4294,230 @@ async fn eval_requires_workflow_read() {
         "the task-run eval route requires workflow:read"
     );
 }
+
+// ── Poll→SSE follow (package 7e #2 execution, #3 logs) ───────────────────────
+//
+// GET /api/ws/{workspace}/workflows/executions/{id}/follow
+// GET /api/ws/{workspace}/workflows/executions/{id}/logs/follow
+//
+// Each re-reads the store every `follow_poll_interval` (20 ms under test, 1 s in
+// production) and emits an SSE event only when something changed; the execution
+// stream ends on a terminal state, the log stream on `complete && no new lines`.
+// The body of a `text/event-stream` is drained to completion here precisely
+// because these streams end — a never-ending one would hang `body_text`.
+
+/// Parse an SSE body into the JSON payload of each `data:` event, skipping the
+/// keep-alive comments (`:\n\n`) the wrapper emits when a tick changes nothing.
+fn sse_events(body: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for block in body.split("\n\n") {
+        let mut data = String::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix("data:") {
+                let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(rest);
+            }
+        }
+        if data.is_empty() {
+            continue;
+        }
+        out.push(serde_json::from_str(&data).expect("an SSE event's data is JSON"));
+    }
+    out
+}
+
+/// Seed one exec-level log line (no task/run), returning nothing.
+async fn insert_log_line(db: &Db, ws: Uuid, ex: Uuid, level: i16, message: &str) {
+    sqlx::query(
+        "INSERT INTO workflow.task_logs \
+           (workspace_id, execution_id, task_id, task_run_id, attempt, level, ts, message) \
+         VALUES ($1, $2, NULL, NULL, NULL, $3, $4, $5)",
+    )
+    .bind(ws)
+    .bind(ex)
+    .bind(level)
+    .bind(at(1))
+    .bind(message)
+    .execute(&db.pool)
+    .await
+    .expect("insert log line");
+}
+
+/// Backdate every line of `ex` past the settle lag (2 s), so a page serves them
+/// at once — the same move `tests/task_logs.rs` makes.
+async fn settle_logs(db: &Db, ex: Uuid) {
+    sqlx::query(
+        "UPDATE workflow.task_logs SET inserted_at = inserted_at - interval '3 seconds' \
+           WHERE execution_id = $1",
+    )
+    .bind(ex)
+    .execute(&db.pool)
+    .await
+    .expect("settle logs");
+}
+
+/// **#2: the execution stream emits the current snapshot, a fresh event when it
+/// changes, and one final event as it goes terminal, then closes.** A RUNNING
+/// execution is flipped to SUCCESS mid-stream, concurrently with draining the
+/// body (which blocks until the stream ends — so a stream that never closed on a
+/// terminal state would hang this test rather than pass it).
+#[tokio::test]
+async fn follow_execution_emits_a_snapshot_then_closes_on_terminal() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution(&db, ws, None, "a.follow", "f", "RUNNING", at(1)).await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/executions/{id}/follow");
+
+    // Flip RUNNING -> SUCCESS after the first snapshot has been emitted. The
+    // delay is far longer than the 20 ms poll interval, so the stream emits at
+    // least one RUNNING snapshot before it sees the terminal state.
+    let pool = db.pool.clone();
+    let flip = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        sqlx::query("UPDATE workflow.executions SET state = 'SUCCESS', updated_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("flip to terminal");
+    });
+
+    let res = common::get(&app, &path, user).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["content-type"], "text/event-stream");
+    let body = common::body_text(res).await;
+    flip.await.unwrap();
+
+    let events = sse_events(&body);
+    assert!(
+        events.len() >= 2,
+        "expected an initial RUNNING snapshot and a terminal event, got {events:#?}"
+    );
+    let first = &events[0];
+    assert_eq!(first["id"], id.to_string(), "{first}");
+    assert_eq!(first["state"], "RUNNING", "the first event is the snapshot");
+    // Same shape as `get_execution`: the frozen source and task-run list are here.
+    assert_eq!(first["source"], SEEDED_SOURCE, "{first}");
+    assert!(first["runs"].is_array(), "{first}");
+    let last = events.last().unwrap();
+    assert_eq!(last["state"], "SUCCESS", "the final event is the terminal snapshot");
+    assert_eq!(last["id"], id.to_string(), "{last}");
+}
+
+/// **#3: the log stream emits the lines after its watermark and closes once the
+/// execution is complete and the tail is drained.** The lines are settled and
+/// the execution is idle past the settle lag, so the first tick serves them and
+/// a later tick — finding nothing new and `complete` — ends the stream.
+#[tokio::test]
+async fn follow_logs_emits_appended_lines_then_closes_when_drained() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    // Terminal, and idle longer ago than the settle lag -> `complete` is true.
+    let id = insert_execution(&db, ws, None, "a.logs", "f", "SUCCESS", at(1)).await;
+    sqlx::query("UPDATE workflow.executions SET updated_at = now() - interval '5 seconds' WHERE id = $1")
+        .bind(id)
+        .execute(&db.pool)
+        .await
+        .expect("backdate updated_at");
+    insert_log_line(&db, ws, id, 2, "one").await;
+    insert_log_line(&db, ws, id, 4, "two").await;
+    insert_log_line(&db, ws, id, 2, "three").await;
+    settle_logs(&db, id).await;
+
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/executions/{id}/logs/follow");
+
+    let res = common::get(&app, &path, user).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.headers()["content-type"], "text/event-stream");
+    let body = common::body_text(res).await;
+
+    let events = sse_events(&body);
+    assert!(!events.is_empty(), "expected at least one log page event, got {events:#?}");
+    // Every seeded line, in order, across whatever pages the stream emitted.
+    let messages: Vec<String> = events
+        .iter()
+        .flat_map(|e| e["items"].as_array().cloned().unwrap_or_default())
+        .map(|l| l["message"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(messages, vec!["one", "two", "three"], "{events:#?}");
+    let last = events.last().unwrap();
+    assert_eq!(last["complete"], Value::Bool(true), "the final page reports complete");
+    assert_eq!(last["execution_state"], "SUCCESS", "{last}");
+}
+
+/// **404 before the stream opens for a foreign execution** — never an error
+/// event inside a 200 stream. A `workflow:read` holder in A asks after B's
+/// execution: the answer is a 404 whose body is JSON, not `text/event-stream`.
+#[tokio::test]
+async fn follow_is_404_before_the_stream_opens_for_a_foreign_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws_a, user_a) = common::seed_workspace(&db).await;
+    let (ws_b, user_b) = common::seed_workspace(&db).await;
+    common::grant(&db, ws_a, user_a, &["workflow:read"]).await;
+    common::grant(&db, ws_b, user_b, &["workflow:read"]).await;
+    let theirs = insert_execution(&db, ws_b, None, "b.theirs", "g", "RUNNING", at(1)).await;
+    let app = common::app(&db).await;
+
+    for suffix in ["follow", "logs/follow"] {
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws_a}/workflows/executions/{theirs}/{suffix}"),
+            user_a,
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            404,
+            "a foreign execution must 404 before the {suffix} stream opens"
+        );
+        assert_ne!(
+            res.headers()["content-type"], "text/event-stream",
+            "the 404 must be a plain response, not an event inside a stream ({suffix})"
+        );
+    }
+
+    // Control: B may follow its own execution — so the 404s are about ownership,
+    // not a missing route. (The RUNNING execution never terminates, so only the
+    // response head is checked; the body is dropped unread.)
+    for suffix in ["follow", "logs/follow"] {
+        let res = common::get(
+            &app,
+            &format!("/api/ws/{ws_b}/workflows/executions/{theirs}/{suffix}"),
+            user_b,
+        )
+        .await;
+        assert_eq!(res.status(), 200, "the owner may follow ({suffix})");
+        assert_eq!(res.headers()["content-type"], "text/event-stream");
+    }
+}
+
+/// **Both follow routes require `workflow:read`.** A `workflow:manage` holder —
+/// authoring, not reading — is refused 403, as the detail and logs routes are.
+#[tokio::test]
+async fn follow_requires_workflow_read() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let id = insert_execution(&db, ws, None, "a.403", "f", "RUNNING", at(1)).await;
+    let app = common::app(&db).await;
+
+    for suffix in ["follow", "logs/follow"] {
+        assert_eq!(
+            common::get(
+                &app,
+                &format!("/api/ws/{ws}/workflows/executions/{id}/{suffix}"),
+                user,
+            )
+            .await
+            .status(),
+            403,
+            "the {suffix} route requires workflow:read, not workflow:manage"
+        );
+    }
+}

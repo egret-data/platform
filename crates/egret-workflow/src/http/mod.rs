@@ -22,6 +22,7 @@
 //! `secret()`, D5) and hands the rendered map to [`HttpSpec::from_value`].
 //! [`refusals`] also accepts the unrendered map, which is what publish has.
 
+pub mod follow;
 pub mod mask;
 pub mod request;
 pub mod response;

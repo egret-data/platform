@@ -88,6 +88,7 @@ use std::sync::Arc;
 
 use axum::extract::{FromRef, Path, Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::sse::Event;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -280,6 +281,11 @@ pub struct WorkflowState {
     pub export_total_timeout: std::time::Duration,
     /// W7e: the loops this deployment runs, echoed by the trigger routes.
     pub trigger_flags: TriggerFlags,
+    /// Package 7e #2/#3: how often the SSE follow streams re-poll the store --
+    /// [`crate::http::follow::FOLLOW_POLL_INTERVAL`] (1 s) in production; a
+    /// field so a test can drive the loop in milliseconds, exactly as
+    /// [`Self::upload_idle_timeout`] does.
+    pub follow_poll_interval: std::time::Duration,
 }
 
 impl FromRef<WorkflowState> for SessionService {
@@ -2533,6 +2539,113 @@ async fn get_execution(
     )))
 }
 
+// ---------- Follow: poll→SSE (package 7e #2 execution, #3 logs) ----------
+//
+// Each stream re-reads the store every `st.follow_poll_interval`
+// ([`crate::http::follow::FOLLOW_POLL_INTERVAL`], 1 s, in production) and emits
+// an SSE event only when something changed -- so one code path serves a live
+// run and a historical one, with nothing to keep in sync with the executor.
+//
+// **Authorisation is `GET …/executions/{id}`'s, and it runs BEFORE the stream
+// opens.** `require_exec(…, WF_READ)` resolves existence and ownership, so a
+// foreign-workspace or missing id is a 404 *response* -- never an error event
+// inside an already-committed 200 stream. Only once that passes is the `Sse`
+// response built.
+
+/// Follow one execution as Server-Sent Events (#2).
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/follow",
+    tag = "workflow",
+    operation_id = "follow_execution",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    responses(
+        (status = 200, description = "A `text/event-stream`: the current execution (same shape as `GET …/executions/{id}`) as the first event, then a fresh event each time it changes. On a terminal state one final event is sent and the stream closes. The poll interval is 1 s.", content_type = "text/event-stream", body = ExecutionDto),
+        (status = 400, description = "`{id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed. **Answered before the stream opens**, so a foreign id is a 404 response and never a 200 stream.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn follow_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> EgretResult<impl axum::response::IntoResponse> {
+    // 404/403 BEFORE the stream opens -- the same check `get_execution` makes.
+    require_exec(&st, &ctx, id, WF_READ).await?;
+    let ws = ctx.workspace_id.0;
+    // `can_manage` is a per-object PDP decision; it does not change for the life
+    // of a follow, so it is decided once here (where a refusal can still become
+    // an error response) rather than on every poll.
+    let can_manage = exec_caller_may_manage(&st, &ctx, id).await?;
+    let worker_enabled = st.trigger_flags.worker_enabled;
+
+    struct FollowExec {
+        st: WorkflowState,
+        ws: Uuid,
+        id: Uuid,
+        interval: std::time::Duration,
+        can_manage: bool,
+        worker_enabled: bool,
+        last: Option<String>,
+        first: bool,
+        done: bool,
+    }
+    let seed = FollowExec {
+        interval: st.follow_poll_interval,
+        st,
+        ws,
+        id,
+        can_manage,
+        worker_enabled,
+        last: None,
+        first: true,
+        done: false,
+    };
+    let stream = futures_util::stream::unfold(seed, |mut s| async move {
+        loop {
+            if s.done {
+                return None;
+            }
+            if s.first {
+                s.first = false;
+            } else {
+                tokio::time::sleep(s.interval).await;
+            }
+            // The row is gone (deleted mid-follow): end the stream cleanly.
+            let Ok(detail) = s.st.executions.get(s.ws, s.id).await else {
+                return None;
+            };
+            let state = detail.execution.state.clone();
+            let terminal =
+                crate::worker::from_wire(&state).is_some_and(RunState::is_terminal);
+            let dto = ExecutionDto::new(detail, s.can_manage, s.worker_enabled);
+            let json = serde_json::to_string(&dto).unwrap_or_default();
+            let changed = s.last.as_deref() != Some(json.as_str());
+            if terminal {
+                // One final event, then end -- emit it even if somehow
+                // unchanged, so a stream that opens on an already-terminal
+                // execution still sends exactly one snapshot.
+                s.done = true;
+                s.last = Some(json.clone());
+                return Some((Ok(Event::default().data(json)), s));
+            }
+            if changed {
+                s.last = Some(json.clone());
+                return Some((Ok(Event::default().data(json)), s));
+            }
+            // Nothing changed and not terminal: wait and poll again, emitting
+            // no event (the keep-alive holds the connection open).
+        }
+    });
+    Ok(crate::http::follow::sse_from_poll(stream))
+}
+
 // ---------- Eval (package 7e #1a, #1b) ----------
 //
 // POST /api/ws/{workspace}/workflows/executions/{id}/eval
@@ -2803,6 +2916,114 @@ async fn get_execution_logs(
         execution_state: status.state,
         complete: status.complete,
     }))
+}
+
+/// Follow an execution's log as Server-Sent Events (#3).
+///
+/// A watermark poll loop: each tick pages the lines after the last served `id`
+/// (reusing `get_execution_logs`' settle-watermark `LogRepo::page`) and, when
+/// there are any, emits one [`LogPageDto`] -- the SAME shape the paged route
+/// returns -- advancing the watermark. The stream ends on the 7d settle rule:
+/// `complete` (terminal AND the tail drained past the settle lag) with no new
+/// lines, never on a terminal state alone. Authorisation and the 404-before-the-
+/// stream guarantee are `get_execution_logs`'; see the follow section's note.
+#[utoipa::path(
+    get,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/logs/follow",
+    tag = "workflow",
+    operation_id = "follow_execution_logs",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+    ),
+    responses(
+        (status = 200, description = "A `text/event-stream`: each event is a page of new log lines (same shape as `GET …/executions/{id}/logs`) after the stream's watermark, in id order, carrying the execution state and `complete`. The stream closes once `complete` is true and no new lines remain -- terminal AND the tail drained past the 2 s settle lag, not a terminal state alone. The poll interval is 1 s.", content_type = "text/event-stream", body = LogPageDto),
+        (status = 400, description = "`{id}` is not a UUID", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed. **Answered before the stream opens.**", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+async fn follow_execution_logs(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> EgretResult<impl axum::response::IntoResponse> {
+    // 404/403 BEFORE the stream opens -- the same check `get_execution_logs` makes.
+    require_exec(&st, &ctx, id, WF_READ).await?;
+    let ws = ctx.workspace_id.0;
+
+    struct FollowLogs {
+        st: WorkflowState,
+        ws: Uuid,
+        id: Uuid,
+        interval: std::time::Duration,
+        after: Option<i64>,
+        first: bool,
+    }
+    let seed = FollowLogs {
+        interval: st.follow_poll_interval,
+        st,
+        ws,
+        id,
+        after: None,
+        first: true,
+    };
+    let stream = futures_util::stream::unfold(seed, |mut s| async move {
+        loop {
+            if s.first {
+                s.first = false;
+            } else {
+                tokio::time::sleep(s.interval).await;
+            }
+            let Ok(lines) = s
+                .st
+                .logs
+                .page(
+                    s.ws,
+                    s.id,
+                    &LogQuery {
+                        after: s.after,
+                        limit: MAX_LOG_PAGE_LIMIT,
+                        task_id: None,
+                        task_run_id: None,
+                        min_level: None,
+                    },
+                )
+                .await
+            else {
+                return None;
+            };
+            // Read the state on the same tick, so `complete` is never staler
+            // than the page it accompanies.
+            let Ok(status) = s.st.executions.log_status(s.ws, s.id).await else {
+                return None;
+            };
+            if !lines.is_empty() {
+                let next_after = lines.last().map(|l| l.id);
+                s.after = next_after;
+                let page = LogPageDto {
+                    items: lines.into_iter().map(LogLineDto::from).collect(),
+                    next_after,
+                    execution_state: status.state,
+                    complete: status.complete,
+                };
+                let json = serde_json::to_string(&page).unwrap_or_default();
+                return Some((Ok(Event::default().data(json)), s));
+            }
+            // No new lines. End only when the execution is complete -- terminal
+            // AND every settled line already served (7d's settle-watermark
+            // rule, the same stop condition the paged route documents). A
+            // terminal state alone is not enough: a late `afterExecution:` line
+            // may still be inside the settle lag.
+            if status.complete {
+                return None;
+            }
+            // Otherwise wait and poll again.
+        }
+    });
+    Ok(crate::http::follow::sse_from_poll(stream))
 }
 
 // ---------- Delete, labels, log download, log delete (package 7d) ----------
@@ -6478,6 +6699,14 @@ pub fn management_router() -> Router<WorkflowState> {
             get(get_execution).delete(delete_execution),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/{id}/follow",
+            get(follow_execution),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/{id}/logs/follow",
+            get(follow_execution_logs),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/eval",
             post(eval_execution_expression),
         )
@@ -6653,6 +6882,8 @@ pub fn management_router() -> Router<WorkflowState> {
         latest_executions,
         export_executions_csv,
         get_execution,
+        follow_execution,
+        follow_execution_logs,
         eval_execution_expression,
         eval_task_run_expression,
         get_execution_logs,
