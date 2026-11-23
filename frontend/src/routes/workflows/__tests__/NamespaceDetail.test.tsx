@@ -244,13 +244,13 @@ describe("NamespaceDetail: Flows and Executions, pinned to the namespace", () =>
     expect(sent.every((q) => q.get("namespace_prefix") === "company.team" && q.get("namespace") === null)).toBe(true);
   });
 
-  it("Executions offers only the namespace's flows in its flow picker", async () => {
+  it("Executions offers only the namespace's own flow keys in its flow picker", async () => {
     const user = userEvent.setup();
     renderAt(at("company.team", "executions"));
     await screen.findByTestId("executions-table", {}, LAZY);
     await user.click(screen.getByLabelText("Flow"));
-    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
-    expect(options).toEqual(["All", "company.team.etl.load", "company.team.extract", "company.team.sync"]);
+    // The keys arrive after the picker mounts (a separate read), so wait for them.
+    await waitFor(() => expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["All", "extract", "sync"]));
   });
 });
 

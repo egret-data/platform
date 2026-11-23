@@ -63,6 +63,7 @@ import { ChangeStateDialog } from "@/components/workflows/executions/ChangeState
 import { DeleteExecutionDialog } from "@/components/workflows/executions/DeleteExecutionDialog";
 import { EditLabelsDialog } from "@/components/workflows/executions/EditLabelsDialog";
 import { ResumeDialog } from "@/components/workflows/executions/ResumeDialog";
+import { AverageDurationProgress } from "@/components/workflows/executions/AverageDurationProgress";
 import { EvalPanel } from "@/components/workflows/executions/EvalPanel";
 import { ReplayDialog } from "@/components/workflows/executions/ReplayDialog";
 import { runExecutionAction, useRefreshExecution } from "@/components/workflows/executions/useExecutionAction";
@@ -345,6 +346,11 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
               )}
             </span>
           </Fact>
+          {isTerminalState(execution.state) ? null : (
+            <Fact term="Progress">
+              <AverageDurationProgress ws={ws} execution={execution} now={now} />
+            </Fact>
+          )}
           <Fact term="Trigger">
             <TriggerLabel row={execution} />
           </Fact>
