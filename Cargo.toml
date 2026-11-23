@@ -294,6 +294,11 @@ debug = "line-tables-only"
 # `sys` half of the cost being dsymutil's file churn.
 split-debuginfo = "unpacked"
 
+# `cargo test`/nextest build the `test` profile (it inherits `dev`). Stated explicitly so the
+# CI test binaries keep slim line-table debuginfo even if `dev` is ever raised for local debugging.
+[profile.test]
+debug = "line-tables-only"
+
 # W9a Task 8 fix round 1: `ion-rs` unoptimised parses about 9 s per MiB (release:
 # 0.46 s), so a dev server or a test previewing a few MiB of Ion would take
 # minutes. Optimising this one dependency keeps dev time close to release.
