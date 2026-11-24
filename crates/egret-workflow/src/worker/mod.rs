@@ -96,6 +96,7 @@ mod release;
 mod render;
 mod replay;
 mod restart;
+mod unqueue;
 // Plan Task 4 is the pure half; plan Task 6 calls it from the runner seam, and
 // this allowance goes with that call.
 #[allow(dead_code)]
@@ -178,6 +179,7 @@ pub use restart::{
 /// Exported so `tests/worker.rs`'s positive control asserts against the bound
 /// itself rather than against a copy of the number.
 pub use subflow::MAX_SPAWN_CHAIN;
+pub use unqueue::{unqueue, unqueue_refusal, Unqueued};
 /// Test-only (`test-util`; debt D6): a block's discard on a store the test
 /// gives, so `tests/working_dir_claims.rs` can make its delete fail.
 #[cfg(any(test, feature = "test-util"))]

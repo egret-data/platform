@@ -5234,6 +5234,212 @@ async fn pause_by_query_applies_to_exactly_the_matched_set() {
     }
 }
 
+// -- unqueue (package 8b) --
+
+async fn history_of(db: &Db, id: Uuid) -> Value {
+    sqlx::query_scalar("SELECT history FROM workflow.executions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("history")
+}
+
+async fn ended_at_set(db: &Db, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT ended_at IS NOT NULL FROM workflow.executions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("ended_at")
+}
+
+#[tokio::test]
+async fn unqueue_defaults_to_cancelled_and_honours_a_terminal_state() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "QUEUED").await,
+        exec_in(&db, ws, user, "QUEUED").await,
+    );
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{a}/unqueue"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(state_of(&db, a).await, "CANCELLED");
+    assert_eq!(
+        history_of(&db, a).await,
+        serde_json::json!(["CREATED", "QUEUED", "CANCELLED"])
+    );
+    assert!(ended_at_set(&db, a).await);
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{b}/unqueue?state=FAILED"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(state_of(&db, b).await, "FAILED");
+    assert_eq!(
+        history_of(&db, b).await,
+        serde_json::json!(["CREATED", "QUEUED", "FAILED"])
+    );
+}
+
+#[tokio::test]
+async fn unqueue_refuses_a_non_terminal_target_and_a_non_queued_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let queued = exec_in(&db, ws, user, "QUEUED").await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{queued}/unqueue?state=RUNNING"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    assert_eq!(
+        common::json(res).await["code"],
+        "unqueue_state_not_terminal"
+    );
+    assert_eq!(state_of(&db, queued).await, "QUEUED");
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{running}/unqueue"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 409);
+    assert_eq!(common::json(res).await["code"], "not_queued");
+    assert_eq!(state_of(&db, running).await, "RUNNING");
+}
+
+#[tokio::test]
+async fn unqueue_by_ids_is_all_or_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "QUEUED").await,
+        exec_in(&db, ws, user, "QUEUED").await,
+    );
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/executions/unqueue/by-ids");
+    let res = common::post(
+        &app,
+        &path,
+        user,
+        serde_json::json!({"ids": [a, running, b]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(running.to_string(), "not queued".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "QUEUED");
+    assert_eq!(state_of(&db, b).await, "QUEUED");
+    assert_eq!(state_of(&db, running).await, "RUNNING");
+
+    let res = common::post(&app, &path, user, serde_json::json!({"ids": [a, b]})).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(state_of(&db, id).await, "CANCELLED");
+    }
+    assert_eq!(state_of(&db, running).await, "RUNNING");
+
+    let res = common::post(
+        &app,
+        &format!("{path}?state=RUNNING"),
+        user,
+        serde_json::json!({"ids": [a]}),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    assert_eq!(
+        common::json(res).await["code"],
+        "unqueue_state_not_terminal"
+    );
+}
+
+#[tokio::test]
+async fn unqueue_by_query_moves_the_matched_queued_set_to_the_target() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "QUEUED").await,
+        exec_in(&db, ws, user, "QUEUED").await,
+    );
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!(
+            "/api/ws/{ws}/workflows/executions/unqueue/by-query?namespace=a.write&state=QUEUED&target_state=FAILED"
+        ),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(state_of(&db, id).await, "FAILED");
+    }
+}
+
+#[tokio::test]
+async fn unqueue_treats_a_foreign_id_as_not_found_and_needs_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (other_ws, other_user) = bulk_manager(&db).await;
+    let mine = exec_in(&db, ws, user, "QUEUED").await;
+    let foreign = exec_in(&db, other_ws, other_user, "QUEUED").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/unqueue/by-ids"),
+        user,
+        serde_json::json!({"ids": [mine, foreign]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(foreign.to_string(), "not found".to_string())]
+    );
+    assert_eq!(state_of(&db, mine).await, "QUEUED");
+    assert_eq!(state_of(&db, foreign).await, "QUEUED");
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{foreign}/unqueue"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 404);
+
+    let (rws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, rws, reader, &["workflow:read"]).await;
+    let q = exec_in(&db, rws, reader, "QUEUED").await;
+    for path in [
+        format!("/api/ws/{rws}/workflows/executions/{q}/unqueue"),
+        format!("/api/ws/{rws}/workflows/executions/unqueue/by-query"),
+    ] {
+        let res = common::post_no_body(&app, &path, reader).await;
+        assert_eq!(res.status(), 403, "{path}");
+    }
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{rws}/workflows/executions/unqueue/by-ids"),
+        reader,
+        serde_json::json!({"ids": [q]}),
+    )
+    .await;
+    assert_eq!(res.status(), 403);
+    assert_eq!(state_of(&db, q).await, "QUEUED");
+}
+
 // -- resume --
 
 #[tokio::test]

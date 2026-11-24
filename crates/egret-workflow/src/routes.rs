@@ -5173,6 +5173,221 @@ async fn pause_executions_by_query(
     pause_bulk(&st, &ctx, ids).await
 }
 
+/// `?state=` of the unqueue routes (and of the by-ids body's batch).
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct UnqueueStateQuery {
+    /// The terminal state the queued execution(s) move to, as an execution
+    /// state wire value (`CANCELLED`, `FAILED`, `KILLED`, `SUCCESS`, ...).
+    /// Default `CANCELLED`. A non-terminal state is 400
+    /// `unqueue_state_not_terminal`.
+    pub state: Option<String>,
+}
+
+/// `target_state` of `unqueue/by-query`: the by-query filter already owns
+/// `state` (the states to match), so the target is spelled apart.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct UnqueueTargetQuery {
+    /// As [`UnqueueStateQuery::state`]. Default `CANCELLED`.
+    pub target_state: Option<String>,
+}
+
+/// The unqueue target: `CANCELLED` when absent, otherwise a known TERMINAL
+/// state (package 8b).
+fn unqueue_target(raw: Option<&str>) -> std::result::Result<RunState, ExecOpError> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(RunState::Cancelled);
+    };
+    let state = crate::worker::from_wire(&raw.to_ascii_uppercase())
+        .ok_or_else(|| Error::InvalidInput(format!("unknown execution state `{raw}`")))?;
+    if !state.is_terminal() {
+        return Err(ExecOpError::Coded(
+            StatusCode::BAD_REQUEST,
+            UNQUEUE_STATE_NOT_TERMINAL_CODE,
+            format!(
+                "`{}` is not a terminal state; an unqueued execution must end in one",
+                state.wire()
+            ),
+        ));
+    }
+    Ok(state)
+}
+
+/// Read-only: may the manager unqueue `id`? Exists in this workspace, the
+/// caller may manage it, and it is `QUEUED`. `Ok(Some(state))` is the
+/// worker's refusal rule ([`crate::worker::unqueue_refusal`], the one
+/// `unqueue` applies under the lock). The single route and the bulk
+/// pre-flight share it.
+async fn unqueue_would_refuse(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> std::result::Result<Option<String>, ExecOpError> {
+    require_exec(st, ctx, id, WF_MANAGE).await?;
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(crate::worker::unqueue_refusal(crate::worker::from_wire(
+        &before.execution.state,
+    )))
+}
+
+fn not_queued_error(id: Uuid, state: &str) -> ExecOpError {
+    ExecOpError::conflict(
+        NOT_QUEUED_CODE,
+        format!("execution {id} is {state}; only a QUEUED execution can be unqueued"),
+    )
+}
+
+/// The unqueue and its audit, with the single route's coded refusal.
+async fn unqueue_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+    target: RunState,
+) -> std::result::Result<(), ExecOpError> {
+    let ws = ctx.workspace_id.0;
+    match crate::worker::unqueue(&st.db.pool, ws, id, target).await? {
+        crate::worker::Unqueued::Done => {}
+        crate::worker::Unqueued::NotQueued(state) => return Err(not_queued_error(id, &state)),
+    }
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ws),
+        "workflow_execution:unqueue",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({ "to_state": target.wire() }),
+    ));
+    Ok(())
+}
+
+async fn unqueue_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> std::result::Result<(), bulk::Invalid> {
+    match unqueue_would_refuse(st, ctx, id).await {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) => Err(invalid_id(id, "not queued")),
+        Err(e) => Err(invalid_id(id, gate_reason(&e))),
+    }
+}
+
+async fn unqueue_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+    target: RunState,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| unqueue_check(st, ctx, id),
+        |id| async move {
+            unqueue_write(st, ctx, id, target)
+                .await
+                .map_err(op_error_to_core)
+        },
+    )
+    .await?)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/unqueue",
+    operation_id = "unqueue_execution",
+    tag = "workflow",
+    params(
+        WorkspacePath,
+        ("id" = Uuid, Path, description = "Execution id"),
+        UnqueueStateQuery,
+    ),
+    responses(
+        (status = 200, description = "The execution left the queue for the target terminal state (`CANCELLED` unless `?state=` says otherwise). It never runs. The body is its detail afterwards.", body = ExecutionDto),
+        (status = 400, description = "`unqueue_state_not_terminal`: `?state=` is not a terminal state (or not an execution state at all). Nothing is written.", body = egret_core::http::ErrorBody),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_queued`: the execution is not `QUEUED` (the message names the state). Nothing is written.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Take a `QUEUED` execution out of its flow's queue by moving it to a
+/// terminal state (package 8b).
+async fn unqueue_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+    Query(q): Query<UnqueueStateQuery>,
+) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
+    let target = unqueue_target(q.state.as_deref())?;
+    if let Some(state) = unqueue_would_refuse(&st, &ctx, id).await? {
+        return Err(not_queued_error(id, &state));
+    }
+    unqueue_write(&st, &ctx, id, target).await?;
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/unqueue/by-ids",
+    operation_id = "unqueue_executions_by_ids",
+    tag = "workflow",
+    params(WorkspacePath, UnqueueStateQuery),
+    request_body = BulkIds,
+    responses(
+        (status = 200, description = "Every listed execution left the queue for the target terminal state.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was unqueued: `unqueue_state_not_terminal`, `too_many` (more than 1000 ids), or an `invalids` list naming every id that is missing, not yours to manage, or not `QUEUED`.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Unqueue several `QUEUED` executions to one terminal state, all or none
+/// (package 8b).
+async fn unqueue_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<UnqueueStateQuery>,
+    Json(body): Json<BulkIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    let target = unqueue_target(q.state.as_deref()).map_err(BulkRouteError::Exec)?;
+    unqueue_bulk(&st, &ctx, body.ids, target).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/unqueue/by-query",
+    operation_id = "unqueue_executions_by_query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery, UnqueueTargetQuery),
+    responses(
+        (status = 200, description = "Every matched execution left the queue for the target terminal state.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was unqueued: `unqueue_state_not_terminal`, `too_many` (the filter matches more than 1000) or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Unqueue every execution a filter matches to one terminal state, all or
+/// none (package 8b). The filter's `state` picks WHICH executions; the target
+/// is `target_state`.
+async fn unqueue_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+    Query(t): Query<UnqueueTargetQuery>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let target = unqueue_target(t.target_state.as_deref()).map_err(BulkRouteError::Exec)?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    unqueue_bulk(&st, &ctx, ids, target).await
+}
+
 /// What a resume finds waiting, read from the scoped detail before any body
 /// is read (package 7c D5). The worker decides again under the lock and
 /// answers `Moved` when the `Pause` run is no longer the one read here.
@@ -6597,6 +6812,11 @@ pub const TASK_RUN_NOT_FOUND_CODE: &str = "task_run_not_found";
 /// Package 7c D3: a pause of an execution that is not `RUNNING` or
 /// `RESTARTED`, or that has a `Pause` or `LoopUntil` already waiting (Q5).
 pub const NOT_RUNNING_CODE: &str = "not_running";
+
+/// Package 8b: an unqueue of an execution that is not `QUEUED`.
+pub const NOT_QUEUED_CODE: &str = "not_queued";
+/// Package 8b: an unqueue whose target state is not terminal.
+pub const UNQUEUE_STATE_NOT_TERMINAL_CODE: &str = "unqueue_state_not_terminal";
 /// Package 7c D5, D8: a resume or a validate of an execution that is not
 /// `PAUSED`.
 pub const NOT_PAUSED_CODE: &str = "not_paused";
@@ -8326,6 +8546,10 @@ pub fn management_router() -> Router<WorkflowState> {
             post(pause_execution),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/{id}/unqueue",
+            post(unqueue_execution),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/resume",
             // As the start route: the handler limits each content type itself.
             post(resume_execution).layer(axum::extract::DefaultBodyLimit::disable()),
@@ -8410,6 +8634,14 @@ pub fn management_router() -> Router<WorkflowState> {
             post(pause_executions_by_query),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/unqueue/by-ids",
+            post(unqueue_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/unqueue/by-query",
+            post(unqueue_executions_by_query),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/resume/by-ids",
             post(resume_executions_by_ids),
         )
@@ -8474,6 +8706,8 @@ pub fn management_router() -> Router<WorkflowState> {
         replay_executions_by_query,
         pause_executions_by_ids,
         pause_executions_by_query,
+        unqueue_executions_by_ids,
+        unqueue_executions_by_query,
         resume_executions_by_ids,
         resume_executions_by_query,
         download_execution_logs,
@@ -8484,6 +8718,7 @@ pub fn management_router() -> Router<WorkflowState> {
         start_flow_execution,
         validate_execution_inputs,
         pause_execution,
+        unqueue_execution,
         resume_execution,
         validate_resume_inputs,
         replay_execution,
