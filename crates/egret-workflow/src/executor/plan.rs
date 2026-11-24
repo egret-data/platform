@@ -2072,6 +2072,17 @@ mod pause_body_plan_tests {
             };
             assert_eq!(behavior.as_deref(), Some(ok.trim_matches('"')));
         }
+        // A valid behavior is not a gap at the plan layer (`pause_gap` still
+        // refuses it for a NEW start: the driver does not run it yet).
+        for ok in ["FAIL", "WARN"] {
+            let src = pause_flow(&format!("    behavior: {ok}\n"));
+            let flow = crate::spec::parse(&src).unwrap();
+            let crate::models::TaskKind::Pause(p) = &flow.tasks[0].kind else {
+                panic!()
+            };
+            assert_eq!(pause_plan_gap(p), None, "{ok}");
+            assert_eq!(pause_gap(p), Some("behavior"), "{ok}");
+        }
         for bad in ["NOPE", "fail"] {
             let src = pause_flow(&format!("    behavior: {bad}\n"));
             let flow = crate::spec::parse(&src).unwrap();

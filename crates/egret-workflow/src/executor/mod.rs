@@ -477,6 +477,67 @@ mod tests {
     /// Every corpus flow, as `(id, source)`. Derived from the directory, never
     /// enumerated: a hand-written list is how a table comes to print a count
     /// for a class that no longer exists.
+    /// Package 9a Task 1: whether the stored plan holds a `Pause` declaring a
+    /// body (`tasks:`, `errors:`, `finally:`, `onPause:` or `behavior:`), which
+    /// the plan builds and the driver cannot run yet.
+    fn plan_has_pause_body(plan: &Plan) -> bool {
+        plan.tasks.iter().any(|t| match &t.kind {
+            TaskKind::Pause {
+                tasks,
+                on_pause,
+                behavior,
+                ..
+            } => {
+                !tasks.is_empty()
+                    || on_pause.is_some()
+                    || behavior.is_some()
+                    || !t.errors.is_empty()
+                    || !t.finally.is_empty()
+            }
+            _ => false,
+        })
+    }
+
+    /// The corpus flows whose stored plan holds a `Pause` with a body.
+    fn corpus_pause_body_flows() -> Vec<String> {
+        every_corpus_flow()
+            .into_iter()
+            .filter(|(_, source)| plan::plan_stored(source).is_ok_and(|p| plan_has_pause_body(&p)))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// 9a Task 1 guard (Task 6, which lifts the refusal, replaces it): a `Pause`
+    /// the driver cannot run yet is still refused for a new start. Exactly the
+    /// three corpus flows hold one, and `validate_for_run` refuses each.
+    #[test]
+    fn every_corpus_pause_with_a_body_is_still_refused_for_a_new_start() {
+        let ids = corpus_pause_body_flows();
+        assert_eq!(
+            ids,
+            [
+                "valids/pause-behavior",
+                "valids/pause-errors-finally-after-execution",
+                "valids/pause_on_pause"
+            ],
+            "the corpus population this guard judges; if it moves, re-measure"
+        );
+        for (id, source) in every_corpus_flow() {
+            if !ids.contains(&id) {
+                continue;
+            }
+            let flow = crate::spec::parse(&source).unwrap();
+            let report = crate::spec::validate_for_run(&flow);
+            assert!(
+                report
+                    .errors
+                    .iter()
+                    .any(|e| e.code == "unsupported_pause_property"),
+                "{id}: a Pause with a body must still be refused"
+            );
+        }
+    }
+
     fn every_corpus_flow() -> Vec<(String, String)> {
         let root = format!("{}/oracle-exec/corpus", env!("CARGO_MANIFEST_DIR"));
         let mut out = Vec::new();
@@ -600,18 +661,27 @@ mod tests {
             frozen.len()
         );
         let mut moved = Vec::new();
+        // The exemption holds only while these stay refused for a new start.
+        let pause_body_flows = corpus_pause_body_flows();
+        for (id, source) in every_corpus_flow() {
+            if pause_body_flows.contains(&id) {
+                let flow = crate::spec::parse(&source).unwrap();
+                assert!(
+                    crate::spec::validate_for_run(&flow)
+                        .errors
+                        .iter()
+                        .any(|e| e.code == "unsupported_pause_property"),
+                    "{id}: exempted from the layout prefix, so it must stay refused"
+                );
+            }
+        }
         for (id, old) in &frozen {
             let old: Vec<(usize, String, String, Vec<usize>)> =
                 serde_json::from_value(old.clone()).unwrap();
             // 9a Task 1: a `Pause` declaring a body now plans as a `Pause`
             // carrying it. Those three corpus flows are refused for every new
             // start (`pause_gap`), so no live execution holds the old layout.
-            if matches!(
-                id.as_str(),
-                "valids/pause-behavior"
-                    | "valids/pause-errors-finally-after-execution"
-                    | "valids/pause_on_pause"
-            ) {
+            if pause_body_flows.contains(id) {
                 continue;
             }
             let Some(new) = now.get(id) else {
@@ -654,14 +724,24 @@ mod tests {
                 continue;
             };
             judged += 1;
-            // 9a Task 1: the plan carries a `Pause` body but the topology graph
-            // still draws a `Pause` as a leaf until a later 9a task, so the
-            // tasks planned beneath a `Pause` have no node yet.
+            // 9a loose end -- flow_graph draws a Pause-with-body as a leaf
+            // without its body; handled when the refusal is lifted (Task 6) /
+            // tracked as a 9a follow-up. Only flows `pause_gap` refuses are
+            // skipped, and only for the tasks planned beneath their `Pause`.
             let mut under_pause = BTreeSet::new();
-            let mut stack: Vec<usize> = (0..plan.tasks.len())
-                .filter(|&i| matches!(plan.tasks[i].kind, TaskKind::Pause { .. }))
-                .flat_map(|i| plan.children_of(i))
-                .collect();
+            let mut stack: Vec<usize> = if plan_has_pause_body(&plan) {
+                let refused = crate::spec::validate_for_run(&flow)
+                    .errors
+                    .iter()
+                    .any(|e| e.code == "unsupported_pause_property");
+                assert!(refused, "{id}: skipped by the graph guard, so refused");
+                (0..plan.tasks.len())
+                    .filter(|&i| matches!(plan.tasks[i].kind, TaskKind::Pause { .. }))
+                    .flat_map(|i| plan.children_of(i))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             while let Some(i) = stack.pop() {
                 if under_pause.insert(i) {
                     stack.extend(plan.children_of(i));
@@ -3897,6 +3977,9 @@ mod tests {
         // `validate_for_run` refuses it, so `build_plan` answers an error and
         // the probe is asserted for that below rather than driven through
         // the loop.
+        // 9a: the gap probe is a LITERAL `behavior: NOPE` (outside the enum),
+        // the one `behavior:` the plan itself still leaves opaque; a valid
+        // `behavior: FAIL` now plans as a `TaskKind::Pause`.
         let pause_plain = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
         let pause_with_behavior = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    behavior: NOPE\n";
         // The other side of `loop_until_gap`, for the reason both sides of
@@ -4368,7 +4451,7 @@ mod tests {
 
         // The constructs the corpus cannot show, nested where the builder
         // reaches them: a `LoopUntil` and a `WaitFor` with a bound it cannot
-        // read, a `Pause` with `behavior:`, under a `Sequential`'s `errors:`.
+        // read, a `Pause` with a literal `behavior: NOPE`, under a `Sequential`'s `errors:`.
         let synthetic = |inner: &str| {
             format!(
                 "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: ok\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n    errors:\n{inner}"
