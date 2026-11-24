@@ -184,14 +184,16 @@ async fn warnings_do_not_block_publish_but_errors_do() {
     );
 }
 
-/// The 2026-10-11 ruling: a `Pause` declaring `behavior`, `onPause`, `tasks`
-/// or `errors` is a validation error, so it cannot be versioned. Before the
-/// ruling it published with a warning and every execution of it stalled in
-/// `RUNNING`. The control is the same flow with a plain bounded `Pause`,
-/// which publishes -- without it a publish that refused every `Pause` would
-/// pass.
+/// 9a Task 6 lifted the 2026-10-11 ruling: a `Pause` declaring `behavior`,
+/// `onPause`, `tasks` or `errors` is now a full flowable and publishes. The one
+/// thing still refused at publish is a LITERAL invalid `behavior:` outside
+/// `RESUME`/`WARN`/`CANCEL`/`FAIL` (`unsupported_pause_behavior`, D2): Kestra
+/// leaves such an execution `RUNNING` for ever, a footgun 9a refuses at publish.
+/// The control is the same flow with a valid `behavior: RESUME`, which now
+/// publishes -- without it a publish that still refused every property-bearing
+/// `Pause` would pass.
 #[tokio::test]
-async fn a_pause_egret_does_not_run_cannot_be_published() {
+async fn a_pause_with_an_invalid_literal_behavior_cannot_be_published() {
     let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
@@ -202,14 +204,14 @@ async fn a_pause_egret_does_not_run_cannot_be_published() {
         )
     };
 
-    let bad = common::draft(&repo, ws, user, &pause("pb", "    behavior: RESUME\n")).await;
+    let bad = common::draft(&repo, ws, user, &pause("pb", "    behavior: NOPE\n")).await;
     let err = egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, bad.id, "")
         .await
-        .expect_err("a Pause with `behavior:` must not publish");
+        .expect_err("a Pause with an invalid literal `behavior:` must not publish");
     match &err {
         egret_core::Error::InvalidInput(m) => {
             assert!(
-                m.contains("'behavior'") && m.contains("(tasks.gate.behavior)"),
+                m.contains("behavior 'NOPE'") && m.contains("(tasks.gate.behavior)"),
                 "{m}"
             )
         }
@@ -220,10 +222,10 @@ async fn a_pause_egret_does_not_run_cannot_be_published() {
         None
     );
 
-    let ok = common::draft(&repo, ws, user, &pause("pok", "")).await;
+    let ok = common::draft(&repo, ws, user, &pause("pok", "    behavior: RESUME\n")).await;
     egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, ok.id, "")
         .await
-        .expect("a plain Pause publishes");
+        .expect("a Pause with a valid behavior publishes");
 }
 
 /// The 2026-10-12 ruling: `ForEach` is the validation error
