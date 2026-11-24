@@ -97,7 +97,7 @@ pub(crate) fn plus(at: Tick, d: std::time::Duration) -> Tick {
 /// unrepresentable in the type system and still representable in the
 /// database.** `a_paused_row_that_names_no_resumer_cannot_be_stored` is that
 /// half.
-pub(crate) fn resume_paused(state: &ExecutionState, run: RunIx, now: Tick) -> Step {
+pub(crate) fn resume_paused(plan: &Plan, state: &ExecutionState, run: RunIx, now: Tick) -> Step {
     let Some(resume) = state.runs[run].resume_with else {
         return Step::Waiting;
     };
@@ -116,6 +116,54 @@ pub(crate) fn resume_paused(state: &ExecutionState, run: RunIx, now: Tick) -> St
     match resume {
         crate::executor::Resume::Never => Step::Waiting,
         crate::executor::Resume::Terminal { state: s, .. } => {
+            // **9a D4/D3: a resumed `Pause` with a body re-enters `RUNNING` to
+            // drive it** rather than ending here. A manual resume
+            // ([`pause::release_now`]) and a `pauseDuration:` expiry carry
+            // `SUCCESS` (the RESUME behaviour), so the run reaches
+            // [`pause::drive`]'s resumed arm and runs its `tasks:` body,
+            // terminating on `aggregate(tasks)`. **9a Task 6: a `timeout:` /
+            // `behavior: FAIL` deadline carries `FAILED`/`WARNING`, and a pause
+            // that declares `errors:`/`finally:` must still re-enter `RUNNING`
+            // to drive those handlers** -- Kestra's
+            // `Execution.findTaskDependingFlowState`'s `terminalState == FAILED`
+            // branch (`Execution.java:595-599`), deferred until #9. The run then
+            // reaches [`pause::drive`]'s resumed arm, which reads its
+            // `resume_with` terminal and runs `errors:` (on a failure) then
+            // `finally:`, ending in that deadline terminal. A bare pause (no
+            // tasks/errors/finally) ends exactly as before.
+            // `behavior: CANCEL` at the deadline ends the EXECUTION, as an
+            // `Exit` with `CANCELLED` does (spec D2/D3).
+            if s == RunState::Cancelled
+                && matches!(
+                    plan.tasks[state.runs[run].task].kind,
+                    TaskKind::Pause { .. }
+                )
+            {
+                return Step::Commands(crate::executor::exit::end_with(state, run, s));
+            }
+            if let TaskKind::Pause { tasks, .. } = &plan.tasks[state.runs[run].task].kind {
+                let pt = &plan.tasks[state.runs[run].task];
+                if s == RunState::Success {
+                    // RESUME: run the `tasks:` body (9a D4). `ReopenFlowable`
+                    // opens a new attempt and clears `resume_with`, so
+                    // `pause::drive`'s resumed arm sees no terminal and drives
+                    // the body, ending on `aggregate(tasks)`.
+                    if !tasks.is_empty() {
+                        return Step::Commands(vec![Command::ReopenFlowable { run, at: now }]);
+                    }
+                } else if (s == RunState::Failed && !pt.errors.is_empty()) || !pt.finally.is_empty()
+                {
+                    // A `timeout:`/`behavior: FAIL|WARN` deadline runs no body,
+                    // but a pause must still drive its handlers (9a Task 6). Only
+                    // a FAILED deadline runs `errors:` (a WARNING is not a
+                    // failure, so errors-only with a WARNING terminal re-enters
+                    // for nothing -- M3); `finally:` always runs. `ReenterPause`
+                    // opens no new attempt and KEEPS `resume_with`, so the
+                    // resumed arm reads the deadline terminal `s` back and ends
+                    // the pause in it once the handlers are done.
+                    return Step::Commands(vec![Command::ReenterPause { run }]);
+                }
+            }
             Step::Commands(vec![Command::SetRunState { run, state: s }])
         }
         crate::executor::Resume::Iterate { .. } => {
@@ -622,9 +670,12 @@ pub(crate) fn descend(
         //
         // Its `Step` is returned WITHOUT going through the `Done` mapping
         // below, because a pause does not terminate in the round it starts and
-        // never returns `Done` at all -- the terminal is
-        // [`resume_paused`]'s, one clock move later.
-        TaskKind::Pause { .. } => return pause::drive(plan, state, run, task),
+        // never returns `Done` at all. For a bare pause the terminal is
+        // [`resume_paused`]'s, one clock move later; for a pause with a `tasks:`
+        // body (9a D4) it is `pause::drive`'s own `SetRunState { aggregate }`
+        // once the resumed body is done, which is why that path maps its body's
+        // `Done` to a command rather than returning it here.
+        TaskKind::Pause { .. } => return pause::drive(plan, state, run, task, now),
         // Kill-and-exit Task 3. Returned WITHOUT the `Done` mapping below, as
         // a `Pause`'s is: an `Exit`'s commands are its own terminal, its
         // ancestors' and the execution's, already decided -- an

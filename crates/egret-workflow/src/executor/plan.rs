@@ -171,11 +171,11 @@ impl Plan {
                 .copied()
                 .collect(),
             TaskKind::Dag { nodes } => nodes.iter().map(|n| n.task).collect(),
-            // A planned `Pause` has none: `build_plan` only assigns this kind
-            // to a `Pause` whose `tasks:` is empty (`pause_gap`), so an empty
-            // list here is the whole truth rather than a walk this kind is
-            // missing.
-            TaskKind::Pause { .. } => Vec::new(),
+            // 9a: a `Pause`'s body and its `onPause:` task. Its `errors:` and
+            // `finally:` are on the `PlanTask`, as for every other block.
+            TaskKind::Pause { tasks, on_pause, .. } => {
+                tasks.iter().chain(on_pause).copied().collect()
+            }
         }
     }
 }
@@ -606,8 +606,24 @@ pub enum TaskKind {
     /// as the flowables [`TaskKind::AllowFailure`] and
     /// [`TaskKind::WorkingDirectory`]; only an `AllowFailure` block `retry:`
     /// is refused (`unsupported_allow_failure_retry`).
+    ///
+    /// # Package 9a: the body (`tasks:`, `onPause:`, `behavior:`)
+    ///
+    /// A `Pause` is a full flowable now. Its `errors:` and `finally:` live on
+    /// the [`PlanTask`] like every other block's (so `replay`/`restart`/the
+    /// error-handler walk need no second place to look); the kind carries the
+    /// rest. A **finally-only** `Pause` -- `finally:` with no `tasks:`,
+    /// `errors:` or `onPause:` -- is the one shape that stays bare: it is
+    /// refused for a new start ([`pause_gap`]) and an execution stored before
+    /// #2a (which dropped the list) re-plans as it started (D8).
     Pause {
         duration: Option<String>,
+        /// The body run after the pause ends with RESUME.
+        tasks: Vec<TaskIx>,
+        /// `onPause:`, the single task run when the pause begins.
+        on_pause: Option<TaskIx>,
+        /// `behavior:` as written, literal or expression; `None` is RESUME.
+        behavior: Option<String>,
     },
     /// `io.kestra.plugin.core.flow.LoopUntil`, and its alias
     /// `io.kestra.plugin.core.flow.WaitFor` — W8 Task 4.
@@ -865,126 +881,65 @@ const PAUSE_TYPE: &str = "pause";
 const LOOP_UNTIL_TYPE: &str = "loopuntil";
 const WAIT_FOR_TYPE: &str = "waitfor";
 
-/// The first property of this `Pause` that [`build_plan`] does not reproduce,
-/// or `None` for a plain wait.
+/// The first property of this `Pause` that this executor cannot reproduce, or
+/// `None` for a pause it runs.
 ///
 /// **One rule, two readers.** [`build_plan`] uses it to decide whether a
 /// `Pause` becomes a [`TaskKind::Pause`] or stays an opaque
 /// [`TaskKind::Runnable`], and `spec::validate` uses it to decide whether the
-/// flow is refused with `unsupported_pause_property` (since 2026-10-11; it was
-/// the `not_yet_enforced` warning before, which a `Pause` used to get
-/// unconditionally). Two copies of this predicate would be two answers to "is
+/// flow is refused. Two copies of this predicate would be two answers to "is
 /// this pause reproduced", and a publish that says yes over an executor that
 /// says no is exactly the over-acceptance this programme forbids.
 ///
-/// Each of the four is a real construct with a measured trace this executor
-/// does not produce, and the order is declaration order in `Pause.java`:
+/// # 9a Task 6 lifted the body refusal, and now this IS [`pause_plan_gap`]
 ///
-/// * `tasks:` — **not a Kestra property** (`Pause.java:158`: `extends Task
-///   implements FlowableTask`, no `tasks` field; corrected 2026-10-26, spec
-///   D14). It is an unknown property, refused permanently and by name, and no
-///   roadmap package lifts it. It stays here rather than in the save-time key
-///   census because a stored version carrying one would otherwise stall.
-/// * `errors:` — `valids/pause-errors-finally-after-execution` writes one, and
-///   its golden run history is `CREATED RUNNING PAUSED RUNNING FAILED`: the
-///   pause re-enters `RUNNING` to drive the handler. Nothing else in this
-///   corpus has that shape.
-/// * `behavior:` — `RESUME`/`WARN`/`FAIL`/`CANCEL` at the moment the pause
-///   ends. This read *"two of the four terminals it can produce, `WARNING` and
-///   `CANCELLED`, are not in `RunState` at all, so the construct is
-///   unrepresentable here"*; **both are in it now** (W8 Task 5 and W8 Task 6),
-///   and the entry did **not** bank — see the measurement in the comment on
-///   [`pause_gap`]'s `behavior:` arm. What holds it is a fifth outcome the
-///   artifact produces for an out-of-enum value, and the fact that a DYNAMIC
-///   value cannot be classified at plan time at all, which is where this
-///   decision is taken.
-/// * `onPause:` — a single task run when the pause begins.
-///   `valids/pause_on_pause`'s golden records it as a run with `parent: null`,
-///   i.e. a SIBLING of the pause rather than a child, `overlapping` it.
+/// Until 9a a `Pause` declaring `tasks:`, `errors:`, `finally:`, `onPause:` or
+/// `behavior:` was refused at publish/start with `unsupported_pause_property`:
+/// `build_plan` planned it an opaque `Runnable` no worker could serve, so the
+/// execution stalled in `RUNNING` for ever. 9a made the `Pause` a full
+/// flowable — the planner builds the body ([`pause_plan_gap`]) and the driver
+/// (`flowable::pause`) runs it — so none of those five is a gap any more.
 ///
-/// The order decides only which name the `unsupported_pause_property` error
-/// prints (`spec::validate`, which refuses any non-`None` since 2026-10-11);
-/// the decision is the same for any non-`None`.
+/// The **one** thing left is a **literal** `behavior:` outside
+/// `RESUME`/`WARN`/`CANCEL`/`FAIL` (D2): Kestra leaves the execution `RUNNING`
+/// for ever on one, a worker-resource footgun 9a refuses to reproduce, and it
+/// is known at plan time. `spec::validate` reports it as
+/// `unsupported_pause_behavior`. An **expression** behavior is resolved at
+/// runtime (an out-of-enum render FAILS the task, D2) and is not a gap here.
 ///
-/// # `finally:` is refused here and NOT in [`pause_plan_gap`] (2026-10-27)
-///
-/// `finally:` became a model key in package #2a. Before it a `Pause` carrying
-/// one published and ran: serde dropped the list and the task paused. So this
-/// predicate -- the one `spec::validate` asks -- refuses it (publish and every
-/// NEW start, naming #9), while the planner asks [`pause_plan_gap`], which
-/// ignores it: an execution stored before #2a and re-planned by
-/// [`plan_stored`] keeps its `Pause` a [`TaskKind::Pause`] at the same index
-/// and its `finally:` unrun, by the rules it started under (D4). Routing the
-/// planner through this function would turn that `Pause` into an opaque
-/// `Runnable` the worker fails as not-a-leaf.
+/// That one gap is exactly what the planner's half [`pause_plan_gap`] gates,
+/// so this function now defers to it wholesale: `pause_gap == pause_plan_gap`.
+/// The pre-#2a `finally:`-dropped shape (D8) is kept bare by [`plan_stored`]
+/// through [`pause_finally_is_dropped`], not by refusing it here.
 pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
-    if p.tasks.is_empty() && p.errors.is_empty() && !p.finally.is_empty() {
-        return Some("finally");
-    }
     pause_plan_gap(p)
 }
 
-/// The planner's half of [`pause_gap`]: every property it names except
-/// `finally:`, in the same order. See [`pause_gap`] for why the two differ.
+/// A `Pause` whose only body is `finally:` -- no `tasks:`, `errors:` or
+/// `onPause:`. Before #2a serde dropped that list, so a stored execution of
+/// one re-plans as a bare `Pause` (D8); a NEW publish/start refuses it
+/// ([`pause_gap`]).
+pub(crate) fn pause_finally_is_dropped(p: &crate::models::Pause) -> bool {
+    p.tasks.is_empty() && p.errors.is_empty() && p.on_pause.is_none() && !p.finally.is_empty()
+}
+
+/// Whether a `behavior:` source is an expression, which only a render can
+/// resolve (package 9a D2).
+pub(crate) fn behavior_is_expression(source: &str) -> bool {
+    source.contains("{{") || source.contains("{%")
+}
+
+/// The planner's half of [`pause_gap`]. Since 9a `tasks:`, `errors:`,
+/// `finally:`, `onPause:` and `behavior:` are all reproduced, so the one thing
+/// left is a **literal** `behavior:` outside `RESUME`/`WARN`/`CANCEL`/`FAIL`
+/// (D2): the artifact hangs on one, and it is known at plan time. An
+/// expression is resolved at runtime and is not a gap here.
 pub(crate) fn pause_plan_gap(p: &crate::models::Pause) -> Option<&'static str> {
-    if !p.tasks.is_empty() {
-        return Some("tasks");
-    }
-    if !p.errors.is_empty() {
-        return Some("errors");
-    }
-    // **Any `behavior:`, literal or expression, and rounds 2-3 MEASURED why.**
-    // Fix round 1 narrowed this to literals on the theory that an expression
-    // always fails at resume. It does not. Re-measured on the pinned artifact
-    // with a FRESH, never-reused flow id for every execution -- round 2's runs
-    // were contaminated by flow-id reuse, where `execution.inputs` still reads
-    // the posted value so "the input landed" cannot say which SOURCE ran --
-    // the corpus's own expression form `"{{inputs.behavior}}"` gives, 3 runs
-    // each:
-    //
-    //     FAIL -> FAILED/1     RESUME -> SUCCESS/2
-    //     WARN -> WARNING/2    CANCEL -> CANCELLED/1
-    //
-    // Four DIFFERENT executions, which is `PauseTest.java:374-380`'s own
-    // semantics. **For a value INSIDE the `Behavior` enum the artifact honours
-    // it, in every form it is written in** -- so "an expression fails" was a
-    // rule about a class the corpus's one instance never exercised.
-    //
-    // **The sentence stops at the enum, and round 2's did not.** Outside it the
-    // artifact does not terminate at all: `NOPE`, lower-case `fail` and an
-    // undefined `{{inputs.nosuch}}` each leave the execution `RUNNING` past
-    // 120s. Round 2's grid was form x {`FAIL`, `RESUME`} and every cell
-    // rendered to a valid constant, so it could not see that edge and the
-    // conclusion drawn from it was wider than the grid.
-    //
-    // It is a gap for the reason it always was, and the measurement above is
-    // what confirms that reason rather than replacing it: `behavior:` is
-    // four-valued and the artifact really does produce all four terminals.
-    //
-    // **This comment carried a PREDICTION and W8 Task 6 measured it false.** It
-    // said *"the entry becomes bankable when `RunState` gains `CANCELLED` as
-    // well -- W8 Task 5 supplied `WARNING`, which is half of it"*. W8 Task 6
-    // supplied the other half, the vocabulary is complete, and
-    // `valids/pause-behavior` did **not** bank: that task's ratchet moved
-    // 111 -> 109 and both ids were `sla:`'s. The prediction was a claim about
-    // the STATE VOCABULARY over an entry held by a PLAN decision -- this one.
-    // Two things still hold it, and neither is a missing variant:
-    //
-    // * a fifth outcome, the non-terminal HANG the artifact produces for a
-    //   value outside the enum (`NOPE`, lower-case `fail`, an undefined
-    //   `{{inputs.nosuch}}` -- each leaves the execution `RUNNING` past 120 s),
-    //   which is not a terminal and so not representable by any variant; and
-    // * **a dynamic value cannot even be classified here** -- it is known at
-    //   render time and this decision is taken at plan time.
-    //
-    // So the whole task stays opaque, which is the only answer that cannot
-    // over-accept. Being inside the vocabulary is necessary and not sufficient,
-    // and this is the fourth entry-population on this branch to measure that.
-    if p.behavior.is_some() {
-        return Some("behavior");
-    }
-    if p.on_pause.is_some() {
-        return Some("onPause");
+    if let Some(b) = &p.behavior {
+        let src = b.source().trim();
+        if !behavior_is_expression(src) && !matches!(src, "RESUME" | "WARN" | "CANCEL" | "FAIL") {
+            return Some("behavior");
+        }
     }
     None
 }
@@ -1394,6 +1349,8 @@ fn deferred_lists(task: &Task) -> (Option<&[Task]>, &[Task]) {
         ModelKind::Dag(b) => (None, &b.finally),
         ModelKind::LoopUntil(b) => (Some(&b.errors), &b.finally),
         ModelKind::WorkingDirectory(b) => (Some(&b.errors), &b.finally),
+        // 9a: a finally-only `Pause` keeps its list unplanned (D8).
+        ModelKind::Pause(b) if !pause_finally_is_dropped(b) => (None, &b.finally),
         _ => (None, &[]),
     }
 }
@@ -1614,12 +1571,36 @@ fn flatten_one<'a>(
                     .timeout
                     .as_ref()
                     .and_then(|t| super::retry::parse_duration(t.source()));
-                out[ix].kind = TaskKind::Pause {
-                    duration: pause
-                        .pause_duration
-                        .as_ref()
-                        .map(|d| d.source().to_string()),
-                };
+                let duration = pause
+                    .pause_duration
+                    .as_ref()
+                    .map(|d| d.source().to_string());
+                if pause_finally_is_dropped(pause) {
+                    // D8: the pre-#2a shape stays bare.
+                    out[ix].kind = TaskKind::Pause {
+                        duration,
+                        tasks: Vec::new(),
+                        on_pause: None,
+                        behavior: None,
+                    };
+                } else {
+                    // `errors` after `tasks`, then `onPause`; `finally` is
+                    // deferred (`deferred_lists`), as for a `Sequential`.
+                    let children = flatten_list(out, &pause.tasks, depth + 1, deferred)?;
+                    out[ix].errors = flatten_list(out, &pause.errors, depth + 1, deferred)?;
+                    let on_pause = pause
+                        .on_pause
+                        .as_deref()
+                        .map(|t| flatten_one(out, t, depth + 1, deferred))
+                        .transpose()?;
+                    deferred.push_back((ix, task, depth + 1));
+                    out[ix].kind = TaskKind::Pause {
+                        duration,
+                        tasks: children,
+                        on_pause,
+                        behavior: pause.behavior.as_ref().map(|b| b.source().to_string()),
+                    };
+                }
             }
         }
         // W8 Task 4. The two spellings are one arm because they are one Kestra
@@ -1948,45 +1929,171 @@ mod working_directory_plan_tests {
 mod pause_finally_tests {
     use super::*;
 
+    /// 9a Task 6 lifted the body refusal: a NEW `Pause` declaring `finally:`
+    /// alongside a body is a full flowable now. It plans as a `Pause` carrying
+    /// its `tasks:` and `finally:`, and publish no longer refuses it.
     #[test]
-    fn a_pause_finally_is_refused_and_names_package_nine() {
-        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    finally: [{id: z, type: core.log, message: m}]\n";
-        let e = build_plan(src).unwrap_err().message;
-        assert!(e.starts_with("unsupported_pause_property"), "{e}");
+    fn a_pause_with_a_body_and_finally_plans_and_is_no_longer_refused() {
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    tasks: [{id: a, type: core.log, message: m}]\n    finally: [{id: z, type: core.log, message: m}]\n";
+        let plan = build_plan(src).expect("a Pause with a body and finally: plans now");
+        let a = plan
+            .tasks
+            .iter()
+            .position(|t| t.id == "a")
+            .expect("a planned");
+        let z = plan
+            .tasks
+            .iter()
+            .position(|t| t.id == "z")
+            .expect("z planned");
+        let TaskKind::Pause { tasks, .. } = &plan.tasks[0].kind else {
+            panic!("not a Pause: {:?}", plan.tasks[0].kind);
+        };
+        assert_eq!(tasks, &vec![a]);
+        assert_eq!(plan.tasks[0].finally, vec![z]);
+        let flow = crate::spec::parse(src).unwrap();
         assert!(
-            e.contains("'finally'") && e.contains("Roadmap package #9 lifts it"),
-            "{e}"
+            crate::spec::validate(&flow).errors.is_empty(),
+            "a Pause with a body and finally: is no longer refused"
         );
     }
 
-    /// I1 of the #2a whole-branch review: a flow published BEFORE #2a with a
-    /// `Pause` carrying `finally:` was valid then (serde ignored the list),
-    /// and an execution of it still running at deploy is re-planned through
-    /// `plan_stored`. It must keep planning the `Pause` as a `Pause` -- the
-    /// rules it started under -- with its `finally:` unplanned, exactly as
-    /// before; only publish and a NEW start refuse it.
+    /// I1 of the #2a whole-branch review, as 9a Task 6 leaves it: a flow
+    /// published BEFORE #2a with a `Pause` carrying ONLY `finally:` was valid
+    /// then (serde ignored the list). The D8 `pause_finally_is_dropped` guard
+    /// lives in the shared `flatten_flow`, so `plan_stored` keeps such a stored
+    /// pause bare -- the rules it started under -- with its `finally:` unplanned.
+    /// **A NEW start no longer silently drops it (I2, no-silent-drops): because
+    /// the flattener would plan it away, `spec::validate` REFUSES a finally-ONLY
+    /// pause (`unsupported_pause_property` at `.finally`), so `build_plan` returns
+    /// no plan for it.** A `finally:` alongside a body plans and runs. Only
+    /// `plan_stored` (no validate gate) still re-plans the stored shape bare.
     #[test]
-    fn a_stored_pause_with_finally_still_plans_as_a_pause_and_still_validates_as_refused() {
+    fn a_pause_with_only_finally_stays_bare_when_stored_and_is_refused_for_a_new_start() {
         let src = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    finally: [{id: z, type: core.log, message: m}]\n";
+        // A NEW start is refused rather than silently dropping the finally:.
+        let e = build_plan(src).unwrap_err().message;
+        assert!(
+            e.starts_with("unsupported_pause_property") && e.contains("only body is 'finally'"),
+            "{e}"
+        );
+        // A stored execution re-plans bare (D8), through `plan_stored`.
         let plan = plan_stored(src).unwrap();
         assert_eq!(
             plan.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
             ["p"],
-            "the Pause's finally: stays unplanned, as before #2a"
+            "D8: a stored Pause with only finally: stays bare, finally unplanned"
         );
-        assert!(
-            matches!(plan.tasks[0].kind, TaskKind::Pause { .. }),
-            "a stored Pause with finally: plans as a Pause: {:?}",
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Pause {
+                duration: Some("PT1S".into()),
+                tasks: Vec::new(),
+                on_pause: None,
+                behavior: None,
+            },
+            "a Pause with only finally: plans bare: {:?}",
             plan.tasks[0].kind
         );
-        let flow = crate::spec::parse(src).unwrap();
-        let report = crate::spec::validate(&flow);
-        let refusal = report
-            .errors
-            .iter()
-            .find(|f| f.code == "unsupported_pause_property")
-            .expect("publish still refuses a Pause finally:");
-        assert!(refusal.message.contains("#9"), "{}", refusal.message);
+    }
+}
+
+#[cfg(test)]
+mod pause_body_plan_tests {
+    use super::*;
+
+    fn pause_flow(props: &str) -> String {
+        format!(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n{props}"
+        )
+    }
+
+    fn ids(plan: &Plan) -> Vec<&str> {
+        plan.tasks.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_pause_with_tasks_plans_as_a_pause_carrying_them() {
+        let src = pause_flow(
+            "    tasks:\n      - {id: a, type: io.kestra.plugin.core.log.Log, message: m}\n      - {id: b, type: io.kestra.plugin.core.log.Log, message: m}\n",
+        );
+        let plan = plan_stored(&src).expect("a Pause with tasks: plans");
+        let TaskKind::Pause { tasks, .. } = &plan.tasks[0].kind else {
+            panic!("not a Pause: {:?}", plan.tasks[0].kind);
+        };
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(ids(&plan), ["p", "a", "b"]);
+        assert_eq!(plan.children_of(0), vec![1, 2]);
+    }
+
+    #[test]
+    fn errors_finally_and_on_pause_are_planned() {
+        let src = pause_flow(
+            "    tasks:\n      - {id: a, type: io.kestra.plugin.core.log.Log, message: m}\n    errors:\n      - {id: e, type: io.kestra.plugin.core.log.Log, message: m}\n    finally:\n      - {id: z, type: io.kestra.plugin.core.log.Log, message: m}\n    onPause: {id: o, type: io.kestra.plugin.core.log.Log, message: m}\n",
+        );
+        let plan = plan_stored(&src).expect("plans");
+        let TaskKind::Pause {
+            tasks, on_pause, ..
+        } = &plan.tasks[0].kind
+        else {
+            panic!("not a Pause");
+        };
+        let ix = |id: &str| ids(&plan).iter().position(|i| *i == id).unwrap();
+        assert_eq!(tasks, &vec![ix("a")]);
+        assert_eq!(*on_pause, Some(ix("o")));
+        assert_eq!(plan.tasks[0].errors, vec![ix("e")]);
+        assert_eq!(plan.tasks[0].finally, vec![ix("z")]);
+        let mut all = plan.children_of(0);
+        all.sort();
+        assert_eq!(all, vec![ix("a"), ix("e"), ix("o"), ix("z")]);
+    }
+
+    #[test]
+    fn a_valid_literal_or_expression_behavior_plans_and_an_invalid_literal_is_a_gap() {
+        for ok in ["WARN", "RESUME", "CANCEL", "FAIL", "\"{{ inputs.b }}\""] {
+            let src = pause_flow(&format!("    behavior: {ok}\n"));
+            let plan = plan_stored(&src).unwrap_or_else(|e| panic!("{ok}: {e:?}"));
+            let TaskKind::Pause { behavior, .. } = &plan.tasks[0].kind else {
+                panic!("{ok}: not a Pause");
+            };
+            assert_eq!(behavior.as_deref(), Some(ok.trim_matches('"')));
+        }
+        // 9a Task 6: a valid behavior is a gap for NEITHER reader now --
+        // `pause_gap` equals `pause_plan_gap`, the driver runs the pause, and a
+        // NEW start publishes it.
+        for ok in ["FAIL", "WARN", "RESUME", "CANCEL"] {
+            let src = pause_flow(&format!("    behavior: {ok}\n"));
+            let flow = crate::spec::parse(&src).unwrap();
+            let crate::models::TaskKind::Pause(p) = &flow.tasks[0].kind else {
+                panic!()
+            };
+            assert_eq!(pause_plan_gap(p), None, "{ok}");
+            assert_eq!(pause_gap(p), None, "{ok}");
+        }
+        for bad in ["NOPE", "fail"] {
+            let src = pause_flow(&format!("    behavior: {bad}\n"));
+            let flow = crate::spec::parse(&src).unwrap();
+            let crate::models::TaskKind::Pause(p) = &flow.tasks[0].kind else {
+                panic!()
+            };
+            assert_eq!(pause_gap(p), Some("behavior"), "{bad}");
+            assert_eq!(pause_plan_gap(p), Some("behavior"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_stored_bare_pause_stays_bare() {
+        let plan = plan_stored(&pause_flow("    pauseDuration: PT1S\n")).unwrap();
+        assert_eq!(ids(&plan), ["p"]);
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Pause {
+                duration: Some("PT1S".into()),
+                tasks: Vec::new(),
+                on_pause: None,
+                behavior: None,
+            }
+        );
     }
 }
 

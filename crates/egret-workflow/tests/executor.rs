@@ -886,7 +886,9 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         // 26 -> 25 baselined, 275 -> 276 matching at package #6 Task B3
         // (2026-10-29): `valids/subflow-secret-output-parent` banks (the
         // `Subflow` run fails as `failSubflowDueToOutput`, spec D6); 25 + 276 = 301.
-        (301, 276, 25),
+        // 25 -> 22 baselined, 276 -> 279 matching at 9a Task 6: the three
+        // `Pause`-body flows are a full flowable now and match the golden; 22 + 279 = 301.
+        (301, 279, 22),
         "301 = matching + baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
          Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
@@ -2572,7 +2574,10 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 41;
 /// **879 since package #5b Task B6 (2026-10-29)**: `render()` renders, so
 /// `valids/variables` runs its `variable` task as Kestra did (measured: the
 /// test prints `egret produces 879 + 220`).
-const EGRET_TOP_LEVEL_PAIRS: usize = 879;
+/// **886 since 9a Task 6 (measured)**: the three `Pause`-body flows run as a
+/// full flowable, adding 7 top-level pairs (`pause-errors-finally-after-execution`
+/// 6, `pause_on_pause` 1); the nested figure does not move.
+const EGRET_TOP_LEVEL_PAIRS: usize = 886;
 // 130 -> 216 at end hooks A6 (2026-10-27, measured): the iterations now run the
 // `Loop`'s own `errors:`/`finally:`, which adds 86 pairs inside `spawned`.
 // 216 -> 210 at package #5a Task A3 (2026-10-28, measured): `restart-loop` and
@@ -2710,7 +2715,11 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // + the 1 top-level pair (`mytask` before `end`) of
         // `valids/after-execution`, banked at package #6 Task B2 (2026-10-29,
         // measured).
-        (680, 217, 897),
+        // + the 7 top-level pairs of the three `Pause`-body flows, matching now
+        // at 9a Task 6: `valids/pause-errors-finally-after-execution` carries 6
+        // (its pause, logError, logFinally and logAfter) and `valids/pause_on_pause`
+        // 1 (pause overlapping hello); measured.
+        (687, 217, 904),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2761,7 +2770,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         // and 5 nested pairs of `valids/if-in-parallel`, `valids/loop-outputs`, `valids/loop-outputs-auto` and `valids/loop-outputs-store`.
         // 220 -> 219 at package #6 Task B2 (2026-10-29, measured): the 1 top-level
         // pair of `valids/after-execution`, which banked.
-        (209, 10, 219),
+        // 219 -> 212 at 9a Task 6 (measured): the 7 top-level pairs of the three
+        // `Pause`-body flows move to the matching side (they match now).
+        (202, 10, 212),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 704 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
@@ -3217,7 +3228,10 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // of `valids/after-execution`.
 // 83 -> 82 at package #6 Task B3 (2026-10-29, measured): the 1 run terminal (`subflow`) of
 // `valids/subflow-secret-output-parent`.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 82;
+// 82 -> 75 at 9a Task 6 (measured): the 7 run terminals of the three `Pause`-body
+// flows (`pause-behavior` 1, `pause-errors-finally-after-execution` 4,
+// `pause_on_pause` 2), which match the golden now and leave the baseline.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 75;
 /// 43 from W6 Task 4 to W9a Task 10; **40 since W9a Task 11** -- the three
 /// iterations of `valids/loop-values-from-uri`.
 // 40 -> 39 at WorkingDirectory Task 8: `working-directory-taskrun` has one
@@ -3294,7 +3308,9 @@ const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 1;
 // `valids/after-execution` (it has no sub-execution).
 // 26 -> 25 at package #6 Task B3 (2026-10-29, measured): the top-level execution of
 // `valids/subflow-secret-output-parent` (its child is a `Subflow` child, not a sub-execution).
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 25;
+// 25 -> 22 at 9a Task 6 (measured): the three top-level executions of the
+// `Pause`-body flows, which match the golden now (none has a sub-execution).
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 22;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -3351,7 +3367,10 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 25;
 // `valids/after-execution`.
 // 360 -> 357 at package #6 Task B3 (2026-10-29, measured): the 3 run-history tokens
 // (`subflow`: `CREATED RUNNING FAILED`) of `valids/subflow-secret-output-parent`.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 357;
+// 357 -> 328 at 9a Task 6 (measured): the 29 run-history tokens of the three
+// `Pause`-body flows (`pause-behavior` 4, `pause-errors-finally-after-execution`
+// 17, `pause_on_pause` 8), which match the golden now.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 328;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
 /// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
 /// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
@@ -3409,7 +3428,10 @@ const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 357;
 // (`CREATED RUNNING SUCCESS`) of `valids/after-execution`.
 // 128 -> 125 at package #6 Task B3 (2026-10-29, measured): the 3 execution-history tokens
 // (`CREATED RUNNING FAILED`) of `valids/subflow-secret-output-parent`.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 125;
+// 125 -> 107 at 9a Task 6 (measured): the 18 execution-history tokens of the
+// three `Pause`-body flows (6 each: `CREATED RUNNING PAUSED RESTARTED RUNNING
+// <terminal>`), which match the golden now.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 107;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3596,7 +3618,10 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 5;
 // 1120 -> 1119 at package #6 Task B1 (2026-10-29, measured): the one pair
 // `RESTRICTION_REMOVES` lost (`valids/subflow-secret-output-parent`'s `log`
 // no longer runs).
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 1119;
+// 1119 -> 1126 at 9a Task 6 (measured): the 7 top-level pairs
+// `EGRET_TOP_LEVEL_PAIRS` gained from the three `Pause`-body flows running as a
+// full flowable; the restriction removes none of them.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 1126;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -4656,13 +4681,15 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
         );
     }
 
-    // The deliberate refusals of flows Kestra ran: the user's ruling of
-    // 2026-10-11 (W7b Task 4b) for a `Pause` declaring `behavior:`, `errors:`
-    // or `onPause:`, and no-silent-stall Task 1 (2026-10-12) for an
-    // `AllowFailure`, a `WorkingDirectory` or a type egret does not register.
-    // Each was a task egret ran as an opaque runnable no worker could serve,
-    // and the execution stalled for ever. Named, so any OTHER refusal still
-    // fails here, and each must be refused by one of the static refusals.
+    // The deliberate refusals of flows Kestra ran: no-silent-stall Task 1
+    // (2026-10-12) for an `AllowFailure`, a `WorkingDirectory` or a type egret
+    // does not register. (The three `Pause`-body refusals of the 2026-10-11
+    // ruling were LIFTED at 9a Task 6: a Pause with a body is a full flowable,
+    // so the only one left is `valids/retry-with-flowable-errors`, refused by
+    // its block-level retry, `unsupported_allow_failure_retry`.) Each was a task
+    // egret ran as an opaque runnable no worker could serve, and the execution
+    // stalled for ever. Named, so any OTHER refusal still fails here, and each
+    // must be refused by one of the static refusals.
     assert_eq!(
         refused_ids
             .iter()
@@ -4674,7 +4701,6 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     for (id, why) in &refused_ids {
         assert!(
             [
-                "unsupported_pause_property",
                 "unsupported_allow_failure",
                 "unsupported_working_directory",
                 "unknown_task_type",
@@ -4913,7 +4939,10 @@ const MISMATCH_ON_ORDER: usize = 4;
 ///
 /// * three since the user's ruling of 2026-10-11 (W7b Task 4b): a `Pause`
 ///   declaring `behavior:`, `errors:` or `onPause:`
-///   (`unsupported_pause_property`);
+///   (`unsupported_pause_property`) -- **all three LIFTED at 9a Task 6**: a
+///   `Pause` with a body is a full flowable now, so `valids/pause-behavior`,
+///   `valids/pause-errors-finally-after-execution` and `valids/pause_on_pause`
+///   run and are compared (not refused);
 /// * forty-five since no-silent-stall Task 1 (2026-10-12): four `AllowFailure`
 ///   (`unsupported_allow_failure`), and forty-one holding a type
 ///   `spec::registry` does not name (`unknown_task_type`: `OutputValues`,
@@ -4937,12 +4966,10 @@ const MISMATCH_ON_ORDER: usize = 4;
 // 16 -> 4 at group C2 Task 5 (2026-10-18): `SetVariables`, `UnsetVariables`
 // and `Labels` are registered (executor-level), so the twelve entries they
 // held plan and are run (eleven match). No `unknown_task_type` entry is left.
-const RUNS_REFUSED: [&str; 4] = [
-    "valids/pause-behavior",
-    "valids/pause-errors-finally-after-execution",
-    "valids/pause_on_pause",
-    "valids/retry-with-flowable-errors",
-];
+// 4 -> 1 at 9a Task 6: the three `Pause` flows are a full flowable now and are
+// run and compared, so only `valids/retry-with-flowable-errors` is left (its
+// block-level retry is the AllowFailure non-goal, `unsupported_allow_failure_retry`).
+const RUNS_REFUSED: [&str; 1] = ["valids/retry-with-flowable-errors"];
 /// **11 since no-silent-stall Task 1**: two of the 49 entries it added to
 /// [`RUNS_REFUSED`] carried a sub-execution.
 // 11 -> 12 at WorkingDirectory Task 8 (measured).
@@ -5001,7 +5028,11 @@ const MISMATCH_ON_SPAWNED: usize = 1;
 // 28 -> 26 at package #6 Task B1 (2026-10-29, measured): `valids/flow-with-outputs-failed` and `valids/subflow-secret-output-child` banked (D6, D9).
 // 26 -> 25 at package #6 Task B2 (2026-10-29, measured): `valids/after-execution` banked (D6).
 // 25 -> 24 at package #6 Task B3 (2026-10-29, measured): `valids/subflow-secret-output-parent` banked (D6).
-const MISMATCHING_RUNS_ENTRIES: usize = 24;
+// 24 -> 21 at 9a Task 6: the three `Pause`-body flows (`valids/pause-behavior`,
+// `valids/pause-errors-finally-after-execution`, `valids/pause_on_pause`) are a
+// full flowable now and MATCH the golden, so they leave the mismatching
+// population (and the baseline) together.
+const MISMATCHING_RUNS_ENTRIES: usize = 21;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -5927,12 +5958,6 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     // below, for `in_an_errors_list`'s reason: constants swapped for whatever
     // today prints leave this test agreeing with itself.
     let mut is_a_subflow = 0usize;
-    // **W7b Task 4b (the user's ruling of 2026-10-11) narrowed it.** A `Pause`
-    // declaring `behavior:`/`errors:`/`onPause:` was planned an opaque
-    // `Runnable` -- `fed` and over-fed -- and is now refused at plan
-    // (`unsupported_pause_property`), so its runs land in `unplanned`. Derived
-    // here, for `in_an_errors_list`'s reason, and added back below.
-    let mut refused_pause_runs = 0usize;
     // **Kill-and-exit Task 3 moved four runs, W6's way.** An `Exit` was an
     // unregistered type, read here from `plan_stored` as an opaque `Runnable`
     // -- `fed`, and over-fed since no `Exit` run in the golden carries
@@ -5950,11 +5975,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
-        // **no-silent-stall Task 1's refusals are reconstructed away**, unlike
-        // W7b's `Pause` one above: the 49 entries they refuse at start were
-        // planned by every builder this test reconstructs, so they are read
-        // from the flattening alone (`plan_stored`) and every figure below
-        // stays the one its package committed.
+        // **no-silent-stall Task 1's refusals are reconstructed away**: the 49
+        // entries they refuse at start were planned by every builder this test
+        // reconstructs, so they are read from the flattening alone
+        // (`plan_stored`) and every figure below stays the one its package
+        // committed. **9a Task 6 removed a `Pause` arm here**: the three
+        // `Pause`-with-body flows were refused at plan (`unsupported_pause_property`)
+        // and their pause runs added back as `refused_pause_runs`; they are a
+        // full flowable now, so they plan and flow through the classification
+        // below like any other flowable (pause run -> `flowable`, body -> `fed`),
+        // and the final tuple moved by that (see its comment).
         let planned = match build_plan(&corpus_source(&entry.id)) {
             Err(e)
                 if [
@@ -5970,25 +6000,6 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
             }
             other => other,
         };
-        if let Err(e) = &planned {
-            if e.message.starts_with("unsupported_pause_property:") {
-                // The pause's own runs: those were `fed` and over-fed. Every
-                // other run of the entry was `unplanned` already.
-                let flow = egret_workflow::spec::parse(&corpus_source(&entry.id))
-                    .expect("a refused-at-plan entry still parses");
-                let pauses: Vec<&str> = flow
-                    .tasks
-                    .iter()
-                    .filter(|t| t.r#type.ends_with("flow.Pause"))
-                    .map(|t| t.id.as_str())
-                    .collect();
-                refused_pause_runs += trace
-                    .runs
-                    .iter()
-                    .filter(|r| pauses.contains(&r.task.as_str()))
-                    .count();
-            }
-        }
         let Ok(plan) = planned else {
             let mut stack: Vec<&Trace> = vec![&trace];
             while let Some(t) = stack.pop() {
@@ -6073,15 +6084,17 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     }
 
     assert_eq!(
-        in_an_errors_list, 14,
+        in_an_errors_list, 15,
         "the runs Task 7 alone added to the plan: every one is a task written in \
          a TASK-level `errors:` list, which W1's model dropped until Task 7 \
          widened it. The flow's own `errors:` is not among them -- `Plan::errors` \
-         has been populated since Task 3. The four more are the AllowFailure \
+         has been populated since Task 3. Four are the AllowFailure \
          `errors:` runs of `valids/allow-failure` (`local-error`), \
          `valids/allow-failure-with-retry` (`error_handler`) and \
          `valids/finally-allowfailure` (`e1`, `e2`): W1's model dropped those \
-         lists too, and spec §5.2 gave the flowable its own."
+         lists too, and spec §5.2 gave the flowable its own. (14 -> 15 at 9a \
+         Task 6: `valids/pause-errors-finally-after-execution`'s `logError` is a \
+         `Pause` `errors:` run, planned now the body refusal is lifted.)"
     );
     assert_eq!(
         is_a_subflow, 22,
@@ -6090,12 +6103,6 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          falsy `runIf:` SKIPPED. All 22 were `fed` and over-submitted through \
          W5; none of them is either since W6 planned `Subflow` as \
          `TaskKind::Executable`"
-    );
-    assert_eq!(
-        refused_pause_runs, 3,
-        "`valids/pause-behavior`, `valids/pause-errors-finally-after-execution` \
-         and `valids/pause_on_pause`: one `Pause` run each, fed and over-fed \
-         while it was planned opaque"
     );
     assert_eq!(
         is_an_exit, 4,
@@ -6130,16 +6137,12 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     let is_an_update: usize = is_an_update.values().sum();
     assert_eq!(
         (
-            fed - in_an_errors_list + is_a_subflow + refused_pause_runs + is_an_exit + is_an_update,
+            fed - in_an_errors_list + is_a_subflow + is_an_exit + is_an_update,
             flowable - is_a_subflow - is_an_exit - is_an_update,
-            unplanned + in_an_errors_list - refused_pause_runs,
-            over_fed.values().sum::<usize>()
-                + is_a_subflow
-                + refused_pause_runs
-                + is_an_exit
-                + is_an_update
+            unplanned + in_an_errors_list,
+            over_fed.values().sum::<usize>() + is_a_subflow + is_an_exit + is_an_update
         ),
-        (467, 111, 280, 106),
+        (467, 114, 277, 103),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
          to the 10 runs Task 7's `errors:` support moved out of `unplanned` and \
          into `fed`, which is derived above rather than folded into these \
@@ -6174,7 +6177,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          #2b Task B1 moves it to 467/111/280/106** (measured): the plan now \
          holds the flow's `afterExecution:` too, so the 13 golden runs written \
          in one leave `unplanned`: 11 leaves for `fed` and the two `If`s for \
-         `flowable` (+11, +2, -13, 0)."
+         `flowable` (+11, +2, -13, 0). **9a Task 6 moves it to 467/114/277/103** \
+         (measured): the Pause-with-body refusal is lifted, so the three `Pause` \
+         flows plan and flow through the classification like any other flowable. \
+         Their 3 pause runs leave `fed`+over-feed (where `refused_pause_runs` put \
+         them back) for `flowable`, and their 4 body runs (`logError`, \
+         `logFinally`, `logAfter`, `hello`) that were `unplanned` are `fed` -- \
+         `logError` enters `in_an_errors_list` (14 -> 15) as a Pause `errors:` \
+         run -- a net of (0, +3, -3, -3) over (fed - in_errors, flowable, \
+         unplanned + in_errors, over-feed); the `refused_pause_runs` bridge term \
+         was removed with the arm that fed it."
     );
     assert_eq!(
         over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),
@@ -6222,12 +6234,8 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     }
     assert_eq!(
         (
-            flow_then + is_a_subflow + refused_pause_runs,
-            over_fed.len()
-                + 1
-                + usize::from(refused_pause_runs > 0)
-                + usize::from(is_an_exit > 0)
-                + update_types.len()
+            flow_then + is_a_subflow,
+            over_fed.len() + 1 + usize::from(is_an_exit > 0) + update_types.len()
         ),
         // AllowFailure left the over-feed: its four block runs are flowables now
         // (the three targets, and `valids/retry-with-flowable-errors`), and its
@@ -6235,14 +6243,19 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
         // Re-measured at WorkingDirectory Task 8: `shell.Commands` joins the
         // over-fed types (its six real-flow children carry no SUBMITTED in the
         // golden), and the flow bucket moves with the banked `working-directory-taskrun`.
-        (65, 10),
+        // 9a Task 6: the three `Pause` flows plan, so their 3 pause runs are
+        // `flowable` (never over-fed); `refused_pause_runs` added them back to
+        // this bucket while they were refused, and both it and the `>0` type
+        // tally term are gone with the lift (65 -> 62, 10 -> 9).
+        (62, 9),
         "Task 5's flow bucket, reconstructed: 7 types and 89 runs, of which \
          `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6 \
          -- and of which `LoopUntil` (3 runs) and `WaitFor` (6) were two more \
          types and 9 more runs until W8 Task 4 planned them. 80 -> 71 and \
          12 -> 10, the same movement the four-bucket assertion above records \
          from the other side. `io.kestra.plugin.core.flow.Pause` left as a type \
-         and 3 runs at W7b Task 4b (refused at plan) and is added back here"
+         and 3 runs at W7b Task 4b (refused at plan); 9a Task 6 runs them as a \
+         flowable rather than adding them back here (62 runs, left tally)"
     );
     assert!(
         !over_fed.contains_key("io.kestra.plugin.core.flow.Pause"),
@@ -7717,9 +7730,11 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // banked (`afterExecution:` runs). The two left:
         // `task-runif-taskswithstate` (#5) and `pause-errors-finally-after-execution` (#9).
         // 2 -> 1 at package #5b Task B2 (2026-10-29): `task-runif-taskswithstate`
-        // banked (Pebble's `empty` test, spec D8). The one left is
+        // banked (Pebble's `empty` test, spec D8). The one left was
         // `pause-errors-finally-after-execution` (#9).
-        ("finally:", 1, &["finally:"]),
+        // **Removed at 9a Task 6**: that last entry is a full flowable now and
+        // banked, so `finally:` holds no baselined entry -- removed rather than
+        // lowered to 0, by the `Subflow` note above.
         // **`ExecutionUpdatableTask` was a row here** (16 until kill-and-exit
         // Task 3 banked the four `valids/exit*` entries; 12 until group C2 Task
         // 5 banked the eleven `Labels`, `SetVariables` and `UnsetVariables`
@@ -7751,11 +7766,9 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // declaration. **W8 Task 5 supplied the variant and banked it**, so the
         // row this one over-claimed is gone rather than argued about.
         // `oracle-exec/baseline.txt` names all three with what holds each.
-        (
-            "Pause",
-            3,
-            &["io.kestra.plugin.core.flow.Pause", "core.pause"],
-        ),
+        // **Removed at 9a Task 6**: all three are a full flowable now and banked,
+        // so `Pause` holds no baselined entry -- removed rather than lowered to 0,
+        // by the `Subflow` note above.
         // 10 -> 2 at end hooks #2b Task B1 (2026-10-27): eight banked
         // (`afterExecution:` runs once the execution is terminal). The two left
         // are not held by the construct: `valids/after-execution` by flow
@@ -7763,8 +7776,10 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // `pause-errors-finally-after-execution` by its `Pause` `errors:` (#9).
         // 2 -> 1 at package #6 Task B2 (2026-10-29): `valids/after-execution`
         // banked (`execution.outputs` reads the stored flow outputs, spec D6).
-        // The one left is `pause-errors-finally-after-execution` (#9).
-        ("afterExecution:", 1, &["afterExecution:"]),
+        // The one left was `pause-errors-finally-after-execution` (#9).
+        // **Removed at 9a Task 6**: that last entry is a full flowable now and
+        // banked, so `afterExecution:` holds no baselined entry -- removed rather
+        // than lowered to 0, by the `Subflow` note above.
         // **9 through W8 Task 3; 8 since W8 Task 4 banked
         // `valids/waitfor-nested`.** The eight that remain are not held by the
         // construct, and `oracle-exec/baseline.txt` names what holds each: six
@@ -8478,7 +8493,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         // does `valids/after-execution`.
         // (2, 24, 26) -> (2, 23, 25) at package #6 Task B3 (2026-10-29): nor
         // does `valids/subflow-secret-output-parent`.
-        (2, 23, 25),
+        // (2, 23, 25) -> (1, 21, 22) at 9a Task 6 (measured): the three
+        // `Pause`-body flows match and leave the baseline; one of them
+        // (`valids/pause-errors-finally-after-execution`) declares a `timeout:`,
+        // so the numerator falls with the denominator.
+        (1, 21, 22),
         "the baselined population that declares a `timeout:`, and the rest \
          ((2, 106, 108) until no-silent-stall Task 1 banked \
          `invalids/invalid-task`, which declares none). It \
@@ -8495,15 +8514,14 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         declaring.keys().cloned().collect::<Vec<_>>(),
-        vec![
-            "valids/full".to_string(),
-            "valids/pause-errors-finally-after-execution".to_string(),
-        ],
-        "and they are these TWO, by name. `valids/pause-timeout` was the fourth \
+        vec!["valids/full".to_string()],
+        "and it is this ONE, by name. `valids/pause-timeout` was the fourth \
          and W8 Task 3 banked it; `valids/pause-timeout-allow-failure` was the \
          third and W8 Task 5 banked it, which is the second time a `timeout:` \
          has left this list and the first time `allowFailure:` decided what the \
-         bound's terminal was"
+         bound's terminal was; `valids/pause-errors-finally-after-execution` was \
+         the second and 9a Task 6 banked it (its `Pause` is a full flowable now, \
+         so the `timeout:` + `errors:`/`finally:` entry matches the golden)"
     );
 
     // **Which of them a WORKER budget could ever apply to**, split by the
@@ -8516,15 +8534,13 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     }
     assert_eq!(
         by_type,
-        BTreeMap::from([
-            ("io.kestra.plugin.core.flow.Pause".to_string(), 1),
-            ("io.kestra.plugin.core.log.Log".to_string(), 1),
-        ]),
-        "ONE `Pause` — a flowable's timeout, which is `advance()`'s and which \
-         Kestra's worker ignores — and one runnable. It was three until W8 Task \
-         3 banked `valids/pause-timeout` by ENFORCING one of them, and two \
-         until W8 Task 5 banked `valids/pause-timeout-allow-failure` by \
-         enforcing the same bound with `allowFailure:` deciding its terminal"
+        BTreeMap::from([("io.kestra.plugin.core.log.Log".to_string(), 1),]),
+        "ONE runnable (`valids/full`'s `Log`). It was three until W8 Task \
+         3 banked `valids/pause-timeout` by ENFORCING one of them, two \
+         until W8 Task 5 banked `valids/pause-timeout-allow-failure`, and one \
+         `Pause` + one runnable until 9a Task 6 banked \
+         `valids/pause-errors-finally-after-execution` -- a `Pause` is a full \
+         flowable now, so the last `Pause` `timeout:` left this baselined list"
     );
 
     // The runnable one, and the budget it asks for. `Handlers` is the registry

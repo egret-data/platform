@@ -1218,14 +1218,14 @@ async fn an_archived_workspace_freezes_its_schedules() {
     );
 }
 
-/// **The 2026-10-11 ruling, on a schedule fire.** A flow whose `Pause`
-/// declares `behavior:` no longer plans, so its tick is refused like any
-/// other flow that does not plan: no execution, taken off the queue, and the
-/// trigger's `last_error` names the property. Before the ruling it fired and
-/// the execution stalled in `RUNNING` for ever. The sibling, a plain `Pause`,
-/// fires in the same pass -- the control.
+/// **9a Task 6, on a schedule fire.** A `Pause` is a full flowable now, so a
+/// `behavior: RESUME` sibling FIRES. The one still refused at fire is a LITERAL
+/// invalid `behavior:` (`unsupported_pause_behavior`, D2): it does not plan, so
+/// its tick is refused like any other flow that does not plan -- no execution,
+/// taken off the queue, and `last_error` names the property. The sibling, a
+/// plain `Pause`, fires in the same pass -- the control.
 #[tokio::test]
-async fn a_pause_egret_does_not_run_is_refused_at_fire_and_its_sibling_still_fires() {
+async fn a_pause_with_an_invalid_behavior_is_refused_at_fire_and_its_sibling_still_fires() {
     let Some(fx) = fx().await else { return };
     let pause = |id: &str, extra: &str| {
         format!(
@@ -1235,7 +1235,7 @@ async fn a_pause_egret_does_not_run_is_refused_at_fire_and_its_sibling_still_fir
         )
     };
     let broken = fx
-        .flow(&pause("pause-behavior", "    behavior: RESUME\n"))
+        .flow(&pause("pause-behavior", "    behavior: NOPE\n"))
         .await;
     let sibling = fx.flow(&pause("pause-plain", "")).await;
     common::make_due(&fx.db, broken, "s", 2).await;
@@ -1255,7 +1255,7 @@ async fn a_pause_egret_does_not_run_is_refused_at_fire_and_its_sibling_still_fir
     assert_eq!(after.next_evaluation_date, None, "off the queue");
     let err = after.last_error.expect("and says why");
     assert!(
-        err.contains("unsupported_pause_property") && err.contains("tasks.gate.behavior"),
+        err.contains("unsupported_pause_behavior") && err.contains("tasks.gate.behavior"),
         "{err}"
     );
 }

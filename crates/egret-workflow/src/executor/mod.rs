@@ -69,6 +69,9 @@ pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
     RetryBehavior, RetryDelay, RetryPolicy, TaskIx, TaskKind,
 };
+// 9a Task 6 (I2): `spec::validate` refuses a finally-only `Pause` through this
+// predicate, which is `pub(crate)` rather than `pub`.
+pub(crate) use plan::pause_finally_is_dropped;
 pub use replay::{
     copy_onto, replay_from, reset_copied, restart_copy, shift_ticks, CopiedRuns, CopyRefusal,
     CopySelection, MatchFault,
@@ -103,6 +106,7 @@ pub use flowable::branch::is_truthy;
 
 /// A manual resume: see [`flowable::pause::release_now`].
 pub(crate) use flowable::pause::release_now as release_paused_pauses;
+pub(crate) use flowable::pause::rendered_expression as pause_rendered_expression;
 /// Java's `Duration.parse` over the ISO-8601 subset a flow can write.
 ///
 /// **A visibility change, not a semantic one, and this is the sentence the
@@ -275,6 +279,14 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         Step::Done(state) => vec![Command::SetExecutionState { state }],
     };
 
+    // 9a D5: a `Pause`'s `onPause:` run hangs off no list the walk visits.
+    work.extend(flowable::pause::drive_on_pause(plan, state, now));
+    // ... and it is no root, so `aggregate(roots)` ignores it: hold the
+    // execution's terminal until it is done (it is driven above meanwhile).
+    if flowable::pause::on_pause_in_flight(plan, state) {
+        work.retain(|c| !matches!(c, Command::SetExecutionState { state } if state.is_terminal()));
+    }
+
     // **An `Exit` that decided `KILLED` is the whole round** (final review C1).
     // `parallel::drive_concurrent` collects every child's commands in one
     // batch, so the round an `Exit` kills in can also create a sibling
@@ -415,21 +427,37 @@ fn pause_mark(state: &ExecutionState, work: &[Command]) -> Option<RunState> {
     {
         return Some(RunState::Running);
     }
-    // "This batch ends a pause" is read as "it sets the state of a run that is
-    // `PAUSED` right now", which is exact: `Command::PauseRun` is the only
-    // producer of that state and `flowable::resume_paused` is the only thing
-    // that moves a run out of it. Matching on the command's own state instead
-    // would have to guess, because a pause ends `SUCCESS` or `FAILED`
+    // "This batch ends a pause" is read as "it moves a run that is `PAUSED`
+    // right now out of `PAUSED`", which is exact: `Command::PauseRun` is the
+    // only producer of that state and `flowable::resume_paused` is the only
+    // thing that moves a run out of it. Matching on the command's own state
+    // instead would have to guess, because a pause ends `SUCCESS` or `FAILED`
     // depending on which bound was written and both are ordinary terminals
     // everywhere else.
+    //
+    // **Three commands do the moving.** A bare pause ends with a
+    // `SetRunState { terminal }`; a `Pause` with a `tasks:` body (9a D4)
+    // re-enters `RUNNING` with a `Command::ReopenFlowable` to drive that body;
+    // and a `Pause` that fails at its deadline but declares `errors:`/`finally:`
+    // (9a Task 6) re-enters `RUNNING` with a `Command::ReenterPause` to drive
+    // those handlers. All three owe the execution the same `RESTARTED` the bare
+    // resume does (`CREATED RUNNING PAUSED RESTARTED RUNNING ...`).
+    // `ReopenFlowable` is also 7a's restart command, but that path builds its
+    // own batch and never reaches `pause_mark`; the only `ReopenFlowable`/
+    // `ReenterPause` `advance` emits is this resume's.
     work.iter()
-        .any(|c| match c {
-            Command::SetRunState { run, .. } => state
+        .any(|c| {
+            let run = match c {
+                Command::SetRunState { run, .. }
+                | Command::ReopenFlowable { run, .. }
+                | Command::ReenterPause { run } => run,
+                _ => return false,
+            };
+            state
                 .runs
                 .get(*run)
                 .and_then(|r| r.history.last())
-                .is_some_and(|s| *s == RunState::Paused),
-            _ => false,
+                .is_some_and(|s| *s == RunState::Paused)
         })
         .then_some(RunState::Restarted)
 }
@@ -477,6 +505,65 @@ mod tests {
     /// Every corpus flow, as `(id, source)`. Derived from the directory, never
     /// enumerated: a hand-written list is how a table comes to print a count
     /// for a class that no longer exists.
+    /// Package 9a Task 1: whether the stored plan holds a `Pause` declaring a
+    /// body (`tasks:`, `errors:`, `finally:`, `onPause:` or `behavior:`), which
+    /// the plan builds and the driver cannot run yet.
+    fn plan_has_pause_body(plan: &Plan) -> bool {
+        plan.tasks.iter().any(|t| match &t.kind {
+            TaskKind::Pause {
+                tasks,
+                on_pause,
+                behavior,
+                ..
+            } => {
+                !tasks.is_empty()
+                    || on_pause.is_some()
+                    || behavior.is_some()
+                    || !t.errors.is_empty()
+                    || !t.finally.is_empty()
+            }
+            _ => false,
+        })
+    }
+
+    /// The corpus flows whose stored plan holds a `Pause` with a body.
+    fn corpus_pause_body_flows() -> Vec<String> {
+        every_corpus_flow()
+            .into_iter()
+            .filter(|(_, source)| plan::plan_stored(source).is_ok_and(|p| plan_has_pause_body(&p)))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// 9a Task 6 lifted the refusal, so the Task-1 census safety-net
+    /// (`every_corpus_pause_with_a_body_is_still_refused_for_a_new_start`) is
+    /// gone: exactly these three corpus flows carry a Pause body, and they
+    /// publish and run now. The population is still measured, for the graph
+    /// guard that narrows its skip to a Pause's `onPause:` task alone.
+    #[test]
+    fn exactly_three_corpus_flows_carry_a_pause_body_and_none_is_refused() {
+        let ids = corpus_pause_body_flows();
+        assert_eq!(
+            ids,
+            [
+                "valids/pause-behavior",
+                "valids/pause-errors-finally-after-execution",
+                "valids/pause_on_pause"
+            ],
+            "the corpus population; if it moves, re-measure"
+        );
+        for (id, source) in every_corpus_flow() {
+            if !ids.contains(&id) {
+                continue;
+            }
+            let flow = crate::spec::parse(&source).unwrap();
+            assert!(
+                crate::spec::validate_for_run(&flow).errors.is_empty(),
+                "{id}: a Pause with a body is a full flowable now, not refused"
+            );
+        }
+    }
+
     fn every_corpus_flow() -> Vec<(String, String)> {
         let root = format!("{}/oracle-exec/corpus", env!("CARGO_MANIFEST_DIR"));
         let mut out = Vec::new();
@@ -575,8 +662,22 @@ mod tests {
     /// back at `:4393`). A list #2 adds may only be APPENDED: an execution that
     /// was running at deploy time is re-planned from its own source at its next
     /// claim, and a shifted index would hand its runs another task's spec.
-    /// `EGRET_WRITE_PLAN_LAYOUT=1` rewrites the fixture; that is allowed only in
-    /// Task A1, at `68c9f4de`, before any planner change.
+    /// `EGRET_WRITE_PLAN_LAYOUT=1` rewrites the fixture; it was first written in
+    /// Task A1 (`68c9f4de`, before any planner change).
+    ///
+    /// **9a Task 6 RE-ANCHORED three entries, and that is honest rather than
+    /// append-only.** `valids/pause-behavior`,
+    /// `valids/pause-errors-finally-after-execution` and `valids/pause_on_pause`
+    /// were hard-REFUSED from 2026-10-11 until 9a Task 6 (an opaque `Pause` with a
+    /// body, `unsupported_pause_property`): they had no live execution, so no
+    /// stored `task_ix` was ever written against their pre-9a layout, and there
+    /// is no append-only history to preserve for them. 9a makes them a full
+    /// flowable, so their entries were rewritten to the 9a plan -- and for
+    /// `pause-errors-finally-after-execution` that was NOT a pure append (its
+    /// errors handler `logError` takes index 1 and the top-level `log` shifts to
+    /// 2). The rewritten snapshot is the NEW anchor: the append-only invariant
+    /// below holds for every change to these flows AFTER 9a, and they stay
+    /// guarded like every other LIVE flow (they are not exempted).
     #[test]
     fn the_plan_before_end_hooks_is_a_prefix_of_every_plan_after() {
         let path = concat!(
@@ -600,6 +701,14 @@ mod tests {
             frozen.len()
         );
         let mut moved = Vec::new();
+        // 9a Task 6: the three Pause-body flows are guarded here, NOT exempted.
+        // Their frozen entries are the 9a layout this package re-anchored them to
+        // (see the doc above): they were refused and never live before 9a, so
+        // there was no pre-9a stored plan to carry forward, and for
+        // `pause-errors-finally-after-execution` the 9a layout is not an append of
+        // the old one (its `logError` took index 1). From this anchor on, the
+        // prefix rule below (same index, id and kind; every old child still a
+        // child) must hold for them as it does for every other live flow.
         for (id, old) in &frozen {
             let old: Vec<(usize, String, String, Vec<usize>)> =
                 serde_json::from_value(old.clone()).unwrap();
@@ -643,7 +752,31 @@ mod tests {
                 continue;
             };
             judged += 1;
-            for task in &plan.tasks {
+            // 9a Task 6 NARROWED this skip. `flow_graph` now draws a
+            // Pause-with-body's `tasks:`/`errors:`/`finally:` as a cluster (it
+            // reuses the Sequential chain machinery), so those are judged like
+            // any other flowable's children. The ONE task it still does not draw
+            // is a `Pause`'s `onPause:`: validation gives it no path, so it has
+            // no uid, and drawing it would need a new path scheme and refusal
+            // mapping. ROADMAP 9a follow-up: draw the `onPause:` node. Until
+            // then this skips that single task (and anything the corpus might
+            // nest beneath it), nothing else.
+            let mut under_pause = BTreeSet::new();
+            let mut stack: Vec<usize> = (0..plan.tasks.len())
+                .filter_map(|i| match &plan.tasks[i].kind {
+                    TaskKind::Pause { on_pause, .. } => *on_pause,
+                    _ => None,
+                })
+                .collect();
+            while let Some(i) = stack.pop() {
+                if under_pause.insert(i) {
+                    stack.extend(plan.children_of(i));
+                }
+            }
+            for (ix, task) in plan.tasks.iter().enumerate() {
+                if under_pause.contains(&ix) {
+                    continue;
+                }
                 let nodes = graph
                     .nodes
                     .iter()
@@ -3870,8 +4003,11 @@ mod tests {
         // `validate_for_run` refuses it, so `build_plan` answers an error and
         // the probe is asserted for that below rather than driven through
         // the loop.
+        // 9a: the gap probe is a LITERAL `behavior: NOPE` (outside the enum),
+        // the one `behavior:` the plan itself still leaves opaque; a valid
+        // `behavior: FAIL` now plans as a `TaskKind::Pause`.
         let pause_plain = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
-        let pause_with_behavior = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    behavior: FAIL\n";
+        let pause_with_behavior = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    behavior: NOPE\n";
         // The other side of `loop_until_gap`, for the reason both sides of
         // `pause_gap` are probed: a list holding one outcome leaves the other
         // classified by nothing. `maxIterations:` is an expression here, which
@@ -3926,17 +4062,18 @@ mod tests {
             arms_probed.insert(arm);
         }
 
-        // The other side of `pause_gap`: refused at plan, never a tier.
+        // The other side of `pause_gap`: a literal INVALID behavior is refused
+        // at plan, never a tier (`pause_with_behavior` writes `behavior: NOPE`).
         assert_eq!(
             classify(&crate::spec::parse(pause_with_behavior).unwrap().tasks[0]),
             PlannedAs::Opaque
         );
         let refused = match build_plan(pause_with_behavior) {
-            Ok(_) => panic!("a Pause with `behavior:` must not plan"),
+            Ok(_) => panic!("a Pause with an invalid `behavior:` must not plan"),
             Err(e) => e,
         };
         assert!(
-            refused.message.starts_with("unsupported_pause_property:"),
+            refused.message.starts_with("unsupported_pause_behavior:"),
             "{}",
             refused.message
         );
@@ -4341,7 +4478,7 @@ mod tests {
 
         // The constructs the corpus cannot show, nested where the builder
         // reaches them: a `LoopUntil` and a `WaitFor` with a bound it cannot
-        // read, a `Pause` with `behavior:`, under a `Sequential`'s `errors:`.
+        // read, a `Pause` with a literal `behavior: NOPE`, under a `Sequential`'s `errors:`.
         let synthetic = |inner: &str| {
             format!(
                 "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: ok\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n    errors:\n{inner}"
@@ -4358,7 +4495,7 @@ mod tests {
             ),
             (
                 "Pause",
-                "      - id: lu\n        type: io.kestra.plugin.core.flow.Pause\n        behavior: FAIL\n",
+                "      - id: lu\n        type: io.kestra.plugin.core.flow.Pause\n        behavior: NOPE\n",
             ),
         ] {
             let (missing, n) = unrefused_opaque(&synthetic(inner)).expect(label);
@@ -4375,7 +4512,10 @@ mod tests {
         assert_eq!(
             by_type,
             BTreeMap::from([
-                ("pause".to_string(), 3),
+                // `pause` left this map at package 9a Task 1: the three corpus
+                // `Pause` flows declare a body, which the plan builds now, so
+                // they are `TaskKind::Pause` and not opaque (they stay refused
+                // for a new start by `pause_gap`).
                 // `allowfailure` left this map at spec §5.2, and
                 // `workingdirectory` at plan Task 3 (spec §4.2): both are planned
                 // flowables now, so neither is an opaque task. The 15 that were
@@ -4431,21 +4571,10 @@ mod tests {
                 "dependency_namespace_required",
             ],
         },
-        PublishedButRefused {
-            id: "valids/pause-behavior",
-            cause: "a `Pause` declaring `behavior:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `behavior:`. W8's",
-            codes: &["unsupported_pause_property"],
-        },
-        PublishedButRefused {
-            id: "valids/pause-errors-finally-after-execution",
-            cause: "a `Pause` declaring `errors:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `errors:`. W8's",
-            codes: &["unsupported_pause_property"],
-        },
-        PublishedButRefused {
-            id: "valids/pause_on_pause",
-            cause: "a `Pause` declaring `onPause:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `onPause:`. W8's",
-            codes: &["unsupported_pause_property"],
-        },
+        // 9a Task 6 removed the three `Pause` rows (`valids/pause-behavior`,
+        // `valids/pause-errors-finally-after-execution`, `valids/pause_on_pause`):
+        // a `Pause` with a body is a full flowable now, so none is refused and
+        // all three publish and run (see `LIVE`/`VALIDATE_REFUSED` in driver.rs).
         // no-silent-stall Task 1 (spec §3): 52 rows, one per flow this Kestra
         // published with 200 that the static refusals now refuse -- 4
         // `AllowFailure`, 4 `WorkingDirectory`, and 44 a type Kestra ships and
@@ -8257,76 +8386,58 @@ tasks:
         );
     }
 
-    /// **A `Pause` this executor does not reproduce is REFUSED, not planned.**
+    /// **A `Pause` body plans; only a literal invalid `behavior:` is refused.**
     ///
-    /// Until the 2026-10-11 ruling it was planned an opaque `Runnable` with a
-    /// `not_yet_enforced` warning, under `build_plan`'s standing rule for an
-    /// unimplemented flowable. For `AllowFailure` and `WorkingDirectory` that
-    /// rule is harmless: their opaque run is still claimed by nothing and the
-    /// warning says so. For a `Pause` it was not: the opaque run got a
-    /// `type_id`, the worker claimed it, `Claimed::input` failed with
-    /// `NotALeaf` before recording an outcome, and the reaper released it on
-    /// every working timeout, so the execution sat in `RUNNING` for ever. Now
-    /// `spec::validate` reports `unsupported_pause_property` and
-    /// `build_plan`'s `validate_for_run` gate refuses the flow, naming the
-    /// property, before any run exists.
-    ///
-    /// Five rows, one per property plus `behavior:` written as an EXPRESSION
-    /// (its value decides what the artifact does, and `pause_gap` decides at
-    /// plan time, so the dynamic form must be refused just like the literal).
-    ///
-    /// The control is the last row: the same flow with none of the four is a
-    /// `TaskKind::Pause`. Without it every row would pass under a `build_plan`
-    /// that refused every `Pause`.
+    /// 9a Task 6 lifted the body refusal: `tasks:`, `errors:`, `onPause:`, a
+    /// valid literal `behavior:` and an EXPRESSION `behavior:` all plan as a
+    /// `TaskKind::Pause` carrying them. The one thing `build_plan` still refuses
+    /// at plan is a **literal** `behavior:` outside RESUME/WARN/CANCEL/FAIL
+    /// (D2): Kestra leaves the execution `RUNNING` for ever on one, and it is
+    /// known at plan time, so `spec::validate` reports `unsupported_pause_behavior`
+    /// and the `validate_for_run` gate refuses the flow before any run exists.
     #[test]
-    fn a_pause_this_executor_does_not_reproduce_is_refused_at_plan() {
-        let rows: [(&str, &str); 5] = [
-            (
-                "tasks",
-                "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        \
-                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-            ),
-            (
-                "errors",
-                "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        \
-                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-            ),
-            ("behavior", "    pauseDuration: PT1S\n    behavior: FAIL\n"),
-            (
-                "behavior",
-                "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
-            ),
-            (
-                "onPause",
-                "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      \
-                 type: io.kestra.plugin.core.debug.Return\n      format: x\n",
-            ),
+    fn a_pause_body_plans_and_only_an_invalid_behavior_is_refused_at_plan() {
+        // Every shape that now plans.
+        let plans: [&str; 5] = [
+            "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            "    pauseDuration: PT1S\n    behavior: FAIL\n",
+            "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
+            "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      type: io.kestra.plugin.core.debug.Return\n      format: x\n",
         ];
-        for (property, props) in rows {
+        for props in plans {
             let src = pause_flow(props);
-            let err = match build_plan(&src) {
-                Ok(_) => panic!("{property}: a pause carrying it must not plan"),
-                Err(e) => e,
-            };
+            let plan = build_plan(&src).unwrap_or_else(|e| panic!("{props}: {}", e.message));
             assert!(
-                err.message.starts_with("unsupported_pause_property:"),
-                "{property}: refused by the right finding: {}",
-                err.message
-            );
-            assert!(
-                err.message.contains(&format!("[tasks.gate.{property}]")),
-                "{property}: the refusal names the property: {}",
-                err.message
+                matches!(plan.tasks[0].kind, TaskKind::Pause { .. }),
+                "{props}: {:?}",
+                plan.tasks[0].kind
             );
         }
 
-        // The control.
+        // The one refusal: a literal invalid behavior.
+        let src = pause_flow("    pauseDuration: PT1S\n    behavior: NOPE\n");
+        let err = match build_plan(&src) {
+            Ok(_) => panic!("an invalid literal behavior must not plan"),
+            Err(e) => e,
+        };
+        assert!(
+            err.message.starts_with("unsupported_pause_behavior:")
+                && err.message.contains("[tasks.gate.behavior]"),
+            "refused by the right finding at the right path: {}",
+            err.message
+        );
+
+        // The control: a bare pause.
         let src = pause_flow("    pauseDuration: PT1S\n");
         let plan = build_plan(&src).unwrap();
         assert_eq!(
             plan.tasks[0].kind,
             TaskKind::Pause {
-                duration: Some("PT1S".to_string())
+                duration: Some("PT1S".to_string()),
+                tasks: Vec::new(),
+                on_pause: None,
+                behavior: None,
             }
         );
         let report = crate::spec::validate(&crate::spec::parse(&src).unwrap());
@@ -8336,7 +8447,7 @@ tasks:
                     .warnings
                     .iter()
                     .any(|w| w.path.starts_with("tasks.gate")),
-            "a pause this executor DOES reproduce is valid and silent: {report:?}"
+            "a bare pause is valid and silent: {report:?}"
         );
     }
 
@@ -8447,6 +8558,567 @@ tasks:
              `RESTARTED` is a separate event rather than a repeat. Suppressing \
              that one too would be inventing a rule that says an execution can \
              only be restarted once"
+        );
+    }
+
+    /// 9a Task 2 (D5): `onPause:` runs ONCE, when the pause begins, as a
+    /// parentless sibling of the pause (`valids/pause_on_pause`'s golden shape),
+    /// and the pause then enters `PAUSED` as before. The plan is built with
+    /// `plan_stored` because `spec::validate` still refuses a `Pause` with a
+    /// body until 9a Task 6.
+    #[test]
+    fn on_pause_runs_once_when_the_pause_begins() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    onPause:\n      \
+                   id: hello\n      type: io.kestra.plugin.core.log.Log\n      \
+                   message: hi\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..10 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(run_ids(&plan, &state), ["gate", "hello"], "one onPause run");
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"]
+        );
+        assert_eq!(state.runs[1].parent, None, "a sibling, not a child");
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SUBMITTED", "RUNNING"],
+            "the onPause task is started while the pause waits"
+        );
+        assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "PAUSED"]);
+    }
+
+    /// Two pauses entered in ONE batch each run their own `onPause:` once, and
+    /// the execution's `PAUSED` is still written once.
+    #[test]
+    fn two_pauses_in_one_parallel_each_run_their_on_pause_once() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: both\n    \
+                   type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+                   - id: a\n        type: io.kestra.plugin.core.flow.Pause\n        \
+                   onPause:\n          id: oa\n          \
+                   type: io.kestra.plugin.core.log.Log\n          message: a\n      \
+                   - id: b\n        type: io.kestra.plugin.core.flow.Pause\n        \
+                   onPause:\n          id: ob\n          \
+                   type: io.kestra.plugin.core.log.Log\n          message: b\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..12 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        let ids = run_ids(&plan, &state);
+        for id in ["oa", "ob"] {
+            assert_eq!(ids.iter().filter(|i| *i == id).count(), 1, "{id}: {ids:?}");
+        }
+        for id in ["a", "b"] {
+            let ix = ids.iter().position(|i| i == id).unwrap();
+            assert_eq!(
+                wire(&state.runs[ix].history),
+                ["CREATED", "RUNNING", "PAUSED"]
+            );
+        }
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "PAUSED"],
+            "one PAUSED, not two"
+        );
+    }
+
+    /// The execution does not terminalize while a resumed pause's `onPause:`
+    /// run is still going: the pause is released at once (`release_now`) while
+    /// `onPause` is `RUNNING`, and the terminal waits for it.
+    #[test]
+    fn the_execution_waits_for_an_on_pause_run_the_pause_outlived() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    onPause:\n      \
+                   id: hello\n      type: io.kestra.plugin.core.log.Log\n      \
+                   message: hi\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..10 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SUBMITTED", "RUNNING"]
+        );
+        flowable::pause::release_now(&mut state, T0);
+        for _ in 0..10 {
+            round_at(&plan, &mut state, T0);
+        }
+        assert_eq!(wire(&state.runs[0].history).last(), Some(&"SUCCESS"));
+        assert!(
+            !state.history.last().unwrap().is_terminal(),
+            "terminal while onPause still runs: {:?}",
+            wire(&state.history)
+        );
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 1,
+                state: RunState::Success,
+            },
+        );
+        for _ in 0..10 {
+            round_at(&plan, &mut state, T0);
+        }
+        assert_eq!(state.history.last(), Some(&RunState::Success));
+    }
+
+    /// A bare pause is unchanged by the `onPause:` driver: no extra run.
+    #[test]
+    fn a_bare_pause_has_no_on_pause_run() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..10 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(run_ids(&plan, &state), ["gate"]);
+        assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "PAUSED"]);
+    }
+
+    /// Drive `advance` from the current state to a standstill, completing every
+    /// `Runnable` left `RUNNING` by `outcome_of(task_id)` — 9a Task 3's resumed
+    /// `Pause` body tests, where different body children take different
+    /// terminals (the failing-body row needs one `FAILED` among `SUCCESS`es).
+    fn resume_to_fixpoint_with(
+        plan: &Plan,
+        state: &mut ExecutionState,
+        outcome_of: impl Fn(&str) -> RunState,
+    ) {
+        for _ in 0..1000 {
+            if !round_at(plan, state, T0).is_empty() {
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => {
+                    let outcome = outcome_of(&plan.tasks[state.runs[ix].task].id);
+                    apply(
+                        state,
+                        &Command::SetRunState {
+                            run: ix,
+                            state: outcome,
+                        },
+                    );
+                }
+                None => return,
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// 9a Task 3 (D4): a `Pause` with a `tasks:` body enters `PAUSED` without
+    /// running the body; a manual resume (`release_now`) then runs the body
+    /// **in order, with the pause run as parent**, and the pause run's terminal
+    /// is `aggregate(tasks)`. The successor runs after the pause succeeds, and
+    /// the execution re-enters `RUNNING` through `RESTARTED` as any resumed
+    /// pause does. The plan is built with `plan_stored` because `spec::validate`
+    /// still refuses a `Pause` with a body until 9a Task 6.
+    #[test]
+    fn a_resumed_pause_runs_its_tasks_body_under_itself() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    tasks:\n      \
+                   - id: b1\n        type: io.kestra.plugin.core.log.Log\n        \
+                   message: one\n      - id: b2\n        \
+                   type: io.kestra.plugin.core.log.Log\n        message: two\n  \
+                   - id: after\n    type: io.kestra.plugin.core.debug.Return\n    \
+                   format: done\n";
+        let plan = plan::plan_stored(src).expect("plans");
+
+        // To PAUSED, and the body has NOT run (it runs only after resume).
+        let mut state = run_to_fixpoint(&plan, RunState::Success);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["gate"],
+            "no body and no successor while the pause waits"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"]
+        );
+
+        // Manual resume, then run to the end.
+        assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+        resume_to_fixpoint_with(&plan, &mut state, |_| RunState::Success);
+
+        let ids = run_ids(&plan, &state);
+        let b1 = ids.iter().position(|i| i == "b1").expect("b1 ran");
+        let b2 = ids.iter().position(|i| i == "b2").expect("b2 ran");
+        assert!(b1 < b2, "the body runs in declaration order: {ids:?}");
+        assert_eq!(
+            state.runs[b1].parent,
+            Some(0),
+            "a body child's parent is the pause run"
+        );
+        assert_eq!(state.runs[b2].parent, Some(0));
+        assert_eq!(
+            state.runs[0].history.last(),
+            Some(&RunState::Success),
+            "the pause terminal is aggregate(tasks) = SUCCESS"
+        );
+        // RESTARTED then RUNNING between the pause and the body, then the
+        // successor and the execution's own SUCCESS.
+        assert!(
+            state.history.contains(&RunState::Restarted),
+            "a resumed pause owes RESTARTED: {:?}",
+            wire(&state.history)
+        );
+        assert_eq!(
+            run_ids(&plan, &state).last().map(String::as_str),
+            Some("after")
+        );
+        assert_eq!(state.history.last(), Some(&RunState::Success));
+    }
+
+    /// 9a Task 3 (D4/D6): a failing body child routes to the `Pause`'s
+    /// `errors:`, then its `finally:` runs, and the pause terminal is
+    /// `aggregate(tasks)` — `FAILED` — which a failing `finally:` child does not
+    /// change (spec §0.2, enforced by the shared sequential driver). This is the
+    /// same shape a `Sequential` body has; the test pins that a `Pause` body
+    /// gets it too.
+    #[test]
+    fn a_failing_pause_body_runs_errors_and_finally_and_aggregates_tasks() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    tasks:\n      \
+                   - id: b1\n        type: io.kestra.plugin.core.log.Log\n        \
+                   message: body\n    errors:\n      - id: eh\n        \
+                   type: io.kestra.plugin.core.log.Log\n        message: err\n    \
+                   finally:\n      - id: fin\n        \
+                   type: io.kestra.plugin.core.log.Log\n        message: fin\n";
+        let plan = plan::plan_stored(src).expect("plans");
+
+        let mut state = run_to_fixpoint(&plan, RunState::Success);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["gate"],
+            "nothing runs while paused"
+        );
+
+        assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+        // The body fails; the error handler succeeds; the finally child ALSO
+        // fails, to prove it cannot change the terminal.
+        resume_to_fixpoint_with(&plan, &mut state, |id| match id {
+            "b1" | "fin" => RunState::Failed,
+            _ => RunState::Success,
+        });
+
+        let ids = run_ids(&plan, &state);
+        assert!(ids.iter().any(|i| i == "eh"), "errors: ran: {ids:?}");
+        assert!(ids.iter().any(|i| i == "fin"), "finally: ran: {ids:?}");
+        for id in ["b1", "eh", "fin"] {
+            let ix = ids.iter().position(|i| i == id).unwrap();
+            assert_eq!(
+                state.runs[ix].parent,
+                Some(0),
+                "{id}: a pause body/handler child's parent is the pause run"
+            );
+        }
+        assert_eq!(
+            state.runs[0].history.last(),
+            Some(&RunState::Failed),
+            "aggregate(tasks) is FAILED, and a failing finally: does not change it"
+        );
+    }
+
+    /// 9a Task 3 (D4): the resumed body's `aggregate(tasks)` is softened by the
+    /// `Pause`'s own `allowFailure:`/`allowWarning:`, as `descend` softens every
+    /// other flowable's `Done`. A `Pause` whose step `descend` returns unmapped
+    /// would otherwise end `FAILED` on a failing body where Kestra ends
+    /// `WARNING` (and `SUCCESS` with `allowWarning:` too).
+    #[test]
+    fn a_resumed_pause_body_terminal_is_softened_by_allow_failure() {
+        for (flags, terminal) in [
+            ("    allowFailure: true\n", RunState::Warning),
+            (
+                "    allowFailure: true\n    allowWarning: true\n",
+                RunState::Success,
+            ),
+        ] {
+            let src = format!(
+                "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                 type: io.kestra.plugin.core.flow.Pause\n{flags}    tasks:\n      \
+                 - id: b1\n        type: io.kestra.plugin.core.log.Log\n        \
+                 message: body\n"
+            );
+            let plan = plan::plan_stored(&src).expect("plans");
+            assert!(
+                plan.tasks[0].allow_failure,
+                "{flags:?}: the fixture must actually set allowFailure:"
+            );
+
+            let mut state = run_to_fixpoint(&plan, RunState::Success);
+            assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+            // The body fails; the Pause's flags decide the run's terminal.
+            resume_to_fixpoint_with(&plan, &mut state, |_| RunState::Failed);
+
+            assert_eq!(
+                state.runs[0].history.last(),
+                Some(&terminal),
+                "{flags:?}: a failing body under these flags ends {terminal:?}, \
+                 not FAILED"
+            );
+        }
+    }
+
+    /// A `Pause` with a one-child body, `pauseDuration: PT1S`, the given extra
+    /// properties and a successor, planned with `plan_stored` (`spec::validate`
+    /// still refuses a body until 9a Task 6).
+    fn behavior_pause_plan(props: &str) -> Plan {
+        let src = format!(
+            "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+             type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n{props}    \
+             tasks:\n      - id: b1\n        type: io.kestra.plugin.core.log.Log\n        \
+             message: body\n  - id: after\n    type: io.kestra.plugin.core.debug.Return\n    \
+             format: done\n"
+        );
+        plan::plan_stored(&src).expect("plans")
+    }
+
+    /// Settle at `now`, completing every in-flight `Runnable` `SUCCESS`.
+    fn settle_at(plan: &Plan, state: &mut ExecutionState, now: Tick) {
+        for _ in 0..1000 {
+            if !round_at(plan, state, now).is_empty() {
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => apply(
+                    state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: RunState::Success,
+                    },
+                ),
+                None => return,
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// Pause (answering the `behavior:` render when given), then reach the
+    /// `PT1S` deadline and settle. Returns the final state.
+    fn pause_then_deadline(plan: &Plan, rendered_behavior: Option<&str>) -> ExecutionState {
+        let mut state = ExecutionState::new(plan);
+        round_at(plan, &mut state, T0); // CreateRun
+        state.runs[0].rendered = rendered_behavior.map(str::to_string);
+        settle_at(plan, &mut state, T0);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"],
+            "paused and waiting for the deadline"
+        );
+        settle_at(plan, &mut state, Tick(1_000));
+        state
+    }
+
+    /// 9a Task 4 (D2/D3): `behavior:` decides the terminal at the deadline.
+    /// RESUME (and unset) is SUCCESS and runs the body; WARN ends the pause
+    /// WARNING with no body and the execution goes on; FAIL ends it FAILED;
+    /// CANCEL cancels the execution.
+    #[test]
+    fn behavior_decides_the_pause_terminal_at_its_deadline() {
+        for resume in ["", "    behavior: RESUME\n"] {
+            let plan = behavior_pause_plan(resume);
+            let state = pause_then_deadline(&plan, None);
+            assert_eq!(state.runs[0].history.last(), Some(&RunState::Success));
+            assert!(
+                run_ids(&plan, &state).contains(&"b1".to_string()),
+                "body ran"
+            );
+            assert_eq!(state.history.last(), Some(&RunState::Success));
+        }
+
+        let plan = behavior_pause_plan("    behavior: WARN\n");
+        let state = pause_then_deadline(&plan, None);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Warning));
+        let ids = run_ids(&plan, &state);
+        assert!(
+            !ids.contains(&"b1".to_string()),
+            "WARN runs no body: {ids:?}"
+        );
+        assert!(ids.contains(&"after".to_string()), "execution continues");
+        assert_eq!(state.history.last(), Some(&RunState::Warning));
+
+        let plan = behavior_pause_plan("    behavior: FAIL\n");
+        let state = pause_then_deadline(&plan, None);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Failed));
+        let ids = run_ids(&plan, &state);
+        assert!(!ids.contains(&"b1".to_string()) && !ids.contains(&"after".to_string()));
+
+        let plan = behavior_pause_plan("    behavior: CANCEL\n");
+        let state = pause_then_deadline(&plan, None);
+        assert_eq!(state.history.last(), Some(&RunState::Cancelled));
+        let ids = run_ids(&plan, &state);
+        assert!(!ids.contains(&"b1".to_string()) && !ids.contains(&"after".to_string()));
+    }
+
+    /// 9a Task 4 (D3): a manual resume before the deadline ignores `behavior:`.
+    #[test]
+    fn a_manual_resume_ignores_a_non_resume_behavior() {
+        for b in ["WARN", "CANCEL", "FAIL"] {
+            let plan = behavior_pause_plan(&format!("    behavior: {b}\n"));
+            let mut state = ExecutionState::new(&plan);
+            settle_at(&plan, &mut state, T0);
+            assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+            settle_at(&plan, &mut state, T0);
+            assert_eq!(
+                state.runs[0].history.last(),
+                Some(&RunState::Success),
+                "{b}"
+            );
+            assert!(
+                run_ids(&plan, &state).contains(&"b1".to_string()),
+                "{b}: body ran"
+            );
+            assert_eq!(state.history.last(), Some(&RunState::Success), "{b}");
+        }
+    }
+
+    /// 9a Task 4 (D2): an expression `behavior:` is honoured when it renders to
+    /// one of the four, and a render outside them FAILS the pause at its
+    /// deadline rather than leaving it stuck.
+    #[test]
+    fn an_expression_behavior_is_honoured_and_an_invalid_render_fails_the_pause() {
+        let plan = behavior_pause_plan("    behavior: \"{{ inputs.b }}\"\n");
+        let state = pause_then_deadline(&plan, Some("WARN"));
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Warning));
+
+        let state = pause_then_deadline(&plan, Some("RESUME"));
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Success));
+        assert!(run_ids(&plan, &state).contains(&"b1".to_string()));
+
+        let state = pause_then_deadline(&plan, Some("bogus"));
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Failed));
+        assert_eq!(state.history.last(), Some(&RunState::Failed));
+
+        // Unrendered: a wait, not a default.
+        let mut state = ExecutionState::new(&plan);
+        round_at(&plan, &mut state, T0);
+        settle_at(&plan, &mut state, T0);
+        assert_eq!(wire(&state.runs[0].history), ["CREATED", "RUNNING"]);
+    }
+
+    /// 9a Task 4 fix: `behavior:` is read only at a `pauseDuration:` deadline.
+    /// A `timeout:`-only pause keeps the `allow*` mapping whatever it says, and
+    /// runs no body and cancels nothing.
+    #[test]
+    fn a_timeout_deadline_ignores_behavior() {
+        for b in ["WARN", "CANCEL", "FAIL", "RESUME"] {
+            for (flags, want) in [
+                ("", RunState::Failed),
+                ("    allowFailure: true\n", RunState::Warning),
+            ] {
+                let src = format!(
+                    "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                     type: io.kestra.plugin.core.flow.Pause\n    timeout: PT1S\n    \
+                     behavior: {b}\n{flags}    tasks:\n      - id: b1\n        \
+                     type: io.kestra.plugin.core.log.Log\n        message: body\n"
+                );
+                let plan = plan::plan_stored(&src).expect("plans");
+                let state = pause_then_deadline(&plan, None);
+                assert_eq!(state.runs[0].history.last(), Some(&want), "{b} {flags}");
+                assert!(!run_ids(&plan, &state).contains(&"b1".to_string()), "{b}");
+                assert_ne!(state.history.last(), Some(&RunState::Cancelled), "{b}");
+            }
+        }
+        // And no render is awaited for an expression behavior without a duration.
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    timeout: PT1S\n    \
+                   behavior: \"{{ inputs.b }}\"\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        assert_eq!(pause_rendered_expression(&plan.tasks[0].kind), None);
+    }
+
+    /// D2: a joined render with no separator fails the pause, never hangs.
+    #[test]
+    fn a_joined_render_without_its_separator_fails_the_pause() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    \
+                   pauseDuration: \"{{ inputs.d }}\"\n    behavior: \"{{ inputs.b }}\"\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        round_at(&plan, &mut state, T0);
+        state.runs[0].rendered = Some("PT1S".to_string());
+        settle_at(&plan, &mut state, T0);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Failed));
+    }
+
+    /// Both `pauseDuration:` and `behavior:` expressions share the one render
+    /// slot and are told apart.
+    #[test]
+    fn both_expressions_share_one_rendered_slot() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    \
+                   pauseDuration: \"{{ inputs.d }}\"\n    behavior: \"{{ inputs.b }}\"\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let expr = pause_rendered_expression(&plan.tasks[0].kind).expect("both need a render");
+        assert!(expr.contains("inputs.d") && expr.contains("inputs.b"));
+        let mut state = ExecutionState::new(&plan);
+        round_at(&plan, &mut state, T0);
+        state.runs[0].rendered = Some("PT1S\u{1f}FAIL".to_string());
+        settle_at(&plan, &mut state, T0);
+        settle_at(&plan, &mut state, Tick(1_000));
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Failed));
+    }
+
+    /// 9a Task 3 (D4): an **empty**-body `Pause` is unchanged — a resume ends it
+    /// `SUCCESS` directly, with no re-open and no body, exactly as before 9a.
+    /// This guards that the resumed-body routing does not reach a bare pause.
+    #[test]
+    fn an_empty_body_pause_still_ends_success_on_resume() {
+        let plan = build_plan(&pause_flow("")).unwrap();
+        let mut state = run_to_fixpoint(&plan, RunState::Success);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"]
+        );
+
+        assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+        let cmds = round(&plan, &mut state);
+        assert!(
+            cmds.contains(&Command::SetRunState {
+                run: 0,
+                state: RunState::Success
+            }),
+            "a bare pause resumes straight to SUCCESS: {cmds:?}"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::ReopenFlowable { .. })),
+            "a bare pause is not re-opened: {cmds:?}"
+        );
+        assert_eq!(
+            state.runs[0].attempts.len(),
+            1,
+            "no second attempt: the pause was not re-opened"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
         );
     }
 
@@ -10205,7 +10877,7 @@ tasks:
                 continue;
             };
             for ix in 0..plan.tasks.len() {
-                let TaskKind::Pause { duration } = &plan.tasks[ix].kind else {
+                let TaskKind::Pause { duration, .. } = &plan.tasks[ix].kind else {
                     continue;
                 };
                 planned_pauses += 1;

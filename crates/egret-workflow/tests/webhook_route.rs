@@ -2034,15 +2034,14 @@ triggers:
     );
 }
 
-/// **The 2026-10-11 ruling, on the webhook.** A flow whose `Pause` declares
-/// `behavior:` (one of the four properties egret does not run) is refused when
-/// the webhook fires, with a 400 naming the property, and no execution is
-/// created. Before the ruling the webhook answered 200 and the execution
-/// stalled in `RUNNING` for ever. The control is the identical flow with a
-/// plain `Pause`, which fires: without it a handler that refuses every
-/// `Pause` would pass.
+/// **9a Task 6, on the webhook.** A `Pause` is a full flowable now, so a
+/// `behavior: RESUME` flow fires (control below). A flow whose `Pause` declares a
+/// LITERAL invalid `behavior:` (`unsupported_pause_behavior`, D2) does not plan,
+/// so the webhook refuses it with a 400 naming the property and creates no
+/// execution -- before, an invalid value stalled the execution in `RUNNING` for
+/// ever. The control is the identical flow with a plain `Pause`, which fires.
 #[tokio::test]
-async fn a_pause_egret_does_not_run_is_refused_and_starts_nothing() {
+async fn a_pause_with_an_invalid_behavior_is_refused_and_starts_nothing() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let app = common::webhook_app(&db).await;
@@ -2064,7 +2063,7 @@ tasks:
     };
 
     let ns = fresh_namespace();
-    common::seed_flow(&db, ws, user, &flow(&ns, "    behavior: RESUME\n"), "draft").await;
+    common::seed_flow(&db, ws, user, &flow(&ns, "    behavior: NOPE\n"), "draft").await;
     let res = common::anon(
         &app,
         "POST",
@@ -2076,7 +2075,7 @@ tasks:
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     let body = common::body_text(res).await;
     assert!(
-        body.contains("unsupported_pause_property") && body.contains("tasks.gate.behavior"),
+        body.contains("unsupported_pause_behavior") && body.contains("tasks.gate.behavior"),
         "{body}"
     );
     assert_eq!(

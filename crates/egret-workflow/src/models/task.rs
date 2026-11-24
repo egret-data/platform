@@ -154,18 +154,20 @@ impl Task {
             // walks that find children (validation, claiming) must see it.
             TaskKind::AllowFailure(a) => a.tasks.iter().chain(a.finally.iter()).collect(),
             TaskKind::WorkingDirectory(w) => w.tasks.iter().chain(w.finally.iter()).collect(),
-            // **2026-10-26 correction (no-silent-drops D14):** `Pause.tasks` is
-            // NOT a Kestra property -- `Pause.java:158` is `extends Task
-            // implements FlowableTask`, with no `tasks` field. An earlier
-            // version of this note called it Kestra's own field; it is an
-            // unknown property that egret reads only so a stored `Pause` that
-            // declares one is still walked (duplicate ids, cycles,
-            // `is_runnable_child`) and refused by `pause_gap`. `build_plan`
-            // does NOT descend into it; the `Pause` is planned opaque.
-            // The two answers differ on purpose: this walk is
-            // `spec::validate`'s, and a child invisible to it is a child
-            // nothing checks.
-            TaskKind::Pause(p) => p.tasks.iter().chain(p.finally.iter()).collect(),
+            // 9a: a `Pause` is a full flowable, so its `tasks:`, its single
+            // `onPause:` and its `finally:` are all control-flow children this
+            // walk must see -- `spec::validate` descends into them, and
+            // `worker::claim`'s `find_task` resolves each run's model task by
+            // walking exactly this (the `onPause:` run is a parentless SIBLING
+            // of the pause in the trace, but it is still a task the worker must
+            // look up to run). Its `errors:` is `error_children()`, as for every
+            // other block.
+            TaskKind::Pause(p) => p
+                .tasks
+                .iter()
+                .chain(p.on_pause.as_deref())
+                .chain(p.finally.iter())
+                .collect(),
             TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
     }
@@ -248,7 +250,12 @@ impl Task {
             TaskKind::WorkingDirectory(w) => {
                 w.tasks.iter_mut().chain(w.finally.iter_mut()).collect()
             }
-            TaskKind::Pause(p) => p.tasks.iter_mut().chain(p.finally.iter_mut()).collect(),
+            TaskKind::Pause(p) => p
+                .tasks
+                .iter_mut()
+                .chain(p.on_pause.as_deref_mut())
+                .chain(p.finally.iter_mut())
+                .collect(),
             TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
     }

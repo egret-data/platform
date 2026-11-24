@@ -203,6 +203,14 @@ fn slot(plan: &Plan, state: &ExecutionState, run: RunIx) -> Option<Slot> {
                 TaskKind::Parallel { tasks, .. } => {
                     v.push((Role::Tasks, Shape::Parallel, tasks.clone()))
                 }
+                // 9a: a `Pause`'s `tasks:` body is one sequential chain under the
+                // pause run (after the resume). Its `onPause:` task is NOT listed
+                // here: that run is a PARENTLESS sibling (`CreateRun { parent:
+                // None }` in `flowable::pause::drive`), so `slot()` looks it up
+                // through the `parent == None` arm above, not under the pause --
+                // chaining it here would be dead (no run with `parent ==
+                // Some(pause)` ever carries the `onPause:` task).
+                TaskKind::Pause { tasks, .. } => v.push((Role::Tasks, Shape::Chain, tasks.clone())),
                 TaskKind::If { then_, else_, .. } => {
                     v.push((Role::Tasks, Shape::Chain, then_.clone()));
                     v.push((Role::Tasks, Shape::Chain, else_.clone()));
@@ -331,8 +339,9 @@ fn successors(plan: &Plan, state: &ExecutionState, chosen: RunIx) -> BTreeSet<Ru
 
 /// Whether Kestra draws `run`'s task as a `GraphCluster` (its own root,
 /// task node and end) rather than a task node. Every `FlowableTask` is one
-/// (`GraphUtils.java:453-454`), except a `Pause` with no `errors:` and no
-/// `finally:`, whose `tasksTree` is a plain `GraphTask` (`Pause.java:208-211`).
+/// (`GraphUtils.java:453-454`), except a bare `Pause` (no `tasks:`, `onPause:`,
+/// `errors:` or `finally:`), whose `tasksTree` is a plain `GraphTask`
+/// (`Pause.java:208-211`). A `Pause` with a body is a flowable cluster (9a).
 /// A `Subflow` is a `SubflowGraphTask` and `Exit`/an update task a
 /// `GraphTask`: task nodes. A task the plan no longer has is taken as a node.
 fn is_cluster(plan: &Plan, state: &ExecutionState, run: RunIx) -> bool {
@@ -344,7 +353,14 @@ fn is_cluster(plan: &Plan, state: &ExecutionState, run: RunIx) -> bool {
         | TaskKind::Executable { .. }
         | TaskKind::Exit { .. }
         | TaskKind::ExecutionUpdate { .. } => false,
-        TaskKind::Pause { .. } => !task.errors.is_empty() || !task.finally.is_empty(),
+        TaskKind::Pause {
+            tasks, on_pause, ..
+        } => {
+            !tasks.is_empty()
+                || on_pause.is_some()
+                || !task.errors.is_empty()
+                || !task.finally.is_empty()
+        }
         TaskKind::Sequential { .. }
         | TaskKind::AllowFailure { .. }
         | TaskKind::WorkingDirectory { .. }
@@ -1469,5 +1485,65 @@ mod tests {
 
         let new_lu = run(&plan, &copied, "lu");
         assert_eq!(crate::executor::loop_iteration(&copied, new_lu), count);
+    }
+
+    /// 9a Task 5: a `Pause` with a three-task body, resumed, with `fail` (or
+    /// nothing) failing.
+    fn resumed_pause_body(fail: &[(&str, RunState)]) -> (Plan, ExecutionState) {
+        let src = flow(&format!(
+            "tasks:\n  - id: gate\n    type: io.kestra.plugin.core.flow.Pause\n    tasks:\n{}{}{}{}",
+            leaf("b1", 6),
+            leaf("b2", 6),
+            leaf("b3", 6),
+            leaf("after", 2)
+        ));
+        let plan = crate::executor::plan::plan_stored(&src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        drive(&plan, &mut state, &[]);
+        assert_eq!(state.history.last(), Some(&RunState::Paused));
+        assert_eq!(
+            crate::executor::release_paused_pauses(&mut state, T0),
+            vec![0]
+        );
+        drive(&plan, &mut state, fail);
+        (plan, state)
+    }
+
+    // 9a Task 5: a replay from a task inside a `Pause` body.
+    #[test]
+    fn replay_from_a_pause_body_task_keeps_earlier_children_and_reopens_the_pause() {
+        let (plan, state) = resumed_pause_body(&[]);
+        assert_eq!(state.history.last(), Some(&RunState::Success));
+        let gate = run(&plan, &state, "gate");
+
+        let sel = replay_from(&plan, &state, run(&plan, &state, "b2")).expect("replayable");
+
+        assert_eq!(
+            kept(&sel, &plan, &state),
+            sorted(&["gate", "b1", "b2"]),
+            "later body children and the successor are dropped"
+        );
+        assert_eq!(reset(&sel, &plan, &state), sorted(&["gate", "b2"]));
+        assert!(sel.reset.contains(&gate));
+    }
+
+    #[test]
+    fn replay_from_the_pause_itself_drops_its_body_runs() {
+        let (plan, state) = resumed_pause_body(&[]);
+
+        let sel = replay_from(&plan, &state, run(&plan, &state, "gate")).expect("replayable");
+
+        assert_eq!(kept(&sel, &plan, &state), sorted(&["gate"]));
+        assert_eq!(reset(&sel, &plan, &state), sorted(&["gate"]));
+    }
+
+    // 9a Task 5: a bare Pause is a node, as before 9a.
+    #[test]
+    fn a_bare_pause_is_not_a_cluster() {
+        let src = flow("tasks:\n  - id: gate\n    type: io.kestra.plugin.core.flow.Pause\n");
+        let (plan, state) = driven(&src, &[]);
+        assert!(!is_cluster(&plan, &state, run(&plan, &state, "gate")));
+        let (plan, state) = resumed_pause_body(&[]);
+        assert!(is_cluster(&plan, &state, run(&plan, &state, "gate")));
     }
 }

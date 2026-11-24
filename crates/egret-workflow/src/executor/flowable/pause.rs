@@ -60,11 +60,11 @@
 //! ignored.
 
 use crate::executor::command::Command;
-use crate::executor::plan::{Plan, TaskIx};
+use crate::executor::plan::{Plan, TaskIx, TaskKind};
 use crate::executor::retry::parse_duration;
 use crate::executor::state::{ExecutionState, Resume, RunIx, RunState, Tick};
 
-use super::{plus, Step};
+use super::{plus, run_of, Step};
 
 /// **A manual resume** (W7b Task 3 fix round 1, the user's ruling of
 /// 2026-10-11): move every `PAUSED` `Pause` run's deadline to `now`, with
@@ -138,12 +138,15 @@ pub(crate) fn release_now(state: &mut ExecutionState, now: Tick) -> Vec<RunIx> {
 /// from `PAUSED`, and a `Pause` is never retried (`retry::is_retried_kind`).
 /// It is a run command and not a `Step::Done`, because `descend` returns this
 /// step unmapped and a `Done` would end the enclosing list instead.
-pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx) -> Step {
+pub(crate) fn drive(
+    plan: &Plan,
+    state: &ExecutionState,
+    run: RunIx,
+    task: TaskIx,
+    now: Tick,
+) -> Step {
     if state.runs[run].history.contains(&RunState::Paused) {
-        return Step::Commands(vec![Command::SetRunState {
-            run,
-            state: RunState::Success,
-        }]);
+        return resume_body(plan, state, run, task, now);
     }
     let Some(started) = state.runs[run].attempt_started_at() else {
         // A `Pause` run reaches `RUNNING` only through
@@ -167,7 +170,217 @@ pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskI
         Bound::Unbounded => Resume::Never,
         Bound::Until(at, state) => Resume::Terminal { at, state },
     };
-    Step::Commands(vec![Command::PauseRun { run, resume }])
+    // **`onPause:` (package 9a D5): one task, created when the pause begins.**
+    // It is a parentless sibling of the pause, as `valids/pause_on_pause`'s
+    // golden records it (`parent: null`, overlapping the pause), so it is
+    // created here, in the same batch that pauses the run, and driven from
+    // there by [`drive_on_pause`]. Once per pause: a run for it already
+    // existing means it was created, so a re-entry creates nothing. A
+    // `Parallel` of two pauses enters both in one batch; each creates its own
+    // distinct `onPause:` task and `advance`'s `pause_mark` still writes the
+    // execution's `PAUSED` once.
+    let mut cmds = Vec::new();
+    if let TaskKind::Pause {
+        on_pause: Some(on_pause),
+        ..
+    } = &plan.tasks[task].kind
+    {
+        if run_of(state, None, *on_pause).is_none() {
+            cmds.push(Command::CreateRun {
+                task: *on_pause,
+                parent: None,
+                value: None,
+            });
+        }
+    }
+    cmds.push(Command::PauseRun { run, resume });
+    Step::Commands(cmds)
+}
+
+/// Drive a **resumed** `Pause`'s `tasks:` body (package 9a D4/D6).
+///
+/// Reached once the pause run is `RUNNING` again with `PAUSED` behind it: a
+/// RESUME re-opens it ([`flowable::resume_paused`](super::resume_paused) emits
+/// a [`Command::ReopenFlowable`] for a `Pause` with a body), and package 7a's
+/// restart reaches it too. The body runs as a sequential list with the pause
+/// run as its parent, its `errors:`/`finally:` driven by the shared
+/// [`sequential::drive`](super::sequential::drive), and the pause run's
+/// terminal is `aggregate(tasks)` — the standard flowable rule, so a failing
+/// `finally:` child does not change it (spec §0.2, which the sequential driver
+/// already enforces).
+///
+/// An **empty** body ends `SUCCESS`, which is a bare pause's resumed /
+/// restarted behaviour unchanged — the one answer this arm gave for every
+/// pause before 9a.
+///
+/// It never returns [`Step::Done`]: [`super::descend`] returns a `Pause`'s
+/// step without the `Done` mapping every other flowable goes through, so the
+/// body's `Done(aggregate)` is mapped to the run's terminal **here** instead.
+fn resume_body(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, now: Tick) -> Step {
+    let TaskKind::Pause { tasks, .. } = &plan.tasks[task].kind else {
+        // Unreachable: `descend` matches on this kind before it gets here.
+        return Step::Commands(vec![Command::SetRunState {
+            run,
+            state: RunState::Success,
+        }]);
+    };
+    let errors = plan.tasks[task].errors.as_slice();
+    let finally = plan.tasks[task].finally.as_slice();
+
+    // **9a Task 6: a failure deadline re-entered to drive its handlers.** The
+    // resumed arm is reached from two re-entries that differ by their command.
+    // A RESUME (`ReopenFlowable`) cleared `resume_with`, so a `None`/`SUCCESS`
+    // terminal is the RESUME path -- run the `tasks:` body. A
+    // `timeout:`/`behavior: FAIL|WARN` deadline (`ReenterPause`) KEPT it, so a
+    // non-`SUCCESS` terminal is the failure path -- run no body, drive `errors:`
+    // (on a failure) then `finally:`, and end the pause in that deadline
+    // terminal. `pause::drive`'s pre-9a answer for a bare pause is the `SUCCESS`
+    // + empty-`tasks:` corner of the RESUME path, unchanged.
+    let terminal = match state.runs[run].resume_with {
+        Some(Resume::Terminal { state: s, .. }) => s,
+        _ => RunState::Success,
+    };
+    if terminal != RunState::Success {
+        return drive_terminal(plan, state, run, errors, finally, terminal, now);
+    }
+
+    if tasks.is_empty() {
+        return Step::Commands(vec![Command::SetRunState {
+            run,
+            state: RunState::Success,
+        }]);
+    }
+    match super::sequential::drive(plan, state, tasks, errors, finally, Some(run), now) {
+        // **The body's `aggregate(tasks)` is softened by the Pause's own
+        // `allowFailure:`/`allowWarning:`**, which is the mapping
+        // [`super::descend`] applies to every other flowable's `Done`
+        // (`Execution.guessFinalState`'s tail, called with the task's flags). A
+        // `Pause`'s step is returned from `descend` UNMAPPED, so without this a
+        // `Pause { allowFailure: true, tasks: [<failing child>] }` would end
+        // `FAILED` where Kestra ends `WARNING`. Only the resumed-BODY terminal:
+        // the deadline/`timeout:` terminal is `pause::deadline`'s and already
+        // carries its own `allow_failure::fail` mapping (and `behavior:` is Task
+        // 4).
+        Step::Done(aggregate) => Step::Commands(vec![Command::SetRunState {
+            run,
+            state: crate::executor::allow_failure::soften(
+                aggregate,
+                plan.tasks[task].allow_failure,
+                plan.tasks[task].allow_warning,
+            ),
+        }]),
+        other => other,
+    }
+}
+
+/// Drive a failed `Pause`'s `errors:`/`finally:` handlers, then end it in its
+/// deadline terminal (9a Task 6).
+///
+/// Reached from [`resume_body`] when the pause re-entered `RUNNING` on a
+/// `timeout:`/`behavior: FAIL|WARN` deadline ([`Command::ReenterPause`]), i.e.
+/// with a non-`SUCCESS` `terminal`. This is Kestra's
+/// `Execution.findTaskDependingFlowState`'s `terminalState == FAILED` branch
+/// (`Execution.java:595-599`), which was left out of
+/// [`super::current_list`](super::current_list) until #9 because egret's `Pause`
+/// ran no sub-list: a `FAILED` terminal runs the `errors:` handler, then
+/// `finally:` runs whatever the terminal, and the pause's own state stays the
+/// deadline terminal (never `aggregate`, so a succeeding handler does not
+/// upgrade a `FAILED` pause to `SUCCESS`). A `WARNING` deadline is not a failure,
+/// so it runs `finally:` alone. The handler runs hang off the pause run as their
+/// parent, one at a time, through the shared [`super::sequential::walk_errors`].
+fn drive_terminal(
+    plan: &Plan,
+    state: &ExecutionState,
+    run: RunIx,
+    errors: &[TaskIx],
+    finally: &[TaskIx],
+    terminal: RunState,
+    now: Tick,
+) -> Step {
+    let started = |list: &[TaskIx]| {
+        list.iter().any(|&t| {
+            run_of(state, Some(run), t).is_some_and(|ix| !state.runs[ix].history.is_empty())
+        })
+    };
+    let exhausted = |list: &[TaskIx]| {
+        list.iter()
+            .all(|&t| run_of(state, Some(run), t).is_some_and(|ix| super::is_terminal(state, ix)))
+    };
+    let end = || {
+        Step::Commands(vec![Command::SetRunState {
+            run,
+            state: terminal,
+        }])
+    };
+
+    // Once `finally:` has started, continue it to the end -- Kestra's
+    // "finally is already started, just continue it" (`Execution.java:589-593`).
+    if started(finally) {
+        return super::sequential::walk_errors(plan, state, finally, Some(run), now)
+            .unwrap_or_else(end);
+    }
+    // A FAILED pause runs its `errors:` handler first (`:601-613`). A WARNING
+    // deadline is not a failure, so it skips straight to `finally:`.
+    if terminal == RunState::Failed && !errors.is_empty() && !exhausted(errors) {
+        if let Some(step) = super::sequential::walk_errors(plan, state, errors, Some(run), now) {
+            return step;
+        }
+    }
+    // Then `finally:`, always (`:615-620`).
+    if !finally.is_empty() {
+        return super::sequential::walk_errors(plan, state, finally, Some(run), now)
+            .unwrap_or_else(end);
+    }
+    // No `finally:`: once `errors:` (if any) is done, end in the deadline terminal.
+    end()
+}
+
+/// Whether a `Pause`'s `onPause:` run exists and has not reached a terminal
+/// state. The execution must not terminalize while one is: it is no root, so
+/// `aggregate(roots)` cannot see it, and a `CREATED` leaf under a terminal
+/// execution is never claimed -- the task would be silently dropped. The golden
+/// (`valids/pause_on_pause`) ends the execution only after both runs are done.
+pub(crate) fn on_pause_in_flight(plan: &Plan, state: &ExecutionState) -> bool {
+    state.runs.iter().any(|r| {
+        let TaskKind::Pause {
+            on_pause: Some(on_pause),
+            ..
+        } = &plan.tasks[r.task].kind
+        else {
+            return false;
+        };
+        run_of(state, None, *on_pause).is_some_and(|ix| !super::is_terminal(state, ix))
+    })
+}
+
+/// Drive every `onPause:` run a `Pause` created ([`drive`]): they hang off no
+/// list the walk visits, so `advance` asks here, once per round, and gets the
+/// ordinary walk of the one-task list (`CREATED` is opened, `RUNNING` is
+/// descended into, a terminal run is left).
+///
+/// A pause whose `onPause:` run does not exist yet is skipped: [`drive`]
+/// creates it in the batch that pauses the run, and creating it here too would
+/// make a second one in that same round.
+pub(crate) fn drive_on_pause(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
+    let mut cmds = Vec::new();
+    for r in &state.runs {
+        let TaskKind::Pause {
+            on_pause: Some(on_pause),
+            ..
+        } = &plan.tasks[r.task].kind
+        else {
+            continue;
+        };
+        if run_of(state, None, *on_pause).is_none() {
+            continue;
+        }
+        if let Some(Step::Commands(c)) =
+            super::sequential::drive_list(plan, state, &[*on_pause], None, now)
+        {
+            cmds.extend(c);
+        }
+    }
+    cmds
 }
 
 // **`resume` used to live here and is now
@@ -221,46 +434,155 @@ enum Bound {
 /// has not been measured to produce, and an unbounded pause is the one answer
 /// that can never be an over-acceptance.
 fn deadline(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, started: Tick) -> Bound {
-    let crate::executor::plan::TaskKind::Pause { duration } = &plan.tasks[task].kind else {
+    let crate::executor::plan::TaskKind::Pause {
+        duration, behavior, ..
+    } = &plan.tasks[task].kind
+    else {
         // Unreachable for the same reason `drive`'s missing attempt is: both
         // callers match on this kind before they get here.
         return Bound::Unbounded;
     };
 
-    if let Some(source) = duration.as_deref() {
-        // An expression goes through the caller, exactly as an `If`'s condition
-        // does -- `advance()` is pure. A literal is parsed straight, without
-        // waiting for a render that would only hand back the same text:
-        // `valids/pause-delay` writes `PT1S` and must not stall on a caller
-        // that renders nothing.
-        let text = match parse_duration(source) {
-            Some(_) => source,
-            None => match state.runs[run].rendered.as_deref() {
-                Some(rendered) => rendered,
-                None => return Bound::NotRenderedYet,
-            },
-        };
-        return match parse_duration(text) {
-            Some(d) => Bound::Until(plus(started, d), RunState::Success),
+    // The caller's render, split back into the two expressions it answers
+    // ([`rendered_expression`]). `None` while an expression is unanswered.
+    let rendered = state.runs[run].rendered.as_deref();
+    let (duration_expr, behavior_expr) = expressions(duration.as_deref(), behavior.as_deref());
+    let rendered_parts = match rendered {
+        None => None,
+        Some(r) => match split_rendered(r, duration_expr, behavior_expr) {
+            Some(parts) => Some(parts),
+            // Both were expected and the separator is missing (D2): fail.
+            None => return Bound::Until(started, RunState::Failed),
+        },
+    };
+
+    let Some(source) = duration.as_deref() else {
+        // **`timeout:` takes the `allow*` flags and NOT `behavior:`** -- W8
+        // Task 5. `ExecutorService.java:937` is
+        // `.state(duration != null ? behavior.mapToState() : State.Type.fail(pauseTask))`,
+        // so only the `pauseDuration:` branch reads `behavior:` and the
+        // `timeout:` one is `fail(allowFailure, allowWarning)` whatever
+        // `behavior:` says. `valids/pause-timeout-allow-failure` measures it: a
+        // `Pause` with `timeout: PT1S` and `allowFailure: true` whose golden run
+        // is `["CREATED","RUNNING","PAUSED","WARNING"]`.
+        let task = &plan.tasks[task];
+        return match task.timeout {
+            Some(d) => Bound::Until(
+                plus(started, d),
+                crate::executor::allow_failure::fail(task.allow_failure, task.allow_warning),
+            ),
             None => Bound::Unbounded,
         };
-    }
+    };
 
-    // **`timeout:` and `pauseDuration:` take DIFFERENT terminals from the two
-    // `allow*` flags, and the artifact's own line is what says so** -- W8 Task
-    // 5. `ExecutorService.java:937` is
-    // `.state(duration != null ? behavior.mapToState() : State.Type.fail(pauseTask))`,
-    // so the flags reach the `timeout:` branch and NOT the `pauseDuration:`
-    // one above, which keeps `RunState::Success` whatever anybody wrote.
-    // `valids/pause-timeout-allow-failure` is the flow that measures it: a
-    // `Pause` with `timeout: PT1S` and `allowFailure: true` whose golden run is
-    // `["CREATED","RUNNING","PAUSED","WARNING"]`.
-    let task = &plan.tasks[task];
-    match task.timeout {
-        Some(d) => Bound::Until(
-            plus(started, d),
-            crate::executor::allow_failure::fail(task.allow_failure, task.allow_warning),
-        ),
-        None => Bound::Unbounded,
+    // An expression goes through the caller, exactly as an `If`'s condition
+    // does -- `advance()` is pure. A literal is parsed straight, without
+    // waiting for a render that would only hand back the same text:
+    // `valids/pause-delay` writes `PT1S` and must not stall on a caller
+    // that renders nothing.
+    let text = if duration_expr {
+        match rendered_parts {
+            Some((Some(d), _)) => d,
+            _ => return Bound::NotRenderedYet,
+        }
+    } else {
+        source
+    };
+    let Some(d) = parse_duration(text) else {
+        return Bound::Unbounded;
+    };
+    let at = plus(started, d);
+
+    // **`behavior:` (package 9a D2/D3), applied at the `pauseDuration:`
+    // deadline only.** A manual resume never gets here ([`release_now`]), so a
+    // Pause resumed before its deadline succeeds whatever it says. Unset is
+    // `RESUME`, `SUCCESS`: every pre-9a figure unchanged.
+    let Some(source) = behavior.as_deref() else {
+        return Bound::Until(at, RunState::Success);
+    };
+    let text = if behavior_expr {
+        match rendered_parts {
+            Some((_, Some(b))) => b,
+            _ => return Bound::NotRenderedYet,
+        }
+    } else {
+        source
+    };
+    Bound::Until(at, behavior_terminal(text))
+}
+
+/// What `behavior:` ends the pause as at its deadline. `RESUME` is `SUCCESS`,
+/// which the resume gate ([`super::resume_paused`]) answers by running the
+/// body; the other three are non-`SUCCESS`, so that gate runs no body.
+///
+/// **A value outside the four fails the run** (spec D2) where Kestra's
+/// `Behavior.valueOf` throws inside the executor and leaves the pause
+/// `RUNNING` for ever. A literal never gets here with one -- `pause_plan_gap`
+/// refuses it -- so this is the rendered-expression case.
+fn behavior_terminal(text: &str) -> RunState {
+    match text.trim() {
+        "RESUME" => RunState::Success,
+        "WARN" => RunState::Warning,
+        "CANCEL" => RunState::Cancelled,
+        _ => RunState::Failed,
     }
+}
+
+/// Which of a `Pause`'s two expressions need the caller: `(pauseDuration,
+/// behavior)`. A `pauseDuration:` that already parses is a complete answer; a
+/// `behavior:` needs a render only when it contains a template tag.
+fn expressions(duration: Option<&str>, behavior: Option<&str>) -> (bool, bool) {
+    (
+        duration.is_some_and(|d| parse_duration(d).is_none()),
+        // `behavior:` is read only at a `pauseDuration:` deadline
+        // (`ExecutorService.java:937`), so without one there is nothing to
+        // render.
+        duration.is_some() && behavior.is_some_and(crate::executor::plan::behavior_is_expression),
+    )
+}
+
+/// Joins the two renders in the single `rendered` slot when both are needed.
+const RENDER_SEP: char = '\u{1f}';
+
+/// The one template the caller renders for a `Pause`, or `None` when nothing
+/// needs it. A lone expression is rendered as itself (so `pauseDuration:`'s
+/// `rendered` is unchanged from before 9a); both are joined by [`RENDER_SEP`]
+/// and read back by [`split_rendered`]. One slot rather than a second column:
+/// `rendered` is stored, and a new field would be a migration.
+pub(crate) fn rendered_expression(kind: &TaskKind) -> Option<String> {
+    let TaskKind::Pause {
+        duration, behavior, ..
+    } = kind
+    else {
+        return None;
+    };
+    let (d, b) = expressions(duration.as_deref(), behavior.as_deref());
+    match (d, b) {
+        (false, false) => None,
+        (true, false) => duration.clone(),
+        (false, true) => behavior.clone(),
+        (true, true) => Some(format!(
+            "{}{RENDER_SEP}{}",
+            duration.as_deref().unwrap_or_default(),
+            behavior.as_deref().unwrap_or_default()
+        )),
+    }
+}
+
+/// [`rendered_expression`]'s answer split back: `(duration, behavior)`, each
+/// `Some` only for an expression that was rendered.
+///
+/// `None` is a rendered slot that should hold both but has no separator, which
+/// the caller cannot have written: [`deadline`] fails the pause on it (spec
+/// D2, never a hang) instead of waiting for an answer that will not come.
+fn split_rendered(rendered: &str, d: bool, b: bool) -> Option<(Option<&str>, Option<&str>)> {
+    Some(match (d, b) {
+        (true, true) => {
+            let (d, b) = rendered.split_once(RENDER_SEP)?;
+            (Some(d), Some(b))
+        }
+        (true, false) => (Some(rendered), None),
+        (false, true) => (None, Some(rendered)),
+        (false, false) => (None, None),
+    })
 }

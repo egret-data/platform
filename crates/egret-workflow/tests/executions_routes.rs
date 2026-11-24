@@ -3519,19 +3519,16 @@ async fn start_resume_and_replay_answer_can_manage_true() {
     assert_eq!(replayed["can_manage"], true, "replay: {replayed}");
 }
 
-/// **The 2026-10-11 ruling, on the API start.** A `Pause` declaring
-/// `behavior`, `onPause`, `tasks` or `errors` is a validation error, and a
-/// saved draft carrying one is refused at start with a 400 that names the
-/// property -- before the ruling it was a warning, the start answered 201, and
-/// the execution stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed).
-/// The refusal is `build_plan`'s `validate_for_run` gate inside
-/// `worker::start_execution`, the one function every start path goes through.
-///
-/// Each of the four properties is driven, and the control is the same draft
-/// with a plain bounded `Pause`, which starts: without it the first half
-/// passes under a route that refuses every `Pause`.
+/// **9a Task 6, on the API start.** A `Pause` is a full flowable now, so a saved
+/// draft declaring `behavior` (valid), `onPause`, `tasks` or `errors` STARTS
+/// (201) and runs. Two shapes are still refused at start with a 400 that names
+/// the finding: a LITERAL invalid `behavior` (`unsupported_pause_behavior`, D2)
+/// and a finally-ONLY `Pause` (`unsupported_pause_property`, I2 -- the flattener
+/// would drop the `finally:`). The refusal is `build_plan`'s `validate_for_run`
+/// gate inside `worker::start_execution`, the one function every start path goes
+/// through. The control is a plain bounded `Pause`, which starts.
 #[tokio::test]
-async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
+async fn a_start_runs_a_pause_body_and_refuses_an_invalid_behavior_or_finally_only() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
@@ -3543,7 +3540,9 @@ async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
         )
     };
 
-    for (property, extra) in [
+    // The full-flowable shapes START now (201, an execution is created).
+    let mut expected = 0;
+    for (label, extra) in [
         ("behavior", "    behavior: RESUME\n"),
         (
             "onPause",
@@ -3562,7 +3561,7 @@ async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
             &db,
             ws,
             user,
-            &pause(&format!("pause-{}", property.to_lowercase()), extra),
+            &pause(&format!("pause-{label}"), extra),
             "draft",
         )
         .await;
@@ -3572,17 +3571,45 @@ async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
             user,
         )
         .await;
-        assert_eq!(res.status(), 400, "{property}");
+        assert_eq!(res.status(), 201, "{label}: a full-flowable Pause starts");
+        expected += 1;
+        assert_eq!(common::execution_count(&db, ws).await, expected, "{label}");
+    }
+
+    // Still refused: a literal invalid behavior, and a finally-only Pause.
+    for (label, extra, code, path) in [
+        (
+            "invalid-behavior",
+            "    behavior: NOPE\n",
+            "unsupported_pause_behavior",
+            "tasks.gate.behavior",
+        ),
+        (
+            "finally-only",
+            "    finally:\n      - id: fin\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+            "unsupported_pause_property",
+            "tasks.gate.finally",
+        ),
+    ] {
+        let flow =
+            common::seed_flow(&db, ws, user, &pause(&format!("pause-{label}"), extra), "draft")
+                .await;
+        let res = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 400, "{label}");
         let body = common::body_text(res).await;
         assert!(
-            body.contains("unsupported_pause_property")
-                && body.contains(&format!("tasks.gate.{property}")),
-            "{property}: the refusal names the finding and the property: {body}"
+            body.contains(code) && body.contains(path),
+            "{label}: the refusal names the finding and the property: {body}"
         );
         assert_eq!(
             common::execution_count(&db, ws).await,
-            0,
-            "{property}: a refused start leaves no execution behind"
+            expected,
+            "{label}: a refused start leaves no execution behind"
         );
     }
 
@@ -3595,7 +3622,7 @@ async fn a_start_refuses_a_draft_whose_pause_egret_does_not_run() {
     )
     .await;
     assert_eq!(res.status(), 201);
-    assert_eq!(common::execution_count(&db, ws).await, 1);
+    assert_eq!(common::execution_count(&db, ws).await, expected + 1);
 }
 
 /// **The 2026-10-12 ruling, on the API start.** `ForEach` is the validation

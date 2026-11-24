@@ -128,7 +128,7 @@ fn walk(
             // reached at `RUNNING` and ENTERS the pause, this is reached at
             // `PAUSED` and LEAVES it, and a single door would have to branch on
             // the state anyway.
-            Some(RunState::Paused) => return Some(super::resume_paused(state, ix, now)),
+            Some(RunState::Paused) => return Some(super::resume_paused(plan, state, ix, now)),
             // A flowable the executor drives: descend, and terminate it when
             // its own children are done. A `Runnable` is `Waiting` — the worker
             // holds it and there is nothing to decide until it lands.
