@@ -11341,6 +11341,122 @@ mod allow_failure_drive_tests {
             Command::SetRunState { run, state: RunState::Created } if *run == child
         )));
     }
+
+    const RETRY_BLOCK: &str = "id: afr\nnamespace: io.kestra.tests\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      - id: ko\n        type: io.kestra.plugin.core.execution.Fail\n    errors:\n      - id: handler\n        type: io.kestra.plugin.core.debug.Return\n        format: h\n    retry:\n      type: constant\n      interval: PT0.5S\n      maxAttempts: 3\n{WARN}  - id: after\n    type: io.kestra.plugin.core.debug.Return\n    format: after\n";
+
+    /// Drives `RETRY_BLOCK` (child `ko` ALWAYS fails) through `plan_stored`,
+    /// advancing the clock to each `not_before`. Returns the surfaced runs
+    /// `(task id, attempts, last state)`, the flow's state history.
+    #[allow(clippy::type_complexity)]
+    fn run_retry_block(
+        warning_on_retry: bool,
+    ) -> (Vec<(String, usize, Option<RunState>)>, Vec<RunState>) {
+        let src = RETRY_BLOCK.replace(
+            "{WARN}",
+            if warning_on_retry {
+                "      warningOnRetry: true\n"
+            } else {
+                ""
+            },
+        );
+        assert!(
+            super::build_plan(&src).is_err(),
+            "the refusal is still active, so this must go through plan_stored"
+        );
+        let plan = super::plan_stored(&src).expect("a stored source plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut now = T0;
+        for _ in 0..400 {
+            let cmds = advance(&plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => {
+                    let raw = if plan.tasks[state.runs[ix].task].id == "ko" {
+                        RunState::Failed
+                    } else {
+                        RunState::Success
+                    };
+                    let outcome = super::allow_failure::for_runnable(&plan, &state, ix, raw, now);
+                    apply(
+                        &mut state,
+                        &Command::SetRunState {
+                            run: ix,
+                            state: outcome,
+                        },
+                    );
+                }
+                None => match state
+                    .runs
+                    .iter()
+                    .filter_map(|r| r.not_before)
+                    .filter(|t| *t > now)
+                    .min()
+                {
+                    Some(t) => now = t,
+                    None => break,
+                },
+            }
+        }
+        let surfaced = state
+            .runs
+            .iter()
+            .filter(|r| !r.history.is_empty())
+            .map(|r| {
+                (
+                    plan.tasks[r.task].id.clone(),
+                    r.attempts.len(),
+                    r.history.last().copied(),
+                )
+            })
+            .collect();
+        (surfaced, state.history.clone())
+    }
+
+    /// **Package 9b Task 2: the retry exhausts.** `ko` always fails, so all 3
+    /// attempts run and the last one (no retry left) leaves it FAILED;
+    /// `block_state` maps that to a block WARNING and the flow continues to
+    /// `after`, ending WARNING (the D1 Sequential-parity rule, with retries in
+    /// between). The block's `errors:` run IS surfaced here: the two superseded
+    /// middle attempts emptied their error run, but the final FAILED attempt is
+    /// not reopened, so its `handler` run stays (1 attempt, SUCCESS).
+    #[test]
+    fn a_block_retry_that_exhausts_makes_the_block_a_warning() {
+        let (surfaced, history) = run_retry_block(false);
+        assert_eq!(
+            surfaced,
+            [
+                ("block".to_string(), 1, Some(RunState::Warning)),
+                ("ko".to_string(), 3, Some(RunState::Failed)),
+                ("handler".to_string(), 1, Some(RunState::Success)),
+                ("after".to_string(), 1, Some(RunState::Success)),
+            ]
+        );
+        assert_eq!(history.last(), Some(&RunState::Warning));
+    }
+
+    /// `warningOnRetry: true` is accepted but egret does not act on it (see the
+    /// `spec::keys` warning, roadmap #13): the surfaced runs and terminal are
+    /// exactly those of the same flow without it. (On the succeeds-late corpus
+    /// flow `retry-with-flowable-errors`, which sets it, Kestra's golden is also
+    /// SUCCESS, so an unchanged terminal is the parity-safe pin.)
+    #[test]
+    fn warning_on_retry_on_a_block_retry_does_not_change_the_terminal() {
+        let without = run_retry_block(false);
+        let with = run_retry_block(true);
+        assert_eq!(with, without);
+        assert_eq!(with.1.last(), Some(&RunState::Warning));
+    }
 }
 
 /// End hooks A4 (spec §4.1, D2): every flowable and the flow itself choose
