@@ -9,7 +9,7 @@
 Port Kestra's flow-level concurrency core: a flow may declare `concurrency: { limit: <int ≥1>, behavior: QUEUE }`; when the flow already has `limit` non-terminal executions, a newly-created execution is held in a new **`QUEUED`** state instead of running, and is promoted to run when a slot frees. 8a ships the `QUEUE` behavior only.
 
 ## Scope (8a)
-1. **Flow YAML** `concurrency: { limit, behavior }` — parse + validate (`limit ≥ 1`; `behavior` defaults `QUEUE`; `CANCEL`/`FAIL` are **rejected at publish** with "supported in a later release").
+1. **Flow YAML** `concurrency: { limit, behavior }` — parse + validate (`limit ≥ 1`; `behavior` defaults `QUEUE`; `CANCEL`/`FAIL` are **ACCEPTED at publish** (Kestra accepts them; the oracle banks 3 such flows) but NOT yet enforced — a `NOT_YET_ENFORCED` warning fires for non-QUEUE behavior; 8b implements them. (Reversed from an earlier reject decision after the oracle conflict — user 2026-11-24.)
 2. **`QUEUED` execution state** (migration) — not terminal, not idle, not "running a task". QUEUED executions do NOT count toward the limit; live non-terminal non-QUEUED executions do.
 3. **Race-safe admission gate at execution-create** — inside the create transaction, for a flow with a limit, take a per-flow `pg_advisory_xact_lock(hashtext(namespace||'/'||flow_key))`, count the flow's live executions, and admit RUN (< limit) or QUEUE (≥ limit). The lock serializes concurrent creates for the same flow so two simultaneous starts cannot both pass the limit.
 4. **Drain when a slot frees** — when an execution of the flow reaches a terminal state (in the settle that terminalizes it), under the same per-flow lock, promote the **oldest** QUEUED execution of that flow (`ORDER BY created_at, id`) to start via the normal start path. One slot per freed slot. Plus a **safety sweep** (periodic) that drains any flow left under-limit with QUEUED waiting (covers a missed drain, e.g. a crash between terminalize and drain).
@@ -26,7 +26,7 @@ Port Kestra's flow-level concurrency core: a flow may declare `concurrency: { li
 - The advisory-lock key derives from the flow identity (namespace + flow_key), stable across executions of the flow.
 
 ## Kestra divergences (to record)
-1. Only `QUEUE` behavior in 8a; CANCEL/FAIL rejected at publish until 8b.
+1. Only `QUEUE` behavior ENFORCED in 8a; CANCEL/FAIL accepted + warned (not enforced) until 8b.
 2. Enforcement is a Postgres advisory lock + count, not Kestra's in-memory `ExecutionRunning` (egret's source of truth is the DB — matches its claim-based model).
 3. unqueue/force-run deferred to 8b.
 
@@ -46,7 +46,7 @@ Port Kestra's flow-level concurrency core: a flow may declare `concurrency: { li
 
 ## Decisions (locked 2026-11-24)
 - **Split 8a/8b** ✅ — 8a core (limit + QUEUED + gate + drain + sweep + QUEUE + FE-state); 8b CANCEL/FAIL + unqueue/force-run + FE actions.
-- **Reject CANCEL/FAIL at publish** in 8a ✅.
+- **Accept CANCEL/FAIL at publish + NOT_YET_ENFORCED warning** (reversed reject after oracle conflict) ✅ user 2026-11-24.
 - **Gate** = per-flow `pg_advisory_xact_lock` + count ✅.
 - **Limit counts** live non-terminal non-QUEUED executions ✅.
 - **Drain** oldest-first on terminalize + safety sweep ✅.
