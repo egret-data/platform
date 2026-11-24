@@ -1961,20 +1961,28 @@ mod pause_finally_tests {
     /// I1 of the #2a whole-branch review, as 9a Task 6 leaves it: a flow
     /// published BEFORE #2a with a `Pause` carrying ONLY `finally:` was valid
     /// then (serde ignored the list). The D8 `pause_finally_is_dropped` guard
-    /// keeps such a pause bare -- the rules a stored execution started under --
-    /// with its `finally:` unplanned. **Known narrow edge (9a follow-up):** the
-    /// guard lives in the shared `flatten_flow`, so it keeps a *new* finally-ONLY
-    /// pause bare too; publish no longer refuses it (the lift), so its `finally:`
-    /// is silently dropped. No corpus flow is finally-only, and distinguishing
-    /// stored from new would mean threading a flag through the whole flattener.
+    /// lives in the shared `flatten_flow`, so `plan_stored` keeps such a stored
+    /// pause bare -- the rules it started under -- with its `finally:` unplanned.
+    /// **A NEW start no longer silently drops it (I2, no-silent-drops): because
+    /// the flattener would plan it away, `spec::validate` REFUSES a finally-ONLY
+    /// pause (`unsupported_pause_property` at `.finally`), so `build_plan` returns
+    /// no plan for it.** A `finally:` alongside a body plans and runs. Only
+    /// `plan_stored` (no validate gate) still re-plans the stored shape bare.
     #[test]
-    fn a_pause_with_only_finally_stays_bare() {
+    fn a_pause_with_only_finally_stays_bare_when_stored_and_is_refused_for_a_new_start() {
         let src = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    finally: [{id: z, type: core.log, message: m}]\n";
+        // A NEW start is refused rather than silently dropping the finally:.
+        let e = build_plan(src).unwrap_err().message;
+        assert!(
+            e.starts_with("unsupported_pause_property") && e.contains("only body is 'finally'"),
+            "{e}"
+        );
+        // A stored execution re-plans bare (D8), through `plan_stored`.
         let plan = plan_stored(src).unwrap();
         assert_eq!(
             plan.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
             ["p"],
-            "D8: a Pause with only finally: stays bare, finally unplanned"
+            "D8: a stored Pause with only finally: stays bare, finally unplanned"
         );
         assert_eq!(
             plan.tasks[0].kind,

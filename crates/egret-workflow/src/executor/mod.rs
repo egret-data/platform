@@ -69,6 +69,9 @@ pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
     RetryBehavior, RetryDelay, RetryPolicy, TaskIx, TaskKind,
 };
+// 9a Task 6 (I2): `spec::validate` refuses a finally-only `Pause` through this
+// predicate, which is `pub(crate)` rather than `pub`.
+pub(crate) use plan::pause_finally_is_dropped;
 pub use replay::{
     copy_onto, replay_from, reset_copied, restart_copy, shift_ticks, CopiedRuns, CopyRefusal,
     CopySelection, MatchFault,

@@ -10500,15 +10500,17 @@ async fn a_retry_attempt_overwrites_its_own_uris_without_a_unique_violation(pool
     );
 }
 
-/// **The 2026-10-11 ruling, on a subflow call.** A `Subflow` whose target is a
-/// flow with a `Pause` declaring `behavior:` (one of the four properties
-/// egret does not run) creates no child: the target does not plan, so the
-/// `Subflow` run FAILS with `cannot execute an invalid flow` naming the
-/// property, and the parent ends `FAILED` instead of waiting on a child that
-/// would stall in `RUNNING` for ever. The control is the same call to a plain
-/// bounded `Pause`, which does create its child.
+/// **9a Task 6, on a subflow call.** A `Pause` is a full flowable now, so a
+/// `Subflow` to a plain or full-flowable `Pause` target creates its child. A
+/// target whose `Pause` declares a LITERAL invalid `behavior:` still does not
+/// plan, so the `Subflow` run FAILS with `cannot execute an invalid flow` naming
+/// `unsupported_pause_behavior`, and the parent ends `FAILED` instead of waiting
+/// on a child that would stall in `RUNNING` for ever. The control is the same
+/// call to a plain bounded `Pause`, which does create its child.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_subflow_to_a_pause_egret_does_not_run_creates_no_child_and_fails(pool: sqlx::PgPool) {
+async fn a_subflow_to_a_pause_with_an_invalid_behavior_creates_no_child_and_fails(
+    pool: sqlx::PgPool,
+) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
@@ -10518,7 +10520,7 @@ async fn a_subflow_to_a_pause_egret_does_not_run_creates_no_child_and_fails(pool
              type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1H\n{extra}"
         )
     };
-    file_flow(&db, ws, user, &pause("stalls", "    behavior: RESUME\n")).await;
+    file_flow(&db, ws, user, &pause("stalls", "    behavior: NOPE\n")).await;
     file_flow(&db, ws, user, &pause("plain", "")).await;
     let reg = Handlers::with_core_tasks(egret_workflow::storage::current());
 
@@ -10550,7 +10552,7 @@ async fn a_subflow_to_a_pause_egret_does_not_run_creates_no_child_and_fails(pool
     let message = message.unwrap_or_default();
     assert!(
         message.contains("cannot execute an invalid flow 't'.'stalls'")
-            && message.contains("unsupported_pause_property")
+            && message.contains("unsupported_pause_behavior")
             && message.contains("tasks.gate.behavior"),
         "{message}"
     );

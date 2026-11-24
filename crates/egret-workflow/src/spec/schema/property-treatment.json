@@ -640,7 +640,7 @@
       "description": "honoured",
       "disabled": "honoured",
       "errors": "honoured",
-      "finally": "honoured",
+      "finally": "refused",
       "id": "honoured",
       "logLevel": "ignored",
       "logToFile": "ignored",

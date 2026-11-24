@@ -151,13 +151,16 @@ pub(crate) fn resume_paused(plan: &Plan, state: &ExecutionState, run: RunIx, now
                     if !tasks.is_empty() {
                         return Step::Commands(vec![Command::ReopenFlowable { run, at: now }]);
                     }
-                } else if !pt.errors.is_empty() || !pt.finally.is_empty() {
+                } else if (s == RunState::Failed && !pt.errors.is_empty()) || !pt.finally.is_empty()
+                {
                     // A `timeout:`/`behavior: FAIL|WARN` deadline runs no body,
-                    // but a pause with `errors:`/`finally:` must still drive those
-                    // handlers (9a Task 6). `ReenterPause` opens no new attempt
-                    // and KEEPS `resume_with`, so the resumed arm reads the
-                    // deadline terminal `s` back and ends the pause in it once the
-                    // handlers are done.
+                    // but a pause must still drive its handlers (9a Task 6). Only
+                    // a FAILED deadline runs `errors:` (a WARNING is not a
+                    // failure, so errors-only with a WARNING terminal re-enters
+                    // for nothing -- M3); `finally:` always runs. `ReenterPause`
+                    // opens no new attempt and KEEPS `resume_with`, so the
+                    // resumed arm reads the deadline terminal `s` back and ends
+                    // the pause in it once the handlers are done.
                     return Step::Commands(vec![Command::ReenterPause { run }]);
                 }
             }

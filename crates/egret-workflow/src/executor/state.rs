@@ -1060,6 +1060,18 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         Command::SetRunState { run, state: s } => {
             let r = &mut state.runs[*run];
             r.history.push(*s);
+            // 9a Task 6, M4: a `Pause` that reaches its terminal has finished
+            // its wait, so clear the `Resume::Terminal` it was parked with and
+            // the paired deadline -- the same clearing `ReopenFlowable` does, so
+            // a terminal pause row (bare, or one `ReenterPause` re-entered to
+            // drive handlers) does not keep a stale `resume_with`/`not_before`.
+            // Gated on a `Terminal` discriminant so a retried run (whose
+            // `not_before` the waker reads, and whose `resume_with` is never
+            // `Terminal`) is untouched.
+            if s.is_terminal() && matches!(r.resume_with, Some(Resume::Terminal { .. })) {
+                r.resume_with = None;
+                r.not_before = None;
+            }
             // Rule 2 (W3c fix round 2): a run re-entering `CREATED` has no
             // render for the attempt it is about to take. See the block comment
             // above -- this restores exactly the invariant `CreateRun` sets, and

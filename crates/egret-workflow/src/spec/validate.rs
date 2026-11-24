@@ -2346,6 +2346,27 @@ fn walk_task(
                     path: format!("{path}.{property}"),
                 });
             }
+            // 9a Task 6, I2 (no-silent-drops): a `Pause` whose ONLY body is
+            // `finally:` -- no `tasks:`, `errors:` or `onPause:` -- is kept BARE
+            // by the shared flattener's D8 guard (`pause_finally_is_dropped`),
+            // which exists so a pre-#2a stored execution re-plans bare by the
+            // rules it started under. For a NEW start that would silently drop
+            // the `finally:`, so it is refused here instead: a finally-ONLY pause
+            // cannot be reproduced. A `finally:` ALONGSIDE a body plans and runs
+            // (`flowable::pause::drive_terminal`), so it is not refused. Stored
+            // bare pauses still re-plan bare through `plan_stored` (no validate).
+            if crate::executor::pause_finally_is_dropped(p) {
+                report.errors.push(Finding {
+                    code: "unsupported_pause_property",
+                    message: format!(
+                        "task '{}' is a pause whose only body is 'finally', which egret \
+                         cannot reproduce: a Pause's 'finally' runs only alongside a 'tasks', \
+                         'errors' or 'onPause' body. Add one of those, or remove the 'finally'",
+                        task.id
+                    ),
+                    path: format!("{path}.finally"),
+                });
+            }
         }
         TaskKind::WorkingDirectory(w) => {
             if w.tasks.is_empty() {
@@ -4049,8 +4070,9 @@ mod tests {
                     "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
                 ),
                 (
+                    // `finally:` ALONGSIDE a body runs; finally-ONLY is refused (below).
                     "finally",
-                    "    pauseDuration: PT1S\n    finally:\n      - id: fin\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+                    "    pauseDuration: PT1S\n    tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n    finally:\n      - id: fin\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
                 ),
             ] {
                 let yaml = format!(
@@ -4061,6 +4083,33 @@ mod tests {
                 assert!(
                     !r.warnings.iter().any(|w| w.path.starts_with("tasks.gate")),
                     "{spelling}/{label}: a pause egret runs must not be reported: {r:?}"
+                );
+            }
+
+            // Refused (I2, no-silent-drops): a Pause whose ONLY body is `finally:`.
+            {
+                let yaml = format!(
+                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n    pauseDuration: PT1S\n    finally:\n      - id: fin\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+                );
+                let f = parse(&yaml).unwrap();
+                let r = validate(&f);
+                let e = r
+                    .errors
+                    .iter()
+                    .find(|e| e.code == "unsupported_pause_property")
+                    .unwrap_or_else(|| panic!("{spelling}/finally-only: no error: {r:?}"));
+                assert_eq!(e.path, "tasks.gate.finally", "{spelling}/finally-only");
+                assert!(
+                    e.message.contains("only body is 'finally'"),
+                    "{spelling}/finally-only: {}",
+                    e.message
+                );
+                assert!(
+                    validate_for_run(&f)
+                        .errors
+                        .iter()
+                        .any(|e| e.code == "unsupported_pause_property"),
+                    "{spelling}/finally-only: validate_for_run must refuse it"
                 );
             }
 

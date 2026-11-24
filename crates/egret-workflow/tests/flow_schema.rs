@@ -472,14 +472,17 @@ fn properties_egret_refuses_after_parsing_are_not_served() {
     }
 }
 
-/// The 2026-10-11 ruling: a `Pause` declaring `behavior`, `onPause` or
-/// `errors` is a validation error (`unsupported_pause_property`), so the
-/// measurement classifies the three `refused` and the editor stops offering
-/// them. (`tasks`, the fourth property `pause_gap` names, is not in Kestra's
-/// documented `Pause` schema, so there is no row to classify.) The control is
-/// `pauseDuration` and `timeout`, which are honoured and still offered.
+/// 9a Task 6: a `Pause` is a full flowable now, so `behavior`, `onPause` and
+/// `errors` are honoured and the editor offers them. The ONE property still
+/// refused is `finally` -- measured on its own (the probe is a `Pause` with no
+/// other body, i.e. finally-ONLY), which `spec::validate` refuses as a silent
+/// drop (`unsupported_pause_property`, I2); `finally` alongside a body runs, but
+/// the per-property probe cannot say so, so the editor stops offering `finally`.
+/// (`tasks`, a property `pause_gap` once named, is not in Kestra's documented
+/// `Pause` schema, so there is no row to classify.) The control is
+/// `pauseDuration` and `timeout`, honoured and offered.
 #[test]
-fn a_pause_does_not_offer_the_properties_egret_refuses() {
+fn a_pause_offers_its_flowable_properties_and_not_finally_only() {
     let schema = flow_schema(&ALL[3], &permissive_deployment());
     let pause = "io.kestra.plugin.core.flow.Pause";
     let props = &schema["$defs"][pause]["properties"];
@@ -487,14 +490,20 @@ fn a_pause_does_not_offer_the_properties_egret_refuses() {
     for prop in ["behavior", "onPause", "errors"] {
         assert_eq!(
             measured().properties[pause].get(prop),
-            Some(&Treatment::Refused),
+            Some(&Treatment::Honoured),
             "{prop}"
         );
-        assert!(
-            props.get(prop).is_none(),
-            "Pause offers {prop}, which egret refuses"
-        );
+        assert!(props.get(prop).is_some(), "Pause must offer {prop}");
     }
+    assert_eq!(
+        measured().properties[pause].get("finally"),
+        Some(&Treatment::Refused),
+        "finally (finally-only is refused, I2)"
+    );
+    assert!(
+        props.get("finally").is_none(),
+        "Pause offers finally, which egret refuses when it is the only body"
+    );
     assert_eq!(measured().properties[pause].get("tasks"), None);
     for prop in ["pauseDuration", "timeout"] {
         assert_eq!(
