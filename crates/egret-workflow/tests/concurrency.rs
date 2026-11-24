@@ -5,6 +5,9 @@
 //!
 //! Every test is `#[sqlx::test]`: each owns its database.
 //!
+//! Task 3 adds the drain (a terminal frees a slot, the oldest QUEUED runs) and
+//! the safety sweep.
+//!
 //! Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5467/egret_test
 //!   cargo test -p egret-workflow --test concurrency
@@ -196,4 +199,181 @@ async fn two_racing_starts_at_the_boundary_admit_exactly_one(pool: sqlx::PgPool)
             "round {round}: exactly one of the two racing starts is admitted"
         );
     }
+}
+
+// ---- Task 3: the drain and the safety sweep ----------------------------------
+
+async fn history(pool: &sqlx::PgPool, id: Uuid) -> serde_json::Value {
+    sqlx::query_scalar("SELECT history FROM workflow.executions WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("history")
+}
+
+/// Run `n` task runs through the REAL worker tick (so through the real
+/// `settle`, where an execution terminalizes and the drain is called).
+async fn tick(pool: &sqlx::PgPool, n: usize) {
+    egret_workflow::worker::tick(pool, n, &common::Answering(true))
+        .await
+        .expect("tick");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_terminal_promotes_the_queued_execution_and_it_runs_like_a_fresh_start(
+    pool: sqlx::PgPool,
+) {
+    // Arrange: limit 1, one RUNNING, one QUEUED.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let running = start(&pool, ws, Some(flow), &src).await;
+    let queued = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, queued).await, "QUEUED");
+    let fresh_runs = run_count(&pool, running).await;
+
+    // Act: the running one finishes (its only task completes).
+    tick(&pool, 1).await;
+
+    // Assert
+    assert_eq!(state(&pool, running).await, "SUCCESS");
+    assert_eq!(
+        state(&pool, queued).await,
+        "RUNNING",
+        "the freed slot drains"
+    );
+    assert_eq!(
+        history(&pool, queued).await,
+        json!(["CREATED", "RUNNING"]),
+        "the promoted row's history is a fresh start's"
+    );
+    assert_eq!(
+        run_count(&pool, queued).await,
+        fresh_runs,
+        "its first settle created the same task runs a fresh start does"
+    );
+    let started: Option<bool> =
+        sqlx::query_scalar("SELECT started_at IS NOT NULL FROM workflow.executions WHERE id = $1")
+            .bind(queued)
+            .fetch_one(&pool)
+            .await
+            .expect("started_at");
+    assert_eq!(started, Some(true));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_oldest_queued_execution_is_promoted_first(pool: sqlx::PgPool) {
+    // Arrange: two QUEUED; the later-inserted one is made the OLDER.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let _running = start(&pool, ws, Some(flow), &src).await;
+    let first = start(&pool, ws, Some(flow), &src).await;
+    let second = start(&pool, ws, Some(flow), &src).await;
+    sqlx::query(
+        "UPDATE workflow.executions SET created_at = created_at - interval '1 hour' WHERE id = $1",
+    )
+    .bind(second)
+    .execute(&pool)
+    .await
+    .expect("age the second");
+
+    // Act
+    tick(&pool, 1).await;
+
+    // Assert
+    assert_eq!(state(&pool, second).await, "RUNNING", "the older one goes");
+    assert_eq!(state(&pool, first).await, "QUEUED");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_freed_slot_promotes_exactly_one(pool: sqlx::PgPool) {
+    // Arrange: limit 2, two RUNNING, two QUEUED.
+    let src = flow_src(Some((2, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let a = start(&pool, ws, Some(flow), &src).await;
+    let b = start(&pool, ws, Some(flow), &src).await;
+    let q1 = start(&pool, ws, Some(flow), &src).await;
+    let q2 = start(&pool, ws, Some(flow), &src).await;
+
+    // Act: ONE run completes, so ONE execution terminalizes.
+    tick(&pool, 1).await;
+
+    // Assert
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions WHERE flow_id = $1 \
+         AND NOT workflow.state_is_terminal(state) AND state <> 'QUEUED'",
+    )
+    .bind(flow)
+    .fetch_one(&pool)
+    .await
+    .expect("live");
+    assert_eq!(live, 2, "never above the limit");
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions WHERE flow_id = $1 AND state = 'QUEUED'",
+    )
+    .bind(flow)
+    .fetch_one(&pool)
+    .await
+    .expect("queued");
+    assert_eq!(queued, 1, "exactly one promoted");
+    let _ = (a, b, q1, q2);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_sweep_recovers_a_missed_drain(pool: sqlx::PgPool) {
+    // Arrange: a terminal that never drained (a crash between the two).
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let running = start(&pool, ws, Some(flow), &src).await;
+    let queued = start(&pool, ws, Some(flow), &src).await;
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', \
+         history = history || '[\"SUCCESS\"]'::jsonb, ended_at = now() WHERE id = $1",
+    )
+    .bind(running)
+    .execute(&pool)
+    .await
+    .expect("terminalize without a drain");
+    assert_eq!(state(&pool, queued).await, "QUEUED");
+
+    // Act
+    let promoted = egret_workflow::worker::concurrency::concurrency_sweep(&pool)
+        .await
+        .expect("sweep");
+
+    // Assert
+    assert_eq!(promoted, 1);
+    assert_eq!(state(&pool, queued).await, "RUNNING");
+    assert_eq!(history(&pool, queued).await, json!(["CREATED", "RUNNING"]));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_queued_execution_is_not_reaped_and_the_sweep_leaves_a_full_flow_alone(
+    pool: sqlx::PgPool,
+) {
+    // Arrange: limit 1 held by a live execution; the QUEUED one is ancient.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let _running = start(&pool, ws, Some(flow), &src).await;
+    let queued = start(&pool, ws, Some(flow), &src).await;
+    sqlx::query(
+        "UPDATE workflow.executions SET created_at = created_at - interval '30 days' WHERE id = $1",
+    )
+    .bind(queued)
+    .execute(&pool)
+    .await
+    .expect("age it");
+
+    // Act: every periodic pass, with a lease timeout that expires at once.
+    egret_workflow::runtime::reaper_pass(&pool, std::time::Duration::from_millis(1), None).await;
+    egret_workflow::worker::reap(&pool, std::time::Duration::from_millis(1))
+        .await
+        .expect("reap");
+    egret_workflow::worker::concurrency::concurrency_sweep(&pool)
+        .await
+        .expect("sweep");
+
+    // Assert
+    assert_eq!(state(&pool, queued).await, "QUEUED");
+    assert_eq!(history(&pool, queued).await, json!(["CREATED", "QUEUED"]));
+    assert_eq!(run_count(&pool, queued).await, 0);
 }

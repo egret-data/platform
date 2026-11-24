@@ -3724,6 +3724,11 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
                 }
             }
             outbox(conn, ctx, before, state).await?;
+            // Package 8a: a terminal frees a concurrency slot; start the
+            // oldest QUEUED execution of the flow, if one waits.
+            if became_terminal(before, state) {
+                super::concurrency::on_terminal(conn, ctx).await?;
+            }
             // Step 4 is the tail ([`walk`]): if this settle reached a
             // terminal, tell the parent. `was != is` reads `state` -- this
             // settle's in-memory copy, which a nested settle deliberately does
@@ -4376,6 +4381,30 @@ async fn start_execution_in_on(
 pub(super) async fn settle_new(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<()> {
     let empty = ExecutionState::new(&ctx.plan);
     settle(conn, ctx, &empty, empty.clone(), Tick(0), None).await
+}
+
+/// Start a `QUEUED` execution (package 8a's drain): the row goes back to
+/// `CREATED` and takes the first settle a fresh start takes, so it runs
+/// identically. The one difference is the clock: the settle's tick is the
+/// real time since `created_at` (what `load` reads) rather than `Tick(0)`,
+/// because the execution waited in the queue and every deadline is measured
+/// from `created_at`.
+pub(super) async fn promote_queued(
+    conn: &mut PgConnection,
+    execution: Uuid,
+    stack: Stack,
+) -> Result<()> {
+    sqlx::query(EXECUTION_STATE_UPDATE)
+        .bind("CREATED")
+        .bind(serde_json::json!(["CREATED"]))
+        .bind(execution)
+        .bind(false)
+        .bind(false)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    let (ctx, state, now) = load(conn, execution, stack).await?;
+    settle(conn, &ctx, &state, state.clone(), now, None).await
 }
 
 /// **What every start refuses a source for**, before any row is written: it

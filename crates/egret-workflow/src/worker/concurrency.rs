@@ -15,8 +15,12 @@
 //! commit or rollback.
 
 use egret_core::{Error, Result};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
+
+use super::claim::{promote_queued, ExecutionCtx, Stack};
+use super::txn::{transaction, InTxn};
+use crate::models::{Concurrency, ConcurrencyBehavior};
 
 /// What the gate decided for a new start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +56,124 @@ pub async fn concurrency_admit(tx: &mut PgConnection, flow_id: Uuid, limit: i32)
     } else {
         Admit::Queue
     })
+}
+
+/// Start the oldest `QUEUED` executions of `flow_id` while the flow is under
+/// `limit`, under the same per-flow advisory lock as [`concurrency_admit`]
+/// (held to the end of the caller's transaction). At most `limit - live`
+/// are promoted per call; the ids come back oldest first.
+///
+/// **The drain's scope is the fresh-start rows 8a queues**: a promoted row
+/// is started exactly as a fresh start (`claim::promote_queued`). `stack`
+/// is the caller's: `Nested` inside a settle, `Fresh` from the sweep's own
+/// transaction, so the first settle reads through the owner's prefetch cache.
+pub(super) async fn concurrency_drain(
+    tx: &mut PgConnection,
+    stack: &Stack,
+    flow_id: Uuid,
+    limit: i32,
+) -> Result<Vec<Uuid>> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(flow_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    let mut promoted = Vec::new();
+    loop {
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workflow.executions \
+             WHERE flow_id = $1 AND NOT workflow.state_is_terminal(state) AND state <> 'QUEUED'",
+        )
+        .bind(flow_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if live >= i64::from(limit) {
+            break;
+        }
+        // Oldest first, `workflow_executions_queued_idx`. `SKIP LOCKED` is
+        // belt and braces: every promoter holds the flow's lock, so a row
+        // locked by someone else is not ours to start.
+        let next: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM workflow.executions \
+             WHERE flow_id = $1 AND state = 'QUEUED' \
+             ORDER BY created_at, id LIMIT 1 FOR NO KEY UPDATE SKIP LOCKED",
+        )
+        .bind(flow_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let Some(id) = next else { break };
+        promote_queued(tx, id, stack.clone()).await?;
+        promoted.push(id);
+    }
+    Ok(promoted)
+}
+
+/// `source`'s `concurrency: {limit, behavior: QUEUE}` limit, if it has one.
+fn queue_limit(source: &str) -> Option<i32> {
+    match crate::spec::parse(source).ok()?.concurrency? {
+        Concurrency {
+            limit: Some(limit),
+            behavior: ConcurrencyBehavior::Queue,
+        } => Some(limit),
+        _ => None,
+    }
+}
+
+/// The settle's hook: `ctx`'s execution just became terminal, so a slot of
+/// its flow is free. Cheap when nothing waits (one indexed `EXISTS`, no
+/// parse).
+pub(super) async fn on_terminal(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<()> {
+    let Some(flow_id) = ctx.flow_id else {
+        return Ok(());
+    };
+    let waiting: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM workflow.executions WHERE flow_id = $1 AND state = 'QUEUED')",
+    )
+    .bind(flow_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    if !waiting {
+        return Ok(());
+    }
+    let Some(limit) = queue_limit(&ctx.source) else {
+        return Ok(());
+    };
+    concurrency_drain(conn, &Stack::Nested(ctx.caller()), flow_id, limit).await?;
+    Ok(())
+}
+
+/// **The safety sweep**: for every flow with a `QUEUED` execution waiting,
+/// drain it up to its limit. Recovers a drain that never happened (a crash
+/// between the terminal and its drain, a terminal written outside a settle).
+/// The limit is the oldest waiting row's own stored `concurrency:`. Returns
+/// how many executions it started. Rides the lease reaper's tick
+/// (`runtime::reaper_pass`).
+pub async fn concurrency_sweep(pool: &PgPool) -> Result<usize> {
+    let waiting = sqlx::query(
+        "SELECT DISTINCT ON (flow_id) flow_id, source FROM workflow.executions \
+         WHERE state = 'QUEUED' AND flow_id IS NOT NULL \
+         ORDER BY flow_id, created_at, id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(db_err)?;
+    let mut started = 0;
+    for row in waiting {
+        let flow_id: Uuid = row.get("flow_id");
+        let source: String = row.get("source");
+        let Some(limit) = queue_limit(&source) else {
+            continue;
+        };
+        let promoted = transaction!(pool, |at| {
+            let (conn, gate) = at.parts();
+            concurrency_drain(conn, &Stack::Fresh(gate.clone()), flow_id, limit).await
+        })?;
+        started += promoted.len();
+    }
+    Ok(started)
 }
 
 fn db_err(e: sqlx::Error) -> Error {
