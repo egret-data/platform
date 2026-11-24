@@ -383,6 +383,9 @@ pub struct FlowDto {
     /// nothing runs it until an administrator turns the worker on** (KI-013).
     /// The same flag the trigger routes echo ([`TriggerFlags`]).
     pub worker_enabled: bool,
+    /// The flow's declared `concurrency` (limit + behavior); null when the
+    /// flow declares none.
+    pub concurrency: Option<crate::models::Concurrency>,
 }
 
 /// A flow draft as `GET /flows` lists it — no `source`/`plan`/`validation`:
@@ -561,6 +564,7 @@ fn draft_dto(row: FlowRow, can_manage: bool, worker_enabled: bool) -> EgretResul
         validation: ValidationReportDto::from(&report),
         can_manage,
         worker_enabled,
+        concurrency: parsed.concurrency,
     })
 }
 
