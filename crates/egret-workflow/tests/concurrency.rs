@@ -845,7 +845,12 @@ async fn a_queued_subflow_child_runs_when_the_slot_frees_and_the_parent_complete
     assert_eq!(state(&pool, parent).await, "SUCCESS");
 }
 
-async fn subflow_child_terminal(pool: sqlx::PgPool, behavior: &str, terminal: &str) {
+async fn subflow_child_terminal(
+    pool: sqlx::PgPool,
+    behavior: &str,
+    terminal: &str,
+    expected_parent: &str,
+) {
     // Act
     let (_ws, _cf, _hold, parent, child) = parent_over_full_child(&pool, behavior).await;
 
@@ -856,23 +861,25 @@ async fn subflow_child_terminal(pool: sqlx::PgPool, behavior: &str, terminal: &s
         0,
         "a terminal child runs no task"
     );
-    // The parent reacts to the terminal child as to any terminal child: it is
-    // no longer waiting.
-    let parent_state = state(&pool, parent).await;
-    assert!(
-        !matches!(parent_state.as_str(), "RUNNING" | "CREATED"),
-        "the parent must settle over a {terminal} child, got {parent_state}"
+    // Pins the parent's reaction to the terminal child.
+    assert_eq!(
+        state(&pool, parent).await,
+        expected_parent,
+        "parent outcome over a {terminal} child"
     );
 }
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_subflow_child_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
-    subflow_child_terminal(pool, "CANCEL", "CANCELLED").await;
+    // Pins existing Subflow behaviour: a CANCELLED child does not fail the
+    // parent. A later change to that is noticed here.
+    subflow_child_terminal(pool, "CANCEL", "CANCELLED", "SUCCESS").await;
 }
 
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_subflow_child_over_a_fail_limit_is_failed(pool: sqlx::PgPool) {
-    subflow_child_terminal(pool, "FAIL", "FAILED").await;
+    // A FAILED child propagates to the parent (transmitFailed).
+    subflow_child_terminal(pool, "FAIL", "FAILED", "FAILED").await;
 }
 
 #[sqlx::test(migrations = "../../migrations")]
