@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::claim::{self, Stack};
+use super::concurrency::take_flow_lock;
 use super::txn::{transaction, InTxn};
 use crate::executor::{apply, Command, ExecutionState, RunState};
 
@@ -45,6 +46,22 @@ pub async fn unqueue(
     debug_assert!(target.is_terminal(), "unqueue target must be terminal");
     transaction!(pool, |at| {
         let (conn, gate) = at.parts();
+        // Lock order: the flow's advisory lock BEFORE the row lock, as
+        // `force_run`, the drain and the admission gate take them. The settle
+        // below drains the flow (re-taking the same lock, which is re-entrant
+        // in a transaction); row-first here would be an ABBA with `force_run`.
+        let flow_id: Option<Option<Uuid>> =
+            sqlx::query_scalar("SELECT flow_id FROM workflow.executions WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|e| Error::Internal(e.into()))?;
+        let Some(flow_id) = flow_id else {
+            return Err(Error::NotFound("execution".into()));
+        };
+        if let Some(flow_id) = flow_id {
+            take_flow_lock(conn, flow_id).await?;
+        }
         let (ctx, mut state, now) = claim::load(conn, id, Stack::Fresh(gate.clone())).await?;
         if ctx.workspace_id != workspace {
             return Err(Error::NotFound("execution".into()));
