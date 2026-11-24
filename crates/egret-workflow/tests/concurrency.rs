@@ -635,7 +635,7 @@ async fn whole_replay_over_limit(pool: sqlx::PgPool, behavior: &str, terminal: &
     let (ws, flow) = setup(&pool, &src).await;
     let old = start(&pool, ws, Some(flow), &src).await;
     finish_success(&pool, old).await;
-    let _live = start(&pool, ws, Some(flow), &src).await;
+    let live = start(&pool, ws, Some(flow), &src).await;
 
     let replayed = whole_replay(&pool, ws, old, &src).await;
 
@@ -643,6 +643,41 @@ async fn whole_replay_over_limit(pool: sqlx::PgPool, behavior: &str, terminal: &
     assert_eq!(run_count(&pool, replayed).await, 0, "no task run");
     if terminal == "QUEUED" {
         assert_eq!(history(&pool, replayed).await, json!(["CREATED", "QUEUED"]));
+        // The drain resumes it: free the slot, sweep, and it leaves QUEUED
+        // with its replay identity (attempt, labels, origin) intact.
+        let snapshot = |id| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (i32, Option<serde_json::Value>, Option<Uuid>)>(
+                    "SELECT attempt_number, labels, replayed_from_execution_id \
+                     FROM workflow.executions WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot")
+            }
+        };
+        let before = snapshot(replayed).await;
+        assert_eq!(before.2, Some(old), "born as a replay of the old execution");
+        finish_success(&pool, live).await;
+        egret_workflow::worker::concurrency::concurrency_sweep(&pool)
+            .await
+            .expect("sweep");
+        assert_eq!(
+            state(&pool, replayed).await,
+            "RUNNING",
+            "the drain resumed it"
+        );
+        assert!(
+            run_count(&pool, replayed).await > 0,
+            "its first settle made runs"
+        );
+        assert_eq!(
+            snapshot(replayed).await,
+            before,
+            "attempt/labels/origin kept"
+        );
     } else {
         assert_eq!(history(&pool, replayed).await, json!(["CREATED", terminal]));
         assert!(
@@ -665,4 +700,52 @@ async fn a_whole_replay_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_whole_replay_over_a_fail_limit_is_failed(pool: sqlx::PgPool) {
     whole_replay_over_limit(pool, "FAIL", "FAILED").await;
+}
+
+/// A copy (partial replay from a task) over a full limit is NOT gated in Task 2: it
+/// runs (soft overshoot). Task 4 gates the drive; this pins the boundary.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_partial_replay_over_a_full_limit_is_not_gated_yet(pool: sqlx::PgPool) {
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let old = start(&pool, ws, Some(flow), &src).await;
+    // The old execution completes through the real worker, so its runs are terminal.
+    tick(&pool, 1).await;
+    assert_eq!(state(&pool, old).await, "SUCCESS");
+    let run_a: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(old)
+    .fetch_one(&pool)
+    .await
+    .expect("run a");
+    let _live = start(&pool, ws, Some(flow), &src).await;
+    let owner: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_one(&pool)
+        .await
+        .expect("owner");
+
+    let new = egret_workflow::worker::replay_execution(
+        &pool,
+        &egret_workflow::worker::ReplayRequest {
+            workspace_id: ws,
+            from: old,
+            source: &src,
+            kind: egret_workflow::worker::ReplayKind::FromTaskRun(run_a),
+            inputs: egret_workflow::worker::ReplayInputs::Reuse,
+            started_by: owner,
+            id: Uuid::new_v4(),
+            input_files: Vec::new(),
+        },
+    )
+    .await
+    .expect("replay")
+    .expect("not refused");
+
+    let s = state(&pool, new).await;
+    assert!(
+        !matches!(s.as_str(), "QUEUED" | "CANCELLED" | "FAILED"),
+        "a copy is ungated until Task 4, got {s}"
+    );
 }
