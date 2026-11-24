@@ -83,7 +83,7 @@ use crate::executor::{
     advance, apply, build_plan, plan_stored, Attempt, Command, ExecutionMeta, ExecutionState, Plan,
     Resume, RunIx, RunState, TaskKind, TaskRun, Tick, WorkingDirPhase,
 };
-use crate::models::{Concurrency, ConcurrencyBehavior};
+use crate::models::Concurrency;
 #[cfg(any(test, feature = "test-util"))]
 use crate::storage::prefetch::Prefetch;
 use crate::storage::StoredFile;
@@ -4360,11 +4360,23 @@ async fn start_execution_in_on(
     // no run is created, the history is `[CREATED, FAILED]`, and the settle's
     // outbox hook, parent notification and every other terminal path see an
     // ordinary FAILED transition.
-    if born_failed {
+    if born_failed || admit == Admit::Fail {
         apply(
             &mut state,
             &Command::SetExecutionState {
                 state: RunState::Failed,
+            },
+        );
+    }
+    // Package 8b: a start over a `behavior: CANCEL` limit terminalizes the
+    // same way, `CANCELLED`, with no run. Neither it nor a FAIL start held a
+    // slot, so the drain this settle runs finds the flow still at its limit
+    // and promotes nothing.
+    if admit == Admit::Cancel {
+        apply(
+            &mut state,
+            &Command::SetExecutionState {
+                state: RunState::Cancelled,
             },
         );
     }
@@ -4458,7 +4470,10 @@ pub(super) async fn insert_execution(
 
 /// [`insert_execution`] with the flow-concurrency gate (package 8a) when
 /// `gated`: under the flow's advisory lock, in THIS transaction, the row is
-/// born `QUEUED` instead of `CREATED` if the flow is at its limit. Only a
+/// born `QUEUED` instead of `CREATED` if the flow is at its limit with
+/// `behavior: QUEUE`; with `CANCEL`/`FAIL` the start is admitted as
+/// `Admit::Cancel`/`Admit::Fail` and the caller terminalizes it (`CANCELLED`/
+/// `FAILED`, no run) through its first settle. Only a
 /// fresh start is gated (`start_execution_in_on`); a copy (replay/restart)
 /// is not, and a born-`FAILED` start never is.
 async fn insert_execution_gated(
@@ -4499,14 +4514,19 @@ async fn insert_execution_gated(
             Some(fid),
             Some(Concurrency {
                 limit: Some(limit),
-                behavior: ConcurrencyBehavior::Queue,
+                behavior,
             }),
-        ) => concurrency_admit(conn, fid, *limit).await?,
+        ) => concurrency_admit(conn, fid, *limit, *behavior).await?,
         _ => Admit::Run,
     };
     let (row_state, row_history) = match admit {
         Admit::Run => ("CREATED", serde_json::json!(["CREATED"])),
         Admit::Queue => ("QUEUED", serde_json::json!(["CREATED", "QUEUED"])),
+        // Package 8b: a CANCEL/FAIL start is inserted `CREATED` and
+        // terminalized by its first settle (`start_execution_in_on`), exactly
+        // as a born-FAILED start, so the terminal hooks (outbox, flow-trigger
+        // listeners, alerts) see an ordinary transition.
+        Admit::Cancel | Admit::Fail => ("CREATED", serde_json::json!(["CREATED"])),
     };
 
     let inputs = if inputs.is_object() {
@@ -4533,6 +4553,11 @@ async fn insert_execution_gated(
     // KI-112: a SECRET input's value is masked in `inputs`, which every read
     // returns, and sealed into `secret_inputs`, which only the render opens.
     let (inputs, secret_inputs) = crate::secret_inputs::split(&flow, inputs)?;
+    // started_at/ended_at are both NULL for a row born CREATED or QUEUED; a
+    // CANCEL/FAIL start is born CREATED too and stamped by its settle. The
+    // stamp columns/values go through stamp_columns!/stamp_values! so the rule
+    // has no exception -- see the `stamps` census guard. Keep this note OUT of
+    // the concat! below: a comment inside it hides stamp_values! from the scan.
     let id: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
            (id, workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
@@ -4542,9 +4567,6 @@ async fn insert_execution_gated(
         stamp_columns!(),
         ") VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, $18, \
                  $19::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, $16, $17, ",
-        // Both NULL for a row born `CREATED` or `QUEUED`; spelled through the
-        // helper so the rule has no exception for the reader to remember
-        // (`stamps`).
         stamp_values!("$18", "$19"),
         ") RETURNING id",
     ))

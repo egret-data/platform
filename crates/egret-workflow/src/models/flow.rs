@@ -185,7 +185,7 @@ pub struct Label {
 /// checks); the brief's interface typed this field as a bare `limit: i32`,
 /// but the `@NotNull`-is-bean-validation principle applies here exactly as it
 /// does to `Parallel::concurrent` in `task.rs`, so the source wins.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Concurrency {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,7 +194,7 @@ pub struct Concurrency {
     pub behavior: ConcurrencyBehavior,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, utoipa::ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConcurrencyBehavior {
     #[default]

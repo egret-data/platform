@@ -228,6 +228,75 @@ describe("destructive confirmation and errors", () => {
   });
 });
 
+const QUEUED = "eeeeeeee-0000-4000-8000-000000000005";
+
+describe("bulk Unqueue and Force run (package 8b)", () => {
+  const rows = [...ROWS, exec(QUEUED, { state: "QUEUED", ended_at: null })];
+
+  it("are enabled only when every selected execution is QUEUED", async () => {
+    serve(4, undefined, rows);
+    renderList();
+    await screen.findByTestId("executions-table");
+    const user = userEvent.setup();
+    await user.click(rowBox(QUEUED));
+    expect(action("Unqueue")).toBeEnabled();
+    expect(action("Force run")).toBeEnabled();
+    await user.click(rowBox(RUN));
+    expect(action("Unqueue")).toBeDisabled();
+    expect(action("Force run")).toBeDisabled();
+  });
+
+  it("by ids: unqueue sends state=CANCELLED, force run sends {ids}, each after a confirm", async () => {
+    const calls = serve(4, undefined, rows);
+    renderList();
+    await screen.findByTestId("executions-table");
+    const user = userEvent.setup();
+    await user.click(rowBox(QUEUED));
+    await user.click(action("Unqueue"));
+    let dialog = await screen.findByRole("alertdialog");
+    expect(calls).toHaveLength(0);
+    await user.click(within(dialog).getByRole("button", { name: "Unqueue" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].path).toBe("/unqueue/by-ids");
+    expect(calls[0].search.get("state")).toBe("CANCELLED");
+    expect(calls[0].body).toEqual({ ids: [QUEUED] });
+
+    await user.click(rowBox(QUEUED));
+    await user.click(action("Force run"));
+    dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Force run" }));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1].path).toBe("/force-run/by-ids");
+    expect(calls[1].body).toEqual({ ids: [QUEUED] });
+  });
+
+  it("select all: unqueue sends the filter and target_state, force run sends the filter", async () => {
+    const calls = serve(120, undefined, rows);
+    renderList(`/explore/${WS}/workflows/executions?state=QUEUED&namespace=company`);
+    await screen.findByTestId("executions-table");
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("checkbox", { name: "Select all executions on this page" }));
+    await user.click(screen.getByRole("button", { name: "Select all 120 matching this filter" }));
+    await user.click(action("Unqueue"));
+    let dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Unqueue" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].path).toBe("/unqueue/by-query");
+    expect(calls[0].search.get("target_state")).toBe("CANCELLED");
+    expect(calls[0].search.get("state")).toBe("QUEUED");
+    expect(calls[0].body).toBeUndefined();
+
+    await selectAllMatching(user, 120);
+    await user.click(action("Force run"));
+    dialog = await screen.findByRole("alertdialog");
+    await user.click(within(dialog).getByRole("button", { name: "Force run" }));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1].path).toBe("/force-run/by-query");
+    expect(calls[1].search.get("namespace")).toBe("company");
+    expect(calls[1].body).toBeUndefined();
+  });
+});
+
 const PAUSED = "dddddddd-0000-4000-8000-000000000004";
 
 /** With the whole page chosen, widens the action to every execution the filter matches. */

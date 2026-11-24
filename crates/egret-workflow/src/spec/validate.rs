@@ -157,14 +157,10 @@ pub struct ValidationReport {
 /// stays, its package names no W-number, and [`FeaturePresence::triggers`] is
 /// now *declares a `Leaf` trigger*.
 /// `oracle-exec/README.md`'s unclaimed table records the same split for
-/// `sla:`. **It no longer has a row for flow `concurrency:` and that does not
-/// change this one**: W8 Task 1
-/// deleted that row because the construct holds no baselined entry under the
-/// execution oracle, which is a statement about what the RATCHET can score and
-/// not about whether this validator must warn. A flow declaring `concurrency:`
-/// still gets no enforcement, so the warning here stays exactly as it was —
-/// the two tables answer different questions, and conflating them is how a
-/// deleted row turns into a silently dropped warning.
+/// `sla:`. **Flow `concurrency:` has no row any more (package 8b)**: 8a
+/// enforces `behavior: QUEUE` and 8b enforces CANCEL and FAIL at the same
+/// admission gate (`worker::concurrency::concurrency_admit`), so no behavior
+/// warns.
 ///
 /// `the_not_yet_enforced_list_is_pinned_in_both_directions` is what makes a
 /// wrong row fail from now on — the reported finding was not only that the row
@@ -179,10 +175,6 @@ pub struct ValidationReport {
 /// named a package that no longer exists, or none. The prose above is history
 /// and still speaks of W-numbers.
 const NOT_YET_ENFORCED: &[(&str, &str)] = &[
-    (
-        "concurrency",
-        "only `behavior: QUEUE` is enforced; CANCEL and FAIL are lifted by roadmap package #8b",
-    ),
     ("sla", "roadmap package #16 lifts it"),
     ("checks", "roadmap package #16 lifts it"),
     (
@@ -327,7 +319,7 @@ fn is_runnable_child(task: &Task) -> bool {
 
 /// Which of `NOT_YET_ENFORCED`'s features this flow actually declares.
 ///
-/// **All five are flow-level, and that is new.** It used to be accumulated
+/// **All four are flow-level, and that is new.** It used to be accumulated
 /// during the task walk as well, because `retry:` and `timeout:` are
 /// task-level and were on the list. Both are enforced now (see
 /// `NOT_YET_ENFORCED`), so nothing remains that a task can declare, and
@@ -336,7 +328,6 @@ fn is_runnable_child(task: &Task) -> bool {
 /// through and no longer reading.
 #[derive(Debug, Default)]
 struct FeaturePresence {
-    concurrency: bool,
     /// **Declares a `MAX_DURATION`**, not "declares an `sla:`" — W8 Task 6.
     ///
     /// See [`NOT_YET_ENFORCED`]'s doc: `EXECUTION_ASSERTION` is enforced from
@@ -736,12 +727,6 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
     validate_flow_level_fields(flow, &mut report);
 
     let features = FeaturePresence {
-        // Package 8a enforces `behavior: QUEUE`; CANCEL and FAIL are 8b's, so
-        // only they are still "not yet enforced".
-        concurrency: flow
-            .concurrency
-            .as_ref()
-            .is_some_and(|c| c.behavior != crate::models::ConcurrencyBehavior::Queue),
         // **The narrowing, and it is the whole of it** -- W8 Task 6. `matches!`
         // over the variant rather than a text needle: a flow can write either
         // subtype, both, or the same subtype twice, and only the presence of a
@@ -2801,7 +2786,6 @@ fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
 
 fn emit_not_yet_enforced(features: &FeaturePresence, report: &mut ValidationReport) {
     let present: [(&str, bool); NOT_YET_ENFORCED.len()] = [
-        ("concurrency", features.concurrency),
         ("sla", features.sla),
         ("checks", features.checks),
         ("quotas", features.quotas),
@@ -3790,7 +3774,7 @@ mod tests {
     #[test]
     fn declared_but_unimplemented_features_warn_and_name_their_package() {
         let f = parse(
-            "id: f\nnamespace: a.b\nconcurrency:\n  limit: 1\n  behavior: CANCEL\ntasks:\n  - id: t\n    type: core.log\n",
+            "id: f\nnamespace: a.b\nchecks:\n  - when: \"{{ outputs.t.value == true }}\"\ntasks:\n  - id: t\n    type: core.log\n",
         )
         .unwrap();
         let r = validate(&f);
@@ -3799,11 +3783,11 @@ mod tests {
             .iter()
             .find(|w| w.code == "not_yet_enforced")
             .unwrap_or_else(|| panic!("no not_yet_enforced warning: {r:?}"));
-        assert!(w.message.contains("concurrency"), "{}", w.message);
+        assert!(w.message.contains("checks"), "{}", w.message);
         assert_eq!(
             w.message,
-            "`concurrency` is declared in this flow but egret does not enforce it yet; \
-             only `behavior: QUEUE` is enforced; CANCEL and FAIL are lifted by roadmap package #8b",
+            "`checks` is declared in this flow but egret does not enforce it yet; \
+             roadmap package #16 lifts it",
             "the warning must name the roadmap package"
         );
         assert!(
@@ -3827,11 +3811,6 @@ mod tests {
         assert_eq!(
             NOT_YET_ENFORCED,
             &[
-                (
-                    "concurrency",
-                    "only `behavior: QUEUE` is enforced; CANCEL and FAIL are lifted by roadmap \
-                     package #8b"
-                ),
                 ("sla", "roadmap package #16 lifts it"),
                 ("checks", "roadmap package #16 lifts it"),
                 (
@@ -3876,14 +3855,15 @@ mod tests {
         // POSITIVE CONTROL: a feature that really is unenforced still warns,
         // through the same code path, on a flow of the same shape.
         let unenforced = parse(
-            "id: f\nnamespace: a.b\nconcurrency:\n  limit: 1\n  behavior: CANCEL\ntasks:\n\
+            "id: f\nnamespace: a.b\nchecks:\n  - when: \"{{ outputs.t.value == true }}\"\ntasks:\n\
              \x20 - id: t\n    type: core.log\n    timeout: PT1S\n",
         )
         .unwrap();
         let r = validate(&unenforced);
 
-        // QUEUE is enforced (package 8a): it must not warn; FAIL still does.
-        for (behavior, warns) in [("QUEUE", false), ("FAIL", true), ("CANCEL", true)] {
+        // `concurrency` is fully enforced (8a QUEUE, 8b CANCEL and FAIL): no
+        // behavior warns.
+        for behavior in ["QUEUE", "FAIL", "CANCEL"] {
             let f = parse(&format!(
                 "id: f\nnamespace: a.b\nconcurrency:\n  limit: 1\n  behavior: {behavior}\n\
                  tasks:\n  - id: t\n    type: core.log\n"
@@ -3893,7 +3873,7 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.code == "not_yet_enforced" && w.path == "concurrency");
-            assert_eq!(warned, warns, "behavior {behavior}");
+            assert!(!warned, "behavior {behavior} must not warn");
         }
         let names: Vec<&str> = r
             .warnings
@@ -3903,7 +3883,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["concurrency"],
+            vec!["checks"],
             "exactly the unenforced feature warns, and the enforced `timeout:` \
              beside it does not: {:?}",
             r.warnings

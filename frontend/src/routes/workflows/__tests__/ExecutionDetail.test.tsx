@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -555,6 +555,46 @@ describe("ExecutionDetail: Pause (package 7c)", () => {
     renderPage();
     await screen.findByRole("button", { name: "Resume" });
     expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+  });
+});
+
+describe("ExecutionDetail: Unqueue and Force run (package 8b)", () => {
+  it("are shown on a QUEUED execution and absent on a RUNNING one", async () => {
+    new Server(ok(execution("QUEUED", { ended_at: null })));
+    renderPage();
+    expect(await screen.findByRole("button", { name: "Unqueue" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Force run" })).toBeEnabled();
+    cleanup();
+    new Server(ok(execution("RUNNING")));
+    renderPage();
+    await screen.findByRole("button", { name: "Kill" });
+    expect(screen.queryByRole("button", { name: "Unqueue" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Force run" })).toBeNull();
+  });
+
+  it("Unqueue asks first, then posts with state=CANCELLED", async () => {
+    const server = new Server(ok(execution("QUEUED", { ended_at: null })));
+    server.extra[`POST ${EXEC_PATH}/unqueue`] = ok(execution("CANCELLED"));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Unqueue" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Unqueue this execution?" });
+    expect(server.calls.some((c) => c.method === "POST")).toBe(false);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Unqueue" }));
+    await waitFor(() => expect(server.calls.filter((c) => c.method === "POST" && c.path === `${EXEC_PATH}/unqueue`)).toHaveLength(1));
+    expect(server.calls.find((c) => c.path === `${EXEC_PATH}/unqueue`)!.query.get("state")).toBe("CANCELLED");
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Unqueued the execution"));
+  });
+
+  it("Force run asks first, then posts to force-run", async () => {
+    const server = new Server(ok(execution("QUEUED", { ended_at: null })));
+    server.extra[`POST ${EXEC_PATH}/force-run`] = ok(execution("RUNNING"));
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "Force run" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Force run this execution?" });
+    expect(server.calls.some((c) => c.method === "POST")).toBe(false);
+    await userEvent.click(within(dialog).getByRole("button", { name: "Force run" }));
+    await waitFor(() => expect(server.calls.filter((c) => c.method === "POST" && c.path === `${EXEC_PATH}/force-run`)).toHaveLength(1));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Started the execution"));
   });
 });
 

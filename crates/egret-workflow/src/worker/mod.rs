@@ -85,6 +85,7 @@ mod copy;
 mod delete;
 mod flow_outputs;
 mod force_close;
+mod force_run;
 pub mod handlers;
 pub mod k8s;
 mod kill;
@@ -96,6 +97,7 @@ mod release;
 mod render;
 mod replay;
 mod restart;
+mod unqueue;
 // Plan Task 4 is the pure half; plan Task 6 calls it from the runner seam, and
 // this allowance goes with that call.
 #[allow(dead_code)]
@@ -157,6 +159,7 @@ pub use copy::{
     replay_execution, replay_would_refuse, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest,
 };
 pub use delete::{delete_execution, delete_would_refuse, DeleteRefused, DeleteRequest, Deleted};
+pub use force_run::{force_run, force_run_refusal, ForceRun};
 pub use kill::{
     kill_execution, kill_execution_reporting, kill_refusal, kill_would_refuse, KillOutcome,
 };
@@ -178,6 +181,7 @@ pub use restart::{
 /// Exported so `tests/worker.rs`'s positive control asserts against the bound
 /// itself rather than against a copy of the number.
 pub use subflow::MAX_SPAWN_CHAIN;
+pub use unqueue::{unqueue, unqueue_refusal, Unqueued};
 /// Test-only (`test-util`; debt D6): a block's discard on a store the test
 /// gives, so `tests/working_dir_claims.rs` can make its delete fail.
 #[cfg(any(test, feature = "test-util"))]

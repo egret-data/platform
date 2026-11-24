@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -588,6 +588,18 @@ describe("FlowDetail: the header's state and version", () => {
     const help = screen.getByRole("button", { name: "What is a version?" });
     await userEvent.hover(help);
     expect((await screen.findAllByText(VERSION_HELP)).length).toBeGreaterThan(0);
+  });
+
+  it("shows the concurrency limit and behavior when the flow has one, and nothing when it has none (package 8b)", async () => {
+    server = new FakeWorkflowServer({ concurrency: { limit: 3, behavior: "QUEUE" } });
+    renderAt();
+    await editorBox();
+    expect(screen.getByTestId("flow-concurrency")).toHaveTextContent("Concurrency: limit 3 (QUEUE)");
+    cleanup();
+    server = new FakeWorkflowServer({ concurrency: null });
+    renderAt();
+    await editorBox();
+    expect(screen.queryByTestId("flow-concurrency")).not.toBeInTheDocument();
   });
 
   it("shows the latest version number, and Disabled for a disabled flow", async () => {

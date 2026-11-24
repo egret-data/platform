@@ -1036,11 +1036,11 @@ async fn validate_without_an_id_answers_the_by_id_report_and_writes_nothing() {
     let before = flow_count(&db, ws).await;
 
     // Errors AND warnings, so both halves of the report are compared. The
-    // warning is a flow-level `concurrency: behavior: CANCEL` (`not_yet_enforced`):
-    // 8a enforces `QUEUE` (no warning) but CANCEL/FAIL are lifted by 8b, so they
-    // still warn. (The typo'd type that supplied the error was an error since
-    // no-silent-stall Task 1.)
-    let source = "id: f\nnamespace: BAD NAMESPACE\nconcurrency:\n  limit: 1\n  behavior: CANCEL\ntasks:\n  - id: t\n    type: egret.sqll\n";
+    // warning is a flow-level `quotas:` (`not_yet_enforced`): a stable choice
+    // here since quotas is Kestra-Enterprise-only and egret never enforces it
+    // (roadmap §3.3). (Flow `concurrency:` no longer warns: 8b enforces all
+    // three behaviors. The typo'd type supplies the error half.)
+    let source = "id: f\nnamespace: BAD NAMESPACE\nquotas:\n  - {}\ntasks:\n  - id: t\n    type: egret.sqll\n";
     let by_id = common::post(
         &app,
         &format!("/api/ws/{ws}/workflows/flows/{id}/validate"),
@@ -2123,4 +2123,42 @@ async fn a_reader_can_neither_restore_nor_delete_permanently() {
         1,
         "still in the trash: {trash}"
     );
+}
+
+/// `GET /flows/{id}` carries the flow's declared `concurrency` (limit +
+/// behavior) and a flow that declares none answers `null`.
+#[tokio::test]
+async fn get_flow_exposes_the_declared_concurrency() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+
+    let with = format!(
+        "{}concurrency:\n  limit: 2\n  behavior: QUEUE\n",
+        minimal_flow("c.with")
+    );
+    for (source, expect_limit) in [(with, Some(2)), (minimal_flow("c.without"), None)] {
+        let created = common::json(
+            common::post(
+                &app,
+                &format!("/api/ws/{ws}/workflows/flows"),
+                user,
+                serde_json::json!({ "source": source }),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_str().unwrap();
+        let res = common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{id}"), user).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let dto = common::json(res).await;
+        match expect_limit {
+            Some(limit) => {
+                assert_eq!(dto["concurrency"]["limit"], limit, "{dto}");
+                assert_eq!(dto["concurrency"]["behavior"], "QUEUE", "{dto}");
+            }
+            None => assert!(dto["concurrency"].is_null(), "{dto}"),
+        }
+    }
 }

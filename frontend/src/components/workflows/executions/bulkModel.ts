@@ -6,7 +6,7 @@ import { isLoopIteration, showsChangeStatus } from "@/components/workflows/execu
 import { toQueryParams, type ExecutionFilters } from "@/routes/workflows/executionsListModel";
 
 /**
- * THE BULK TOOLBAR'S MODEL (package 7f). The eight actions, and when the selection allows each.
+ * THE BULK TOOLBAR'S MODEL (package 7f). The ten actions, and when the selection allows each.
  *
  * A list row carries the execution's state, its loop and parent fields and its flow, but not the
  * `idle` flag or the task runs the single-op predicates in `actions.ts` also read. So these rules
@@ -14,7 +14,7 @@ import { toQueryParams, type ExecutionFilters } from "@/routes/workflows/executi
  * deleted-flow refusals); what only the server can see (a task still waiting, an afterExecution
  * run) comes back as a 400 listing the refused ids, and nothing is applied (all or none).
  */
-export type BulkAction = "restart" | "kill" | "delete" | "status" | "replay" | "resume" | "pause" | "labels";
+export type BulkAction = "restart" | "kill" | "delete" | "status" | "replay" | "resume" | "pause" | "labels" | "unqueue" | "forceRun";
 
 export const BULK_ACTIONS: { action: BulkAction; label: string }[] = [
   { action: "restart", label: "Restart" },
@@ -25,6 +25,8 @@ export const BULK_ACTIONS: { action: BulkAction; label: string }[] = [
   { action: "resume", label: "Resume" },
   { action: "pause", label: "Pause" },
   { action: "labels", label: "Edit labels" },
+  { action: "unqueue", label: "Unqueue" },
+  { action: "forceRun", label: "Force run" },
 ];
 
 type Row = ExecutionListItemDto;
@@ -57,6 +59,8 @@ function rowVerdict(r: Row): Record<BulkAction, Enablement> {
           : iteration
             ? no(iterationReason("Pause"))
             : YES,
+    unqueue: r.state === "QUEUED" ? YES : no("Only queued executions can be unqueued"),
+    forceRun: r.state === "QUEUED" ? YES : no("Only queued executions can be force-run"),
     labels: terminal ? YES : no("Labels can be edited once executions have ended"),
   };
 }

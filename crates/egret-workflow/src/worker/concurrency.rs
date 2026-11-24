@@ -39,6 +39,10 @@ pub enum Admit {
     Run,
     /// At the limit: park the row in `QUEUED` and start no task.
     Queue,
+    /// At the limit with `behavior: CANCEL`: the row is born `CANCELLED`.
+    Cancel,
+    /// At the limit with `behavior: FAIL`: the row is born `FAILED`.
+    Fail,
 }
 
 /// Decide whether a new execution of `flow_id` may run now, under the flow's
@@ -47,7 +51,12 @@ pub enum Admit {
 /// The running pool is every execution of the flow that is neither terminal
 /// (`workflow.state_is_terminal`, the one list of terminal states) nor
 /// `QUEUED`.
-pub async fn concurrency_admit(tx: &mut PgConnection, flow_id: Uuid, limit: i32) -> Result<Admit> {
+pub async fn concurrency_admit(
+    tx: &mut PgConnection,
+    flow_id: Uuid,
+    limit: i32,
+    behavior: ConcurrencyBehavior,
+) -> Result<Admit> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
         .bind(flow_id)
         .execute(&mut *tx)
@@ -64,7 +73,11 @@ pub async fn concurrency_admit(tx: &mut PgConnection, flow_id: Uuid, limit: i32)
     Ok(if live < i64::from(limit) {
         Admit::Run
     } else {
-        Admit::Queue
+        match behavior {
+            ConcurrencyBehavior::Queue => Admit::Queue,
+            ConcurrencyBehavior::Cancel => Admit::Cancel,
+            ConcurrencyBehavior::Fail => Admit::Fail,
+        }
     })
 }
 
@@ -120,6 +133,39 @@ pub(super) async fn concurrency_drain(
         promoted.push(id);
     }
     Ok(promoted)
+}
+
+/// **Force-run** (package 8b): start the `QUEUED` execution `id` of `flow_id`
+/// now, WITHOUT the drain's `live < limit` guard, so it runs even when the
+/// flow is at or over its limit. It takes the same per-flow advisory lock as
+/// [`concurrency_admit`] / [`concurrency_drain`] (held to the end of the
+/// caller's transaction), so it serializes with them and slot accounting
+/// stays consistent: the flow is simply transiently over its limit.
+///
+/// If the force-ran row self-terminalizes in its first settle while the flow
+/// is then under its limit with other `QUEUED` rows, the `DRAINING` guard
+/// suppresses the inline drain and the reaper's `concurrency_sweep` re-drains
+/// them (delayed, not stranded).
+pub(super) async fn concurrency_force_start(
+    tx: &mut PgConnection,
+    stack: &Stack,
+    flow_id: Uuid,
+    id: Uuid,
+) -> Result<()> {
+    take_flow_lock(tx, flow_id).await?;
+    DRAINING
+        .scope(flow_id, promote_queued(tx, id, stack.clone()))
+        .await
+}
+
+/// Take the flow's advisory lock for the rest of the transaction.
+pub(super) async fn take_flow_lock(tx: &mut PgConnection, flow_id: Uuid) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(flow_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    Ok(())
 }
 
 /// `source`'s `concurrency: {limit, behavior: QUEUE}` limit, if it has one.

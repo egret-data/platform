@@ -431,3 +431,114 @@ async fn an_inline_completing_backlog_drains_with_bounded_recursion(pool: sqlx::
     .expect("live");
     assert_eq!(live, 0, "every inline-completing execution ended");
 }
+
+// ---- Package 8b Task 1: CANCEL and FAIL at the gate ---------------------------
+
+async fn has_ended_at(pool: &sqlx::PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT ended_at >= created_at FROM workflow.executions WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("ended_at")
+}
+
+/// Limit 1, one RUNNING; the over-limit start is born `terminal`, holds no
+/// slot, and after the live one finishes a fresh start runs.
+async fn over_limit_start_is_born_terminal(pool: sqlx::PgPool, behavior: &str, terminal: &str) {
+    // Arrange
+    let src = flow_src(Some((1, behavior)));
+    let (ws, flow) = setup(&pool, &src).await;
+    let live = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, live).await, "RUNNING");
+
+    // Act
+    let over = start(&pool, ws, Some(flow), &src).await;
+
+    // Assert: terminal at birth, no task, ended_at stamped.
+    assert_eq!(state(&pool, over).await, terminal);
+    assert_eq!(history(&pool, over).await, json!(["CREATED", terminal]));
+    assert_eq!(run_count(&pool, over).await, 0, "no task run");
+    assert!(has_ended_at(&pool, over).await, "ended_at >= created_at");
+    // Nothing was promoted or disturbed by the terminalization's drain.
+    assert_eq!(state(&pool, live).await, "RUNNING");
+
+    // The terminal row holds no slot: while #1 is live, another start is
+    // still over the limit (terminal again, not queued)...
+    let again = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, again).await, terminal);
+    // ...and once #1 finishes, a fresh start runs.
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', \
+         history = history || '[\"SUCCESS\"]'::jsonb, ended_at = now() WHERE id = $1",
+    )
+    .bind(live)
+    .execute(&pool)
+    .await
+    .expect("finish the live one");
+    let fresh = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, fresh).await, "RUNNING");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_over_limit_start_with_cancel_is_born_cancelled_and_holds_no_slot(pool: sqlx::PgPool) {
+    over_limit_start_is_born_terminal(pool, "CANCEL", "CANCELLED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_over_limit_start_with_fail_is_born_failed_and_holds_no_slot(pool: sqlx::PgPool) {
+    over_limit_start_is_born_terminal(pool, "FAIL", "FAILED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_over_limit_start_with_queue_is_still_queued(pool: sqlx::PgPool) {
+    // Arrange
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    start(&pool, ws, Some(flow), &src).await;
+
+    // Act
+    let over = start(&pool, ws, Some(flow), &src).await;
+
+    // Assert
+    assert_eq!(state(&pool, over).await, "QUEUED");
+    assert_eq!(history(&pool, over).await, json!(["CREATED", "QUEUED"]));
+}
+
+// -- force-run (package 8b) --
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn force_run_starts_a_queued_execution_even_when_the_flow_is_at_its_limit(
+    pool: sqlx::PgPool,
+) {
+    // Arrange: limit 1, one RUNNING, one QUEUED.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let running = start(&pool, ws, Some(flow), &src).await;
+    let queued = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, queued).await, "QUEUED");
+
+    // Act
+    let out = egret_workflow::worker::force_run(&pool, ws, queued)
+        .await
+        .expect("force-run");
+
+    // Assert: it left QUEUED and runs; the first is still running, so the
+    // flow is transiently at 2 against a limit of 1.
+    assert_eq!(out, egret_workflow::worker::ForceRun::Started);
+    assert_eq!(state(&pool, queued).await, "RUNNING");
+    assert_eq!(state(&pool, running).await, "RUNNING");
+    assert_eq!(history(&pool, queued).await, json!(["CREATED", "RUNNING"]));
+    assert_eq!(
+        run_count(&pool, queued).await,
+        run_count(&pool, running).await
+    );
+
+    // A second force-run of the same row is refused, nothing changes.
+    let again = egret_workflow::worker::force_run(&pool, ws, queued)
+        .await
+        .expect("force-run again");
+    assert_eq!(
+        again,
+        egret_workflow::worker::ForceRun::NotQueued("RUNNING".into())
+    );
+}

@@ -7,6 +7,8 @@ import {
   useWorkflowChangeStatusExecutionsByQuery,
   useWorkflowDeleteExecutionsByIds,
   useWorkflowDeleteExecutionsByQuery,
+  useWorkflowForceRunExecutionsByIds,
+  useWorkflowForceRunExecutionsByQuery,
   useWorkflowKillExecutionsByIds,
   useWorkflowKillExecutionsByQuery,
   useWorkflowLabelsExecutionsByIds,
@@ -19,6 +21,8 @@ import {
   useWorkflowRestartExecutionsByQuery,
   useWorkflowResumeExecutionsByIds,
   useWorkflowResumeExecutionsByQuery,
+  useWorkflowUnqueueExecutionsByIds,
+  useWorkflowUnqueueExecutionsByQuery,
 } from "@/api/generated/workflow/workflow";
 import type { BulkResponse, ExecutionListItemDto, Invalid, LabelDto } from "@/api/generated/model";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -58,10 +62,15 @@ const DONE: Record<BulkAction, string> = {
   resume: "Resumed",
   pause: "Paused",
   labels: "Edited the labels of",
+  unqueue: "Unqueued",
+  forceRun: "Force-ran",
 };
 
+/** Unqueue drops a queued execution to this terminal state (the server default). */
+const UNQUEUE_TARGET = "CANCELLED";
+
 /** The actions that ask first: a destructive one (FE-ACTION-1), or one that needs a value. */
-const NEEDS_DIALOG: ReadonlySet<BulkAction> = new Set(["kill", "delete", "status", "labels", "resume"]);
+const NEEDS_DIALOG: ReadonlySet<BulkAction> = new Set(["kill", "delete", "status", "labels", "resume", "unqueue", "forceRun"]);
 
 interface Failure {
   message: string;
@@ -129,6 +138,10 @@ export function BulkActionBar({
   const pauseQuery = useWorkflowPauseExecutionsByQuery();
   const labelsIds = useWorkflowLabelsExecutionsByIds();
   const labelsQuery = useWorkflowLabelsExecutionsByQuery();
+  const unqueueIds = useWorkflowUnqueueExecutionsByIds();
+  const unqueueQuery = useWorkflowUnqueueExecutionsByQuery();
+  const forceRunIds = useWorkflowForceRunExecutionsByIds();
+  const forceRunQuery = useWorkflowForceRunExecutionsByQuery();
 
   // In `query` mode the rows beyond the page are unknown: every action is offered, and the server's
   // all-or-none check names the ids it refuses.
@@ -151,6 +164,16 @@ export function BulkActionBar({
       case "pause":
         res = q ? await pauseQuery.mutateAsync({ workspace, params }) : await pauseIds.mutateAsync({ workspace, data: { ids } });
         break;
+      case "forceRun":
+        res = q ? await forceRunQuery.mutateAsync({ workspace, params }) : await forceRunIds.mutateAsync({ workspace, data: { ids } });
+        break;
+      case "unqueue": {
+        // The by-query filter already owns `state`, so its target is `target_state`.
+        res = q
+          ? await unqueueQuery.mutateAsync({ workspace, params: { ...params, target_state: UNQUEUE_TARGET } })
+          : await unqueueIds.mutateAsync({ workspace, data: { ids }, params: { state: UNQUEUE_TARGET } });
+        break;
+      }
       case "kill":
         res = q ? await killQuery.mutateAsync({ workspace, params }) : await killIds.mutateAsync({ workspace, data: { ids } });
         break;
@@ -278,6 +301,8 @@ const TITLES: Record<string, (n: number) => string> = {
   status: (n) => `Change the status of ${executions(n)}`,
   labels: (n) => `Edit the labels of ${executions(n)}`,
   resume: (n) => `Resume ${executions(n)}`,
+  unqueue: (n) => `Unqueue ${executions(n)}?`,
+  forceRun: (n) => `Force run ${executions(n)}?`,
 };
 
 const BODIES: Record<string, string> = {
@@ -286,6 +311,8 @@ const BODIES: Record<string, string> = {
   status: "Sets every chosen execution to the status below.",
   labels: "Replaces the labels of every chosen execution with the list below.",
   resume: "Releases every paused execution. Add inputs only if every flow takes the same ones.",
+  unqueue: "Takes every queued execution out of its flow's queue and ends it as Cancelled. This cannot be undone.",
+  forceRun: "Starts every queued execution now, bypassing its flow's concurrency limit.",
 };
 
 const stateWord = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
