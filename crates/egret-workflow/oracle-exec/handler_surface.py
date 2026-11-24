@@ -205,10 +205,12 @@ def collect_tasks(node, path, out):
 # End hooks A4 (2026-10-27): the executor runs a `finally:` on these kinds by
 # Kestra's list rule (`flowable::current_list`), and since its fix round the
 # flow's own `finally:` too (the worker finds its leaves through
-# `spec::path::find_task`). Still unported: `finally:` on `Loop`, `LoopUntil`,
-# `WorkingDirectory` (A5) and `Pause` (refused, #9). `Loop` since A6
-# (2026-10-27): its iterations run the Loop's own `errors:`/`finally:`.
-PORTED_FINALLY = {"allowfailure", "sequential", "parallel", "if", "switch", "dag", "loop"}
+# `spec::path::find_task`). `Loop` since A6 (2026-10-27): its iterations run the
+# Loop's own `errors:`/`finally:`. `Pause` since 9a Task 6: a `Pause` is a full
+# flowable now, so a `timeout:`/`behavior: FAIL` deadline drives its
+# `errors:`/`finally:` (`flowable::pause::drive_terminal`). Still unported:
+# `finally:` on `LoopUntil` and `WorkingDirectory` (A5).
+PORTED_FINALLY = {"allowfailure", "sequential", "parallel", "if", "switch", "dag", "loop", "pause"}
 
 
 def unported_finally(node):
@@ -495,16 +497,16 @@ W3A_FLOWABLES = {
     # like `Subflow` it is not a `W3B_HANDLERS` entry and no worker ever claims
     # it.
     #
-    # **A `Pause` that declares `behavior:`, `onPause:`, its own `tasks:` or an
-    # `errors:` is NOT this**, and this set cannot say so: it is keyed by TYPE
-    # and that distinction is per TASK (`executor::plan::pause_gap`). The four
-    # entries it concerns are all still baselined and all still blocked --
-    # `pause-behavior`, `pause_on_pause`,
-    # `pause-errors-finally-after-execution` by `finally:`/`afterExecution:`
-    # rows that already exist, and `pause-timeout-allow-failure` by its
-    # `allowFailure:` row -- so the coarser key costs nothing today. It would
-    # cost something the moment one of those four banked, and the `blocked`
-    # guard below is what would say so.
+    # **9a Task 6: a `Pause` that declares `behavior:`, `onPause:`, its own
+    # `tasks:`, `errors:` or `finally:` is this too now** -- the full flowable.
+    # `build_plan` plans the body, `advance()` drives all of it (including the
+    # `errors:`/`finally:` handlers at a `timeout:`/`behavior: FAIL` deadline,
+    # `flowable::pause::drive_terminal`), and `claim::persist` writes it no
+    # `type_id`, so no worker claims it. The three corpus entries that carried a
+    # body (`pause-behavior`, `pause_on_pause`,
+    # `pause-errors-finally-after-execution`) match the golden and banked; the
+    # only `Pause` left refused is a LITERAL invalid `behavior:`
+    # (`unsupported_pause_behavior`), which no golden-matching flow declares.
     "io.kestra.plugin.core.flow.Pause",
     # The AllowFailure flowable (spec §5.2): `executor::flowable::allow_failure`
     # drives the block, so it is not a handler and no worker claims it. Its
@@ -791,36 +793,22 @@ def loop_store_output_gaps(node, out):
 
 PAUSE_TYPES = {"io.kestra.plugin.core.flow.Pause", "core.pause"}
 
-# The four `Pause` properties `executor::plan::pause_gap` refuses to plan, in
-# its own order.  A `Pause` declaring any of them is planned an opaque
-# `TaskKind::Runnable`, so it is exactly as blocked as an unported construct --
-# and `W3A_FLOWABLES` above CANNOT say so, because that set is keyed by task
-# TYPE and this is a property of one task.
-#
-# Without these rows the four entries concerned land in "nothing found here
-# blocks it", i.e. in the CEILING, which is the one direction this file's own
-# rules call a defect: a ceiling that is too low hides work, and a bankable
-# list naming an entry nothing can bank is what sends the next task hunting.
-PAUSE_GAP_KEYS = ("tasks", "errors", "behavior", "onPause")
-
 
 def pause_gaps(node, out):
-    """Every `Pause` property in this document that `build_plan` will not plan.
+    """A `Pause`'s body properties used to block here; 9a Task 6 ported them.
 
-    Walks the parsed doc rather than the raw text on purpose: `behavior:` is
-    also a `concurrency:` key (`behavior: CANCEL`), and a regex over the source
-    would blame six flows that declare no `Pause` at all.
+    Through W7b Task 4b a `Pause` declaring `tasks:`, `errors:`, `behavior:` or
+    `onPause:` was planned an opaque `TaskKind::Runnable` and refused, so each
+    property was a blocker `W3A_FLOWABLES` (keyed by task TYPE) could not express.
+    **9a Task 6 made `Pause` a full flowable**: the planner builds the body and
+    the driver runs it (`flowable::pause`), so none of the four blocks any more --
+    the three corpus entries that carried them (`valids/pause-behavior`,
+    `valids/pause-errors-finally-after-execution`, `valids/pause_on_pause`) match
+    the golden and banked. The one thing still refused is a LITERAL invalid
+    `behavior:` (`unsupported_pause_behavior`), which no golden-matching flow
+    declares, so there is nothing left to add here. Kept as a no-op (called from
+    `declared_blockers`) so the shape is documented rather than silently gone.
     """
-    if isinstance(node, dict):
-        if node.get("type") in PAUSE_TYPES:
-            for k in PAUSE_GAP_KEYS:
-                if node.get(k):
-                    out.add(("construct", f"Pause {k}:"))
-        for v in node.values():
-            pause_gaps(v, out)
-    elif isinstance(node, list):
-        for v in node:
-            pause_gaps(v, out)
     return out
 
 
@@ -1065,8 +1053,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # 25 since package #6 Task B3 (2026-10-29) banked
     # `valids/subflow-secret-output-parent` (a `Subflow` whose child's outputs
     # were not stored fails as Kestra's `failSubflowDueToOutput`), spec D6.
-    if len(baseline) != 25:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 25; the split "
+    # 22 since 9a Task 6 banked the three `Pause`-body flows
+    # (`valids/pause-behavior`, `valids/pause-errors-finally-after-execution`,
+    # `valids/pause_on_pause`), which are a full flowable now and match the golden.
+    if len(baseline) != 22:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 22; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1716,8 +1707,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 25",
-         "not 25",
+    case("baseline.txt is no longer 22",
+         "not 22",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

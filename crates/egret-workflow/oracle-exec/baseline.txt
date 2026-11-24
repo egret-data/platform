@@ -610,9 +610,6 @@ valids/if
 valids/loop-until-restart
 valids/parallel-disabled-tasks
 valids/parallel-fail-with-flowable
-valids/pause-behavior
-valids/pause-errors-finally-after-execution
-valids/pause_on_pause
 # Permanent, not a gap (group C spec §2.3, the user's ruling 2026-10-18): a flow
 # purges logs only of its own namespace and its children; Kestra OSS checks nothing.
 valids/purge_logs_full_arguments

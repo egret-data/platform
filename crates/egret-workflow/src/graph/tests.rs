@@ -825,24 +825,40 @@ fn errors_of(yaml: &str) -> Vec<(&'static str, String)> {
         .collect()
 }
 
-/// A `Pause` with `tasks:` is refused at `tasks.p.tasks`, a PROPERTY path;
-/// the error belongs to the node whose path is its longest prefix.
+/// 9a Task 6: a `Pause` with `tasks:` is a flowable now and draws its body, so
+/// it carries no refusal and `tasks.p.a` is a node. A `Pause` with a literal
+/// invalid `behavior:` is still refused, at `tasks.p.behavior` -- a PROPERTY
+/// path -- and the error belongs to the node whose path is its longest prefix.
 #[test]
-fn a_pause_with_tasks_carries_its_property_path_refusal() {
+fn a_pause_with_tasks_draws_its_body_and_an_invalid_behavior_carries_its_refusal() {
+    // A full-flowable Pause: no refusal, its body drawn.
     let body = format!(
         "tasks:\n  - {{id: p, type: {FLOW}.Pause, tasks: [{}]}}\n",
         leaf("a")
     );
     let yaml = format!("id: f\nnamespace: company.team\n{body}");
-    assert!(
-        errors_of(&yaml).contains(&("unsupported_pause_property", "tasks.p.tasks".to_string())),
-        "{:?}",
-        errors_of(&yaml)
-    );
+    assert!(errors_of(&yaml).is_empty(), "{:?}", errors_of(&yaml));
     let g = graph(&body);
+    assert_eq!(task(&g, "tasks.p").refusal, None);
+    assert_eq!(task(&g, "tasks.p").kind, TaskNodeKind::Flowable);
+    assert_eq!(task(&g, "tasks.p.a").refusal, None);
+
+    // A literal invalid behavior: refused at the property path.
+    let bad = format!(
+        "tasks:\n  - {{id: p, type: {FLOW}.Pause, pauseDuration: PT1S, behavior: NOPE, tasks: [{}]}}\n",
+        leaf("a")
+    );
+    let bad_yaml = format!("id: f\nnamespace: company.team\n{bad}");
+    assert!(
+        errors_of(&bad_yaml)
+            .contains(&("unsupported_pause_behavior", "tasks.p.behavior".to_string())),
+        "{:?}",
+        errors_of(&bad_yaml)
+    );
+    let g = graph(&bad);
     assert_eq!(
         task(&g, "tasks.p").refusal,
-        Some("unsupported_pause_property")
+        Some("unsupported_pause_behavior")
     );
     assert_eq!(task(&g, "tasks.p.a").refusal, None);
 }

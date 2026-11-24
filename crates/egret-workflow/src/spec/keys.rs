@@ -1909,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_on_resume_is_honoured_and_pause_tasks_is_refused_once() {
+    fn pause_on_resume_is_honoured_and_a_pause_tasks_body_is_accepted() {
         let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n");
         assert!(r.errors.is_empty(), "{r:?}");
         assert!(
@@ -1918,15 +1918,10 @@ mod tests {
                 .all(|w| !w.path.starts_with("tasks.p.onResume")),
             "{r:?}"
         );
+        // 9a Task 6: a `Pause` with `tasks:` is a flowable now, so its body is
+        // walked like any other list and nothing is refused at `tasks.p.tasks`.
         let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n");
-        assert_eq!(
-            r.errors
-                .iter()
-                .filter(|e| e.path == "tasks.p.tasks")
-                .count(),
-            1,
-            "{r:?}"
-        );
+        assert!(r.errors.is_empty(), "{r:?}");
     }
 
     #[test]

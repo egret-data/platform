@@ -2315,43 +2315,34 @@ fn walk_task(
                 });
             }
         }
-        // W8 Task 3. `tasks:` is NOT required -- `valids/pause-delay` writes
-        // none and the artifact published it with a 200. A `Pause` whose
-        // `behavior:`, `onPause:`, `tasks:` or `errors:` this executor does not
-        // reproduce (`executor::pause_gap`, the single source of which four) is
-        // an ERROR -- the user's ruling of 2026-10-11. It was a
-        // `not_yet_enforced` warning until then, which let the flow publish and
-        // start, and every execution of it stalled in `RUNNING` for ever:
-        // `build_plan` planned the task an opaque runnable, the worker claimed
-        // it and failed with `NotALeaf` before recording an outcome, and the
-        // reaper released the claim on every working timeout. As an error it
-        // is in `validate_for_run`, so publish refuses it and so does every
-        // start path (`build_plan`'s third gate, inside
+        // 9a Task 6. A `Pause` is a full flowable now: `tasks:`, `errors:`,
+        // `finally:`, `onPause:` and a valid `behavior:` all plan and run
+        // (`executor::pause_gap`, the single predicate both this and the
+        // planner ask). The one thing left is a **literal** `behavior:` outside
+        // `RESUME`/`WARN`/`CANCEL`/`FAIL` (D2): Kestra leaves the execution
+        // `RUNNING` for ever on one, a worker-resource footgun 9a refuses to
+        // reproduce, and it is known at plan time. An expression `behavior:` is
+        // resolved at runtime (an out-of-enum render FAILS the task) and is not
+        // a gap. As an error this is in `validate_for_run`, so publish refuses
+        // it and so does every start path (`build_plan`'s third gate, inside
         // `worker::start_execution_in_on` and the `Subflow` target's plan).
         TaskKind::Pause(p) => {
             if let Some(property) = crate::executor::pause_gap(p) {
-                // D14: Kestra's Pause has no `tasks` (`Pause.java:158`), so no
-                // package lifts it; the others are #9's (`keys::lift_of`).
-                let message = if property == "tasks" {
-                    format!(
-                        "task '{}' is a pause with 'tasks', which Kestra's Pause does not \
-                         have: it is an unknown property, refused on egret as Kestra refuses \
-                         it. Put the tasks after the Pause instead",
-                        task.id
-                    )
-                } else {
-                    format!(
-                        "task '{}' is a pause with '{property}', which egret does not \
-                         support: egret cannot run this task, so the flow cannot be \
-                         published or started. Remove '{property}', or use a plain Pause \
-                         (optionally bounded by pauseDuration or timeout). Roadmap package \
-                         #9 lifts it",
-                        task.id
-                    )
-                };
+                debug_assert_eq!(property, "behavior");
+                let literal = p
+                    .behavior
+                    .as_ref()
+                    .map(|b| b.source().trim().to_string())
+                    .unwrap_or_default();
                 report.errors.push(Finding {
-                    code: "unsupported_pause_property",
-                    message,
+                    code: "unsupported_pause_behavior",
+                    message: format!(
+                        "task '{}' is a pause with behavior '{literal}', which is not one of \
+                         RESUME, WARN, CANCEL or FAIL: egret refuses it at publish because \
+                         Kestra leaves the execution RUNNING for ever on an invalid value. \
+                         Use one of the four, or an expression that renders to one",
+                        task.id
+                    ),
                     path: format!("{path}.{property}"),
                 });
             }
@@ -4021,30 +4012,46 @@ mod tests {
 
     // -- Fix round 1 --
 
-    /// Finding 1 (CRITICAL), **as the 2026-10-11 ruling leaves it.** W8 Task 3
-    /// made a `Pause` run, bounded by `pauseDuration:`/`timeout:` or unbounded,
-    /// and kept a `not_yet_enforced` WARNING for a `Pause` declaring one of the
-    /// four properties `build_plan` does not reproduce. That warning let the
-    /// flow publish and start, and the execution then stalled in `RUNNING`
-    /// for ever: `pause_gap` planned the task an opaque runnable, no worker
-    /// could run it (`WorkerError::NotALeaf`), and the reaper released the
-    /// claim on every timeout.
-    ///
-    /// The ruling: such a `Pause` is a validation ERROR, so the editor shows
-    /// it, publish refuses it and every start path refuses it (they all go
-    /// through `build_plan`'s `validate_for_run` gate). Both directions are
-    /// asserted, because only the pair can fail for the right reason: a plain
-    /// pause (unbounded, `pauseDuration:`, `timeout:`) is valid and silent,
-    /// and each of the four is an error that names the property and says what
-    /// to do. `executor::pause_gap` stays the one predicate both sides ask.
+    /// Finding 1 (CRITICAL), **as 9a Task 6 leaves it.** 9a made `Pause` a full
+    /// flowable: `tasks:`, `errors:`, `finally:`, `onPause:` and a valid
+    /// `behavior:` all plan and run, so none is a validation error any more. The
+    /// ONE thing left is a **literal** `behavior:` outside the enum (D2): Kestra
+    /// leaves the execution `RUNNING` for ever on one, and it is known at plan
+    /// time, so it is an ERROR (`unsupported_pause_behavior`) the editor shows,
+    /// publish refuses and every start path refuses (`build_plan`'s
+    /// `validate_for_run` gate). Both directions are asserted, because only the
+    /// pair can fail for the right reason: a plain or full-flowable pause is
+    /// valid and silent, and an out-of-enum literal is the error.
+    /// `executor::pause_gap` stays the one predicate both sides ask.
     #[test]
-    fn a_pause_with_a_property_egret_does_not_run_is_an_error_and_a_plain_one_is_valid() {
+    fn a_pause_with_an_invalid_behavior_is_an_error_and_a_flowable_one_is_valid() {
         for spelling in ["io.kestra.plugin.core.flow.Pause", "core.pause"] {
-            // Valid and silent: the shapes this executor reproduces.
+            // Valid and silent: every shape this executor now reproduces.
             for (label, props) in [
                 ("unbounded", ""),
                 ("pauseDuration", "    pauseDuration: PT1S\n"),
                 ("timeout", "    timeout: PT1S\n"),
+                ("behavior-literal", "    pauseDuration: PT1S\n    behavior: FAIL\n"),
+                (
+                    "behavior-expression",
+                    "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
+                ),
+                (
+                    "onPause",
+                    "    pauseDuration: PT1S\n    onPause:\n      id: hi\n      type: io.kestra.plugin.core.log.Log\n      message: hi\n",
+                ),
+                (
+                    "tasks",
+                    "    pauseDuration: PT1S\n    tasks:\n      - id: after\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+                ),
+                (
+                    "errors",
+                    "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+                ),
+                (
+                    "finally",
+                    "    pauseDuration: PT1S\n    finally:\n      - id: fin\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+                ),
             ] {
                 let yaml = format!(
                     "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n{props}"
@@ -4057,85 +4064,40 @@ mod tests {
                 );
             }
 
-            // Refused: the four it does not.
-            for (property, props) in [
-                ("behavior", "    behavior: FAIL\n"),
-                (
-                    "onPause",
-                    "    onPause:\n      id: hi\n      type: io.kestra.plugin.core.log.Log\n      message: hi\n",
-                ),
-                (
-                    "tasks",
-                    "    tasks:\n      - id: after\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
-                ),
-                (
-                    "errors",
-                    "    errors:\n      - id: oops\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
-                ),
-            ] {
+            // Refused: a literal behavior outside RESUME/WARN/CANCEL/FAIL.
+            for bad in ["NOPE", "fail", "resume"] {
                 // NOT a `\`-continued literal: Rust's line continuation eats
                 // the next line's leading whitespace, and the first draft of
                 // this test lost the four spaces that make `pauseDuration:` a
                 // property of `gate` rather than a second mapping key.
                 let yaml = format!(
-                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n    pauseDuration: PT1S\n{props}"
+                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n    pauseDuration: PT1S\n    behavior: {bad}\n"
                 );
-                let f = parse(&yaml).unwrap_or_else(|e| panic!("{spelling}/{property}: {e:?}"));
+                let f = parse(&yaml).unwrap_or_else(|e| panic!("{spelling}/{bad}: {e:?}"));
                 let r = validate(&f);
                 let e = r
                     .errors
                     .iter()
-                    .find(|e| e.code == "unsupported_pause_property")
-                    .unwrap_or_else(|| {
-                        panic!("{spelling}/{property}: no error for 'gate': {r:?}")
-                    });
-                assert_eq!(e.path, format!("tasks.gate.{property}"), "{spelling}/{property}");
+                    .find(|e| e.code == "unsupported_pause_behavior")
+                    .unwrap_or_else(|| panic!("{spelling}/{bad}: no error for 'gate': {r:?}"));
+                assert_eq!(e.path, "tasks.gate.behavior", "{spelling}/{bad}");
                 assert!(
-                    e.message.contains(&format!("'{property}'")),
-                    "{spelling}/{property}: the error must name the property: {}",
+                    e.message.contains(&format!("behavior '{bad}'"))
+                        && e.message.contains("RESUME, WARN, CANCEL or FAIL"),
+                    "{spelling}/{bad}: the error must name the value and the enum: {}",
                     e.message
                 );
-                if property == "tasks" {
-                    // D14: not a Kestra property, refused permanently, no package.
-                    assert_eq!(
-                        e.message,
-                        "task 'gate' is a pause with 'tasks', which Kestra's Pause does not \
-                         have: it is an unknown property, refused on egret as Kestra refuses \
-                         it. Put the tasks after the Pause instead",
-                        "{spelling}/{property}"
-                    );
-                    assert!(!e.message.contains("Roadmap package"), "{}", e.message);
-                } else {
-                    // What to do: remove it, or use a plain pause; and who lifts it.
-                    assert!(
-                        e.message.contains(&format!("Remove '{property}'")),
-                        "{spelling}/{property}: {}",
-                        e.message
-                    );
-                    assert!(
-                        e.message.ends_with(
-                            "or use a plain Pause (optionally bounded by pauseDuration or \
-                             timeout). Roadmap package #9 lifts it"
-                        ),
-                        "{spelling}/{property}: {}",
-                        e.message
-                    );
-                }
-                // The stalling-run sentence of the old warning is gone: the
-                // flow can no longer reach a run, so it would be false.
-                assert!(!e.message.contains("stalls"), "{spelling}/{property}: {}", e.message);
                 assert!(
                     !r.warnings.iter().any(|w| w.path.starts_with("tasks.gate")),
-                    "{spelling}/{property}: an error, not also a warning: {r:?}"
+                    "{spelling}/{bad}: an error, not also a warning: {r:?}"
                 );
-                // The run-time gate refuses it too: it is not a save-only
-                // finding, so no start path can run it.
+                // The run-time gate refuses it too: not a save-only finding.
                 assert!(
                     validate_for_run(&f)
                         .errors
                         .iter()
-                        .any(|e| e.code == "unsupported_pause_property"),
-                    "{spelling}/{property}: validate_for_run must refuse it"
+                        .any(|e| e.code == "unsupported_pause_behavior"),
+                    "{spelling}/{bad}: validate_for_run must refuse it"
                 );
             }
         }
@@ -6918,15 +6880,20 @@ mod loop_output_tests {
     }
 
     #[test]
-    fn on_resume_ids_may_repeat_a_flow_input_id_and_the_other_pause_gaps_stay() {
+    fn on_resume_ids_may_repeat_a_flow_input_id_and_an_invalid_behavior_still_refuses() {
         let src = "id: f\nnamespace: a.b\ninputs:\n  - id: ok\n    type: STRING\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n";
         let flow = crate::spec::parse(src).expect("parses");
         assert!(crate::spec::validate_source(src, &flow).errors.is_empty());
-        let gap = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n    behavior: RESUME\n";
+        // 9a Task 6: a valid `behavior:` alongside `onResume:` is accepted.
+        let ok = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n    behavior: RESUME\n";
+        let flow = crate::spec::parse(ok).expect("parses");
+        assert!(crate::spec::validate_source(ok, &flow).errors.is_empty());
+        // A literal invalid behavior is still refused, at its property path.
+        let gap = "id: f\nnamespace: a.b\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Pause\n    onResume:\n      - id: ok\n        type: BOOL\n    behavior: NOPE\n";
         let flow = crate::spec::parse(gap).expect("parses");
         assert!(crate::spec::validate_source(gap, &flow)
             .errors
             .iter()
-            .any(|e| e.code == "unsupported_pause_property" && e.path == "tasks.p.behavior"));
+            .any(|e| e.code == "unsupported_pause_behavior" && e.path == "tasks.p.behavior"));
     }
 }

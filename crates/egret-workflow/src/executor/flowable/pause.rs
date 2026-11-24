@@ -224,14 +224,32 @@ fn resume_body(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, no
             state: RunState::Success,
         }]);
     };
+    let errors = plan.tasks[task].errors.as_slice();
+    let finally = plan.tasks[task].finally.as_slice();
+
+    // **9a Task 6: a failure deadline re-entered to drive its handlers.** The
+    // resumed arm is reached from two re-entries that differ by their command.
+    // A RESUME (`ReopenFlowable`) cleared `resume_with`, so a `None`/`SUCCESS`
+    // terminal is the RESUME path -- run the `tasks:` body. A
+    // `timeout:`/`behavior: FAIL|WARN` deadline (`ReenterPause`) KEPT it, so a
+    // non-`SUCCESS` terminal is the failure path -- run no body, drive `errors:`
+    // (on a failure) then `finally:`, and end the pause in that deadline
+    // terminal. `pause::drive`'s pre-9a answer for a bare pause is the `SUCCESS`
+    // + empty-`tasks:` corner of the RESUME path, unchanged.
+    let terminal = match state.runs[run].resume_with {
+        Some(Resume::Terminal { state: s, .. }) => s,
+        _ => RunState::Success,
+    };
+    if terminal != RunState::Success {
+        return drive_terminal(plan, state, run, errors, finally, terminal, now);
+    }
+
     if tasks.is_empty() {
         return Step::Commands(vec![Command::SetRunState {
             run,
             state: RunState::Success,
         }]);
     }
-    let errors = plan.tasks[task].errors.as_slice();
-    let finally = plan.tasks[task].finally.as_slice();
     match super::sequential::drive(plan, state, tasks, errors, finally, Some(run), now) {
         // **The body's `aggregate(tasks)` is softened by the Pause's own
         // `allowFailure:`/`allowWarning:`**, which is the mapping
@@ -253,6 +271,68 @@ fn resume_body(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, no
         }]),
         other => other,
     }
+}
+
+/// Drive a failed `Pause`'s `errors:`/`finally:` handlers, then end it in its
+/// deadline terminal (9a Task 6).
+///
+/// Reached from [`resume_body`] when the pause re-entered `RUNNING` on a
+/// `timeout:`/`behavior: FAIL|WARN` deadline ([`Command::ReenterPause`]), i.e.
+/// with a non-`SUCCESS` `terminal`. This is Kestra's
+/// `Execution.findTaskDependingFlowState`'s `terminalState == FAILED` branch
+/// (`Execution.java:595-599`), which was left out of
+/// [`super::current_list`](super::current_list) until #9 because egret's `Pause`
+/// ran no sub-list: a `FAILED` terminal runs the `errors:` handler, then
+/// `finally:` runs whatever the terminal, and the pause's own state stays the
+/// deadline terminal (never `aggregate`, so a succeeding handler does not
+/// upgrade a `FAILED` pause to `SUCCESS`). A `WARNING` deadline is not a failure,
+/// so it runs `finally:` alone. The handler runs hang off the pause run as their
+/// parent, one at a time, through the shared [`super::sequential::walk_errors`].
+fn drive_terminal(
+    plan: &Plan,
+    state: &ExecutionState,
+    run: RunIx,
+    errors: &[TaskIx],
+    finally: &[TaskIx],
+    terminal: RunState,
+    now: Tick,
+) -> Step {
+    let started = |list: &[TaskIx]| {
+        list.iter().any(|&t| {
+            run_of(state, Some(run), t).is_some_and(|ix| !state.runs[ix].history.is_empty())
+        })
+    };
+    let exhausted = |list: &[TaskIx]| {
+        list.iter()
+            .all(|&t| run_of(state, Some(run), t).is_some_and(|ix| super::is_terminal(state, ix)))
+    };
+    let end = || {
+        Step::Commands(vec![Command::SetRunState {
+            run,
+            state: terminal,
+        }])
+    };
+
+    // Once `finally:` has started, continue it to the end -- Kestra's
+    // "finally is already started, just continue it" (`Execution.java:589-593`).
+    if started(finally) {
+        return super::sequential::walk_errors(plan, state, finally, Some(run), now)
+            .unwrap_or_else(end);
+    }
+    // A FAILED pause runs its `errors:` handler first (`:601-613`). A WARNING
+    // deadline is not a failure, so it skips straight to `finally:`.
+    if terminal == RunState::Failed && !errors.is_empty() && !exhausted(errors) {
+        if let Some(step) = super::sequential::walk_errors(plan, state, errors, Some(run), now) {
+            return step;
+        }
+    }
+    // Then `finally:`, always (`:615-620`).
+    if !finally.is_empty() {
+        return super::sequential::walk_errors(plan, state, finally, Some(run), now)
+            .unwrap_or_else(end);
+    }
+    // No `finally:`: once `errors:` (if any) is done, end in the deadline terminal.
+    end()
 }
 
 /// Whether a `Pause`'s `onPause:` run exists and has not reached a terminal

@@ -432,18 +432,22 @@ fn pause_mark(state: &ExecutionState, work: &[Command]) -> Option<RunState> {
     // depending on which bound was written and both are ordinary terminals
     // everywhere else.
     //
-    // **Two commands do the moving.** A bare pause ends with a
+    // **Three commands do the moving.** A bare pause ends with a
     // `SetRunState { terminal }`; a `Pause` with a `tasks:` body (9a D4)
-    // re-enters `RUNNING` with a `Command::ReopenFlowable` to drive that body,
-    // and owes the execution the same `RESTARTED` the bare resume does
-    // (`CREATED RUNNING PAUSED RESTARTED RUNNING ...`). `ReopenFlowable` is also
-    // 7a's restart command, but that path builds its own batch and never
-    // reaches `pause_mark`; the only `ReopenFlowable` `advance` emits is this
-    // resume's.
+    // re-enters `RUNNING` with a `Command::ReopenFlowable` to drive that body;
+    // and a `Pause` that fails at its deadline but declares `errors:`/`finally:`
+    // (9a Task 6) re-enters `RUNNING` with a `Command::ReenterPause` to drive
+    // those handlers. All three owe the execution the same `RESTARTED` the bare
+    // resume does (`CREATED RUNNING PAUSED RESTARTED RUNNING ...`).
+    // `ReopenFlowable` is also 7a's restart command, but that path builds its
+    // own batch and never reaches `pause_mark`; the only `ReopenFlowable`/
+    // `ReenterPause` `advance` emits is this resume's.
     work.iter()
         .any(|c| {
             let run = match c {
-                Command::SetRunState { run, .. } | Command::ReopenFlowable { run, .. } => run,
+                Command::SetRunState { run, .. }
+                | Command::ReopenFlowable { run, .. }
+                | Command::ReenterPause { run } => run,
                 _ => return false,
             };
             state
@@ -528,11 +532,13 @@ mod tests {
             .collect()
     }
 
-    /// 9a Task 1 guard (Task 6, which lifts the refusal, replaces it): a `Pause`
-    /// the driver cannot run yet is still refused for a new start. Exactly the
-    /// three corpus flows hold one, and `validate_for_run` refuses each.
+    /// 9a Task 6 lifted the refusal, so the Task-1 census safety-net
+    /// (`every_corpus_pause_with_a_body_is_still_refused_for_a_new_start`) is
+    /// gone: exactly these three corpus flows carry a Pause body, and they
+    /// publish and run now. The population is still measured, for the graph
+    /// guard that narrows its skip to a Pause's `onPause:` task alone.
     #[test]
-    fn every_corpus_pause_with_a_body_is_still_refused_for_a_new_start() {
+    fn exactly_three_corpus_flows_carry_a_pause_body_and_none_is_refused() {
         let ids = corpus_pause_body_flows();
         assert_eq!(
             ids,
@@ -541,20 +547,16 @@ mod tests {
                 "valids/pause-errors-finally-after-execution",
                 "valids/pause_on_pause"
             ],
-            "the corpus population this guard judges; if it moves, re-measure"
+            "the corpus population; if it moves, re-measure"
         );
         for (id, source) in every_corpus_flow() {
             if !ids.contains(&id) {
                 continue;
             }
             let flow = crate::spec::parse(&source).unwrap();
-            let report = crate::spec::validate_for_run(&flow);
             assert!(
-                report
-                    .errors
-                    .iter()
-                    .any(|e| e.code == "unsupported_pause_property"),
-                "{id}: a Pause with a body must still be refused"
+                crate::spec::validate_for_run(&flow).errors.is_empty(),
+                "{id}: a Pause with a body is a full flowable now, not refused"
             );
         }
     }
@@ -682,29 +684,15 @@ mod tests {
             frozen.len()
         );
         let mut moved = Vec::new();
-        // The exemption holds only while these stay refused for a new start.
-        let pause_body_flows = corpus_pause_body_flows();
-        for (id, source) in every_corpus_flow() {
-            if pause_body_flows.contains(&id) {
-                let flow = crate::spec::parse(&source).unwrap();
-                assert!(
-                    crate::spec::validate_for_run(&flow)
-                        .errors
-                        .iter()
-                        .any(|e| e.code == "unsupported_pause_property"),
-                    "{id}: exempted from the layout prefix, so it must stay refused"
-                );
-            }
-        }
+        // 9a Task 6: the three Pause-body flows are no longer exempted. The
+        // frozen pre-#2 layout drew their `Pause` as a leaf at its own index
+        // with no children; the full flowable only APPENDS its body (tasks /
+        // errors / onPause / finally) after the pre-#2 nodes, so the prefix
+        // rule below (same index, id and kind; every old child still a child)
+        // holds for them as it does for every other flowable.
         for (id, old) in &frozen {
             let old: Vec<(usize, String, String, Vec<usize>)> =
                 serde_json::from_value(old.clone()).unwrap();
-            // 9a Task 1: a `Pause` declaring a body now plans as a `Pause`
-            // carrying it. Those three corpus flows are refused for every new
-            // start (`pause_gap`), so no live execution holds the old layout.
-            if pause_body_flows.contains(id) {
-                continue;
-            }
             let Some(new) = now.get(id) else {
                 moved.push(format!("{id}: planned before #2, not now"));
                 continue;
@@ -745,24 +733,22 @@ mod tests {
                 continue;
             };
             judged += 1;
-            // 9a loose end -- flow_graph draws a Pause-with-body as a leaf
-            // without its body; handled when the refusal is lifted (Task 6) /
-            // tracked as a 9a follow-up. Only flows `pause_gap` refuses are
-            // skipped, and only for the tasks planned beneath their `Pause`.
+            // 9a Task 6 NARROWED this skip. `flow_graph` now draws a
+            // Pause-with-body's `tasks:`/`errors:`/`finally:` as a cluster (it
+            // reuses the Sequential chain machinery), so those are judged like
+            // any other flowable's children. The ONE task it still does not draw
+            // is a `Pause`'s `onPause:`: validation gives it no path, so it has
+            // no uid, and drawing it would need a new path scheme and refusal
+            // mapping. ROADMAP 9a follow-up: draw the `onPause:` node. Until
+            // then this skips that single task (and anything the corpus might
+            // nest beneath it), nothing else.
             let mut under_pause = BTreeSet::new();
-            let mut stack: Vec<usize> = if plan_has_pause_body(&plan) {
-                let refused = crate::spec::validate_for_run(&flow)
-                    .errors
-                    .iter()
-                    .any(|e| e.code == "unsupported_pause_property");
-                assert!(refused, "{id}: skipped by the graph guard, so refused");
-                (0..plan.tasks.len())
-                    .filter(|&i| matches!(plan.tasks[i].kind, TaskKind::Pause { .. }))
-                    .flat_map(|i| plan.children_of(i))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let mut stack: Vec<usize> = (0..plan.tasks.len())
+                .filter_map(|i| match &plan.tasks[i].kind {
+                    TaskKind::Pause { on_pause, .. } => *on_pause,
+                    _ => None,
+                })
+                .collect();
             while let Some(i) = stack.pop() {
                 if under_pause.insert(i) {
                     stack.extend(plan.children_of(i));
@@ -4057,17 +4043,18 @@ mod tests {
             arms_probed.insert(arm);
         }
 
-        // The other side of `pause_gap`: refused at plan, never a tier.
+        // The other side of `pause_gap`: a literal INVALID behavior is refused
+        // at plan, never a tier (`pause_with_behavior` writes `behavior: NOPE`).
         assert_eq!(
             classify(&crate::spec::parse(pause_with_behavior).unwrap().tasks[0]),
             PlannedAs::Opaque
         );
         let refused = match build_plan(pause_with_behavior) {
-            Ok(_) => panic!("a Pause with `behavior:` must not plan"),
+            Ok(_) => panic!("a Pause with an invalid `behavior:` must not plan"),
             Err(e) => e,
         };
         assert!(
-            refused.message.starts_with("unsupported_pause_property:"),
+            refused.message.starts_with("unsupported_pause_behavior:"),
             "{}",
             refused.message
         );
@@ -4565,21 +4552,10 @@ mod tests {
                 "dependency_namespace_required",
             ],
         },
-        PublishedButRefused {
-            id: "valids/pause-behavior",
-            cause: "a `Pause` declaring `behavior:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `behavior:`. W8's",
-            codes: &["unsupported_pause_property"],
-        },
-        PublishedButRefused {
-            id: "valids/pause-errors-finally-after-execution",
-            cause: "a `Pause` declaring `errors:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `errors:`. W8's",
-            codes: &["unsupported_pause_property"],
-        },
-        PublishedButRefused {
-            id: "valids/pause_on_pause",
-            cause: "a `Pause` declaring `onPause:`. Kestra runs it; egret does not, and `executor::pause_gap` names it. Until the user's ruling of 2026-10-11 it planned an opaque runnable with a `not_yet_enforced` warning, and in production every execution of it stalled in `RUNNING` for ever (`NotALeaf`, reaped, reclaimed). The ruling made it the validation error `unsupported_pause_property`: a deliberate refusal, not an over-refusal to close, until egret runs `onPause:`. W8's",
-            codes: &["unsupported_pause_property"],
-        },
+        // 9a Task 6 removed the three `Pause` rows (`valids/pause-behavior`,
+        // `valids/pause-errors-finally-after-execution`, `valids/pause_on_pause`):
+        // a `Pause` with a body is a full flowable now, so none is refused and
+        // all three publish and run (see `LIVE`/`VALIDATE_REFUSED` in driver.rs).
         // no-silent-stall Task 1 (spec §3): 52 rows, one per flow this Kestra
         // published with 200 that the static refusals now refuse -- 4
         // `AllowFailure`, 4 `WorkingDirectory`, and 44 a type Kestra ships and
@@ -8391,70 +8367,49 @@ tasks:
         );
     }
 
-    /// **A `Pause` this executor does not reproduce is REFUSED, not planned.**
+    /// **A `Pause` body plans; only a literal invalid `behavior:` is refused.**
     ///
-    /// Until the 2026-10-11 ruling it was planned an opaque `Runnable` with a
-    /// `not_yet_enforced` warning, under `build_plan`'s standing rule for an
-    /// unimplemented flowable. For `AllowFailure` and `WorkingDirectory` that
-    /// rule is harmless: their opaque run is still claimed by nothing and the
-    /// warning says so. For a `Pause` it was not: the opaque run got a
-    /// `type_id`, the worker claimed it, `Claimed::input` failed with
-    /// `NotALeaf` before recording an outcome, and the reaper released it on
-    /// every working timeout, so the execution sat in `RUNNING` for ever. Now
-    /// `spec::validate` reports `unsupported_pause_property` and
-    /// `build_plan`'s `validate_for_run` gate refuses the flow, naming the
-    /// property, before any run exists.
-    ///
-    /// Five rows, one per property plus `behavior:` written as an EXPRESSION
-    /// (its value decides what the artifact does, and `pause_gap` decides at
-    /// plan time, so the dynamic form must be refused just like the literal).
-    ///
-    /// The control is the last row: the same flow with none of the four is a
-    /// `TaskKind::Pause`. Without it every row would pass under a `build_plan`
-    /// that refused every `Pause`.
+    /// 9a Task 6 lifted the body refusal: `tasks:`, `errors:`, `onPause:`, a
+    /// valid literal `behavior:` and an EXPRESSION `behavior:` all plan as a
+    /// `TaskKind::Pause` carrying them. The one thing `build_plan` still refuses
+    /// at plan is a **literal** `behavior:` outside RESUME/WARN/CANCEL/FAIL
+    /// (D2): Kestra leaves the execution `RUNNING` for ever on one, and it is
+    /// known at plan time, so `spec::validate` reports `unsupported_pause_behavior`
+    /// and the `validate_for_run` gate refuses the flow before any run exists.
     #[test]
-    fn a_pause_this_executor_does_not_reproduce_is_refused_at_plan() {
-        let rows: [(&str, &str); 5] = [
-            (
-                "tasks",
-                "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        \
-                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-            ),
-            (
-                "errors",
-                "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        \
-                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-            ),
-            ("behavior", "    pauseDuration: PT1S\n    behavior: FAIL\n"),
-            (
-                "behavior",
-                "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
-            ),
-            (
-                "onPause",
-                "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      \
-                 type: io.kestra.plugin.core.debug.Return\n      format: x\n",
-            ),
+    fn a_pause_body_plans_and_only_an_invalid_behavior_is_refused_at_plan() {
+        // Every shape that now plans.
+        let plans: [&str; 5] = [
+            "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            "    pauseDuration: PT1S\n    behavior: FAIL\n",
+            "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
+            "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      type: io.kestra.plugin.core.debug.Return\n      format: x\n",
         ];
-        for (property, props) in rows {
+        for props in plans {
             let src = pause_flow(props);
-            let err = match build_plan(&src) {
-                Ok(_) => panic!("{property}: a pause carrying it must not plan"),
-                Err(e) => e,
-            };
+            let plan = build_plan(&src).unwrap_or_else(|e| panic!("{props}: {}", e.message));
             assert!(
-                err.message.starts_with("unsupported_pause_property:"),
-                "{property}: refused by the right finding: {}",
-                err.message
-            );
-            assert!(
-                err.message.contains(&format!("[tasks.gate.{property}]")),
-                "{property}: the refusal names the property: {}",
-                err.message
+                matches!(plan.tasks[0].kind, TaskKind::Pause { .. }),
+                "{props}: {:?}",
+                plan.tasks[0].kind
             );
         }
 
-        // The control.
+        // The one refusal: a literal invalid behavior.
+        let src = pause_flow("    pauseDuration: PT1S\n    behavior: NOPE\n");
+        let err = match build_plan(&src) {
+            Ok(_) => panic!("an invalid literal behavior must not plan"),
+            Err(e) => e,
+        };
+        assert!(
+            err.message.starts_with("unsupported_pause_behavior:")
+                && err.message.contains("[tasks.gate.behavior]"),
+            "refused by the right finding at the right path: {}",
+            err.message
+        );
+
+        // The control: a bare pause.
         let src = pause_flow("    pauseDuration: PT1S\n");
         let plan = build_plan(&src).unwrap();
         assert_eq!(
@@ -8473,7 +8428,7 @@ tasks:
                     .warnings
                     .iter()
                     .any(|w| w.path.starts_with("tasks.gate")),
-            "a pause this executor DOES reproduce is valid and silent: {report:?}"
+            "a bare pause is valid and silent: {report:?}"
         );
     }
 

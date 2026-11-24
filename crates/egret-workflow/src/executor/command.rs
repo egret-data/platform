@@ -253,6 +253,23 @@ pub enum Command {
         run: RunIx,
         at: Tick,
     },
+    /// 9a Task 6: a `PAUSED` `Pause` re-enters `RUNNING` to drive its
+    /// `errors:`/`finally:` handlers after a `timeout:`/`behavior: FAIL|WARN`
+    /// deadline -- Kestra's `Execution.findTaskDependingFlowState`'s
+    /// `terminalState == FAILED` branch (`Execution.java:595-599`). Unlike
+    /// [`Command::ReopenFlowable`] it opens **no new attempt** (the golden for
+    /// `valids/pause-errors-finally-after-execution` records one attempt,
+    /// `CREATED RUNNING FAILED`, while the run history gains a second `RUNNING`)
+    /// and it **keeps** `resume_with`/`not_before`, so [`pause::drive`]'s resumed
+    /// arm reads the deadline terminal back and ends the pause in it once the
+    /// handlers are done. The run goes `RUNNING` and no retry waker touches a
+    /// `RUNNING` run (`claim::due_retries` wants `PAUSED`/`RETRYING`/`RETRIED`),
+    /// so keeping the paired `resume_with`/`not_before` is safe and migration
+    /// 0141's CHECK still holds (a `TERMINAL:*` discriminant with a non-NULL
+    /// deadline).
+    ReenterPause {
+        run: RunIx,
+    },
     SetRunState {
         run: RunIx,
         state: RunState,

@@ -191,6 +191,7 @@ fn named_run(cmd: &Command) -> Option<RunIx> {
         | Command::RecreateRun { run }
         | Command::EmptyRun { run }
         | Command::ReopenFlowable { run, .. }
+        | Command::ReenterPause { run }
         | Command::SetRunState { run, .. }
         | Command::CompleteRun { run, .. }
         | Command::FailSubflowOutputs { run, .. }

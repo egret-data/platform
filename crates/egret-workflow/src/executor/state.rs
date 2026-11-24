@@ -1099,6 +1099,12 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             r.not_before = None;
             r.resume_with = None;
         }
+        // 9a Task 6 -- see `Command::ReenterPause`. `RUNNING` on the RUN only,
+        // the same separation `PauseRun`/`RestartLoop` make (the attempt is not
+        // reopened, so it stays the single `CREATED RUNNING …` the golden
+        // records), and `resume_with`/`not_before` are KEPT so the resumed arm
+        // reads the deadline terminal back.
+        Command::ReenterPause { run } => state.runs[*run].history.push(RunState::Running),
         Command::SetExecutionState { state: s } => state.history.push(*s),
         // Nothing to record. A sub-execution is a different execution with its
         // own `ExecutionState`, and this one holds no field for it -- which is

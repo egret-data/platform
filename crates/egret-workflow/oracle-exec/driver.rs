@@ -851,7 +851,12 @@ const CREATE_REFUSED: usize = 4;
 /// (its `dependsOn` to `io.kestra.tests.trigger/other-flow`) leave
 /// [`VALIDATE_REFUSED`]. Measured, not assumed: the census line read `295 live,
 /// 46 draft-only (21 unported task type, 25 egret's own validate)`.
-const LIVE: usize = 295;
+///
+/// **295 -> 298 at 9a Task 6**: the Pause-with-body refusal is lifted, so
+/// `valids/pause-behavior`, `valids/pause-errors-finally-after-execution` and
+/// `valids/pause_on_pause` publish and run (they leave [`VALIDATE_REFUSED`],
+/// 25 -> 22).
+const LIVE: usize = 298;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -981,7 +986,13 @@ const UNKNOWN_TYPE_REFUSED: usize = 21;
 /// reference over-refusals, `valids/task-runif` and
 /// `valids/trigger-flow-listener-no-inputs`, publish live (see [`LIVE`]); no
 /// corpus flow is refused for a reference any more.
-const VALIDATE_REFUSED: usize = 25;
+///
+/// **25 -> 22 at 9a Task 6**: the three `Pause` flows the W7b Task 4b entry
+/// above added (`valids/pause-behavior`,
+/// `valids/pause-errors-finally-after-execution`, `valids/pause_on_pause`) are
+/// a full flowable now, so `unsupported_pause_property` refuses none of them;
+/// they publish live (their [`LIVE`] row moved 295 -> 298 with them).
+const VALIDATE_REFUSED: usize = 22;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.

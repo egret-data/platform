@@ -116,17 +116,21 @@ pub(crate) fn resume_paused(plan: &Plan, state: &ExecutionState, run: RunIx, now
     match resume {
         crate::executor::Resume::Never => Step::Waiting,
         crate::executor::Resume::Terminal { state: s, .. } => {
-            // **9a D4/D3: a RESUME of a `Pause` that has a `tasks:` body does
-            // not end the run here — it re-enters `RUNNING` to drive the body.**
-            // A manual resume ([`pause::release_now`]) and a `pauseDuration:`
-            // expiry both carry `SUCCESS`, which is the RESUME behaviour; the
-            // run then reaches [`pause::drive`]'s resumed arm next round and
-            // terminates on `aggregate(tasks)`. A `timeout:` expiry carries
-            // `FAILED`/`WARNING` (not `SUCCESS`) and ends the pause with no
-            // body, and a bare pause ends exactly as before. The deadline paths
-            // that map `behavior: WARN|CANCEL|FAIL` to a non-`SUCCESS` terminal
-            // are 9a Task 4; this gate (`SUCCESS` only) is forward-compatible
-            // with them.
+            // **9a D4/D3: a resumed `Pause` with a body re-enters `RUNNING` to
+            // drive it** rather than ending here. A manual resume
+            // ([`pause::release_now`]) and a `pauseDuration:` expiry carry
+            // `SUCCESS` (the RESUME behaviour), so the run reaches
+            // [`pause::drive`]'s resumed arm and runs its `tasks:` body,
+            // terminating on `aggregate(tasks)`. **9a Task 6: a `timeout:` /
+            // `behavior: FAIL` deadline carries `FAILED`/`WARNING`, and a pause
+            // that declares `errors:`/`finally:` must still re-enter `RUNNING`
+            // to drive those handlers** -- Kestra's
+            // `Execution.findTaskDependingFlowState`'s `terminalState == FAILED`
+            // branch (`Execution.java:595-599`), deferred until #9. The run then
+            // reaches [`pause::drive`]'s resumed arm, which reads its
+            // `resume_with` terminal and runs `errors:` (on a failure) then
+            // `finally:`, ending in that deadline terminal. A bare pause (no
+            // tasks/errors/finally) ends exactly as before.
             // `behavior: CANCEL` at the deadline ends the EXECUTION, as an
             // `Exit` with `CANCELLED` does (spec D2/D3).
             if s == RunState::Cancelled
@@ -137,11 +141,24 @@ pub(crate) fn resume_paused(plan: &Plan, state: &ExecutionState, run: RunIx, now
             {
                 return Step::Commands(crate::executor::exit::end_with(state, run, s));
             }
-            if s == RunState::Success {
-                if let TaskKind::Pause { tasks, .. } = &plan.tasks[state.runs[run].task].kind {
+            if let TaskKind::Pause { tasks, .. } = &plan.tasks[state.runs[run].task].kind {
+                let pt = &plan.tasks[state.runs[run].task];
+                if s == RunState::Success {
+                    // RESUME: run the `tasks:` body (9a D4). `ReopenFlowable`
+                    // opens a new attempt and clears `resume_with`, so
+                    // `pause::drive`'s resumed arm sees no terminal and drives
+                    // the body, ending on `aggregate(tasks)`.
                     if !tasks.is_empty() {
                         return Step::Commands(vec![Command::ReopenFlowable { run, at: now }]);
                     }
+                } else if !pt.errors.is_empty() || !pt.finally.is_empty() {
+                    // A `timeout:`/`behavior: FAIL|WARN` deadline runs no body,
+                    // but a pause with `errors:`/`finally:` must still drive those
+                    // handlers (9a Task 6). `ReenterPause` opens no new attempt
+                    // and KEEPS `resume_with`, so the resumed arm reads the
+                    // deadline terminal `s` back and ends the pause in it once the
+                    // handlers are done.
+                    return Step::Commands(vec![Command::ReenterPause { run }]);
                 }
             }
             Step::Commands(vec![Command::SetRunState { run, state: s }])
