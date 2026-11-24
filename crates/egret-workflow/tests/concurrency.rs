@@ -542,3 +542,51 @@ async fn force_run_starts_a_queued_execution_even_when_the_flow_is_at_its_limit(
         egret_workflow::worker::ForceRun::NotQueued("RUNNING".into())
     );
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_queued_restart_resumes_to_restarted_not_created(pool: sqlx::PgPool) {
+    // Arrange: limit 1. One live execution holds the slot; one QUEUED row whose
+    // history ends on RESTARTED (as a restart-in-place gated to QUEUED would).
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let live = start(&pool, ws, Some(flow), &src).await;
+    let queued = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, queued).await, "QUEUED");
+    // Force the QUEUED row to look like a gated restart.
+    sqlx::query("UPDATE workflow.executions SET history = $2 WHERE id = $1")
+        .bind(queued)
+        .bind(json!([
+            "CREATED",
+            "RUNNING",
+            "FAILED",
+            "RESTARTED",
+            "QUEUED"
+        ]))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Act: terminate the live one, free the slot, drain.
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', \
+         history = history || '[\"SUCCESS\"]'::jsonb WHERE id = $1",
+    )
+    .bind(live)
+    .execute(&pool)
+    .await
+    .unwrap();
+    egret_workflow::worker::concurrency::concurrency_sweep(&pool)
+        .await
+        .unwrap();
+
+    // Then: it left the queue; the history pop restored RESTARTED, so the
+    // resumed run's history does NOT reset to ["CREATED"].
+    assert_ne!(state(&pool, queued).await, "QUEUED");
+    let h = history(&pool, queued).await;
+    let arr = h.as_array().unwrap();
+    assert!(
+        arr.iter().any(|s| s == "RESTARTED"),
+        "pop must keep the RESTARTED history, got {h}"
+    );
+    assert_ne!(arr, &vec![json!("CREATED")], "must not reset to CREATED");
+}
