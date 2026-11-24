@@ -3439,11 +3439,16 @@ async fn walk_from<'a>(conn: &mut PgConnection, mut steps: Vec<Step<'a>>) -> Res
             Step::Job(Job::Settle(frame)) => steps.push(Step::Frame(frame)),
             Step::Job(Job::Report(settled)) => steps.push(Step::Loop(settled)),
             // The restarts it opens run after its frame and that frame's
-            // whole tail: they are pushed below it.
+            // whole tail: they are pushed below it. Package 8c Task 4: a start
+            // the gate QUEUED has no frame to walk (it persisted the resets and
+            // stopped before the drive), so `open` returns `None` and this pushes
+            // nothing.
             Step::Job(Job::Restart(opening)) => {
                 let (frame, after) = Box::pin(super::restart::open(conn, *opening)).await?;
                 steps.extend(after.into_iter().rev().map(Step::Job));
-                steps.push(Step::Frame(Box::new(frame)));
+                if let Some(frame) = frame {
+                    steps.push(Step::Frame(Box::new(frame)));
+                }
             }
             Step::Job(Job::Complete(completion)) => {
                 if let Some(frame) = Box::pin(subflow::open_completion(conn, completion)).await? {
@@ -4345,11 +4350,11 @@ async fn start_execution_in_on(
     new: NewExecution<'_>,
 ) -> Result<Uuid> {
     let born_failed = new.born_failed;
-    let (ctx, admit) = insert_execution_gated(conn, gate, new, true).await?;
+    let (ctx, disposition) = insert_execution_gated(conn, gate, new, true).await?;
     // Package 8a: a start over its flow's concurrency limit is parked in
     // `QUEUED`. It has no task run, so nothing claims it; the drain
     // (`concurrency::concurrency_drain`) starts it when a slot frees.
-    if admit == Admit::Queue {
+    if matches!(disposition, Disposition::Queue) {
         return Ok(ctx.id);
     }
     let empty = ExecutionState::new(&ctx.plan);
@@ -4360,7 +4365,7 @@ async fn start_execution_in_on(
     // no run is created, the history is `[CREATED, FAILED]`, and the settle's
     // outbox hook, parent notification and every other terminal path see an
     // ordinary FAILED transition.
-    if born_failed || admit == Admit::Fail {
+    if born_failed || matches!(disposition, Disposition::Terminal(RunState::Failed)) {
         apply(
             &mut state,
             &Command::SetExecutionState {
@@ -4372,7 +4377,7 @@ async fn start_execution_in_on(
     // same way, `CANCELLED`, with no run. Neither it nor a FAIL start held a
     // slot, so the drain this settle runs finds the flow still at its limit
     // and promotes nothing.
-    if admit == Admit::Cancel {
+    if matches!(disposition, Disposition::Terminal(RunState::Cancelled)) {
         apply(
             &mut state,
             &Command::SetExecutionState {
@@ -4395,8 +4400,77 @@ pub(super) async fn settle_new(conn: &mut PgConnection, ctx: &ExecutionCtx) -> R
     settle(conn, ctx, &empty, empty.clone(), Tick(0), None).await
 }
 
-/// Start a `QUEUED` execution (package 8a's drain): the row goes back to
-/// `CREATED` and takes the first settle a fresh start takes, so it runs
+/// What a gate outcome means for the row about to be written or reopened
+/// (package 8c section 5): the state + history to persist, and what the caller
+/// does next.
+pub(super) enum Disposition {
+    /// Settle normally (drive).
+    Run,
+    /// Leave `QUEUED`; the drain resumes it. Do not settle.
+    Queue,
+    /// Terminalize through settle with this state, no task run (D5).
+    Terminal(RunState),
+}
+
+pub(super) struct AdmitRow {
+    pub state: String,
+    pub history: serde_json::Value,
+    pub disposition: Disposition,
+}
+
+/// `current_history` is the row's history before the gate (`["CREATED"]` for a
+/// new start/replay/subflow child; the live history for a restart-in-place).
+pub(super) fn admit_row(current_history: &[serde_json::Value], admit: Admit) -> AdmitRow {
+    let unchanged = || {
+        (
+            current_history
+                .last()
+                .and_then(|v| v.as_str())
+                .unwrap_or("CREATED")
+                .to_string(),
+            serde_json::Value::Array(current_history.to_vec()),
+        )
+    };
+    match admit {
+        Admit::Run => {
+            let (state, history) = unchanged();
+            AdmitRow {
+                state,
+                history,
+                disposition: Disposition::Run,
+            }
+        }
+        Admit::Queue => {
+            let mut h = current_history.to_vec();
+            h.push(serde_json::json!("QUEUED"));
+            AdmitRow {
+                state: "QUEUED".into(),
+                history: serde_json::Value::Array(h),
+                disposition: Disposition::Queue,
+            }
+        }
+        // CANCEL/FAIL keep the pre-terminal state and let the caller's settle
+        // write the terminal (born-FAILED style, D5), so the terminal hooks see
+        // an ordinary transition.
+        Admit::Cancel | Admit::Fail => {
+            let (state, history) = unchanged();
+            let terminal = if admit == Admit::Cancel {
+                RunState::Cancelled
+            } else {
+                RunState::Failed
+            };
+            AdmitRow {
+                state,
+                history,
+                disposition: Disposition::Terminal(terminal),
+            }
+        }
+    }
+}
+
+/// Start a `QUEUED` execution (package 8a's drain): the row restores its
+/// pre-queue state (`CREATED`, or `RESTARTED` for a restart) by popping the
+/// trailing `QUEUED` from its history, and takes the first settle a fresh start takes, so it runs
 /// identically. The one difference is the clock: the settle's tick is the
 /// real time since `created_at` (what `load` reads) rather than `Tick(0)`,
 /// because the execution waited in the queue and every deadline is measured
@@ -4406,9 +4480,29 @@ pub(super) async fn promote_queued(
     execution: Uuid,
     stack: Stack,
 ) -> Result<()> {
+    // The drain restores the state the execution would have had if it had not
+    // been queued: pop the trailing `QUEUED` the gate appended (package 8c D3),
+    // leaving CREATED for a fresh start/replay/subflow child and RESTARTED for a
+    // restart. Then `load` reads whatever runs exist and the settle resumes
+    // identically.
+    let history: serde_json::Value =
+        sqlx::query_scalar("SELECT history FROM workflow.executions WHERE id = $1")
+            .bind(execution)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    let mut hist: Vec<serde_json::Value> = history.as_array().cloned().unwrap_or_default();
+    if hist.last().and_then(|v| v.as_str()) == Some("QUEUED") {
+        hist.pop();
+    }
+    let restored = hist
+        .last()
+        .and_then(|v| v.as_str())
+        .unwrap_or("CREATED")
+        .to_string();
     sqlx::query(EXECUTION_STATE_UPDATE)
-        .bind("CREATED")
-        .bind(serde_json::json!(["CREATED"]))
+        .bind(&restored)
+        .bind(serde_json::Value::Array(hist))
         .bind(execution)
         .bind(false)
         .bind(false)
@@ -4417,6 +4511,59 @@ pub(super) async fn promote_queued(
         .map_err(db_err)?;
     let (ctx, state, now) = load(conn, execution, stack).await?;
     settle(conn, &ctx, &state, state.clone(), now, None).await
+}
+
+/// **Package 8c Task 4: a gated restart / partial replay over a QUEUE limit.**
+/// The reset runs and the `RESTARTED` transition are persisted exactly as the
+/// pre-`drive` half of a settle's [`begin`] would write them, then `QUEUED` is
+/// appended to the execution's history and NOTHING drives.
+///
+/// The reset runs stay `CREATED`, which the worker's claim query never takes (it
+/// claims only `RUNNING`/`KILLING`), so the execution sits `QUEUED` with no
+/// claimable run until the drain ([`promote_queued`]) pops the trailing `QUEUED`
+/// — restoring `RESTARTED` — and the resumed settle drives the reset runs
+/// identically to an ungated restart (the drain's `load` reads exactly these
+/// rows).
+///
+/// `before` is the execution's loaded state; `state` is the same with the
+/// restart's reset commands applied, its history ending `RESTARTED`.
+/// `queued_history` is that history with `QUEUED` appended ([`admit_row`]). The
+/// `marks.observe` here is `begin`'s own first observe, at `ctx.seq + 1`, so the
+/// reset runs' `created_seq`/attempt ends match what a non-queued restart writes.
+pub(super) async fn queue_restart(
+    conn: &mut PgConnection,
+    ctx: &ExecutionCtx,
+    before: &ExecutionState,
+    mut state: ExecutionState,
+    now: Tick,
+    queued_history: serde_json::Value,
+) -> Result<()> {
+    let mut marks = Marks::default();
+    let seq = ctx.seq + 1;
+    marks.observe(before, &state, seq);
+    stamps::stamp_attempt_ends(before, &mut state, now);
+    persist(conn, ctx, before, &state, None, &marks, seq).await?;
+    // The `RESTARTED` transition fires its Flow-trigger event now, as Kestra
+    // emits the `RESTARTED` message before the concurrency handler queues it; the
+    // drain's settle then fires `RUNNING`, so a queued restart's listeners see
+    // the same `[RESTARTED, RUNNING]` pair, in order, as an ungated one.
+    outbox(conn, ctx, before, &state).await?;
+    // Append `QUEUED` over the persisted `RESTARTED`. `QUEUED` is a DB-only
+    // execution state (no `RunState`), so it is written directly rather than
+    // through `apply`/`persist`. It is neither terminal nor `RUNNING`, so the
+    // stamp booleans are both false: `stamp_set!` keeps `started_at` (the
+    // history still holds `RUNNING`) and, `QUEUED` being non-terminal, leaves
+    // `ended_at` NULL — correct for an execution waiting to restart.
+    sqlx::query(EXECUTION_STATE_UPDATE)
+        .bind("QUEUED")
+        .bind(&queued_history)
+        .bind(ctx.id)
+        .bind(false)
+        .bind(false)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    Ok(())
 }
 
 /// **What every start refuses a source for**, before any row is written: it
@@ -4468,20 +4615,33 @@ pub(super) async fn insert_execution(
     Ok(insert_execution_gated(conn, gate, new, false).await?.0)
 }
 
+/// [`insert_execution`] through the flow-concurrency gate (package 8c): the
+/// row is born at the admitted state and the [`Disposition`] says what the
+/// caller does next.
+pub(super) async fn insert_execution_admitted(
+    conn: &mut PgConnection,
+    gate: &Gate,
+    new: NewExecution<'_>,
+) -> Result<(ExecutionCtx, Disposition)> {
+    insert_execution_gated(conn, gate, new, true).await
+}
+
 /// [`insert_execution`] with the flow-concurrency gate (package 8a) when
 /// `gated`: under the flow's advisory lock, in THIS transaction, the row is
 /// born `QUEUED` instead of `CREATED` if the flow is at its limit with
 /// `behavior: QUEUE`; with `CANCEL`/`FAIL` the start is admitted as
 /// `Admit::Cancel`/`Admit::Fail` and the caller terminalizes it (`CANCELLED`/
 /// `FAILED`, no run) through its first settle. Only a
-/// fresh start is gated (`start_execution_in_on`); a copy (replay/restart)
-/// is not, and a born-`FAILED` start never is.
+/// fresh start and a whole replay are gated here (the replay via
+/// [`insert_execution_admitted`]); the walk-based paths (partial replay,
+/// restart-on-source, restart-in-place) are gated in `restart::open`/`gate_admit`.
+/// A born-`FAILED` start is never gated.
 async fn insert_execution_gated(
     conn: &mut PgConnection,
     gate: &Gate,
     new: NewExecution<'_>,
     gated: bool,
-) -> Result<(ExecutionCtx, Admit)> {
+) -> Result<(ExecutionCtx, Disposition)> {
     let NewExecution {
         workspace_id,
         flow_id,
@@ -4516,18 +4676,11 @@ async fn insert_execution_gated(
                 limit: Some(limit),
                 behavior,
             }),
-        ) => concurrency_admit(conn, fid, *limit, *behavior).await?,
+        ) => concurrency_admit(conn, fid, *limit, *behavior, None).await?,
         _ => Admit::Run,
     };
-    let (row_state, row_history) = match admit {
-        Admit::Run => ("CREATED", serde_json::json!(["CREATED"])),
-        Admit::Queue => ("QUEUED", serde_json::json!(["CREATED", "QUEUED"])),
-        // Package 8b: a CANCEL/FAIL start is inserted `CREATED` and
-        // terminalized by its first settle (`start_execution_in_on`), exactly
-        // as a born-FAILED start, so the terminal hooks (outbox, flow-trigger
-        // listeners, alerts) see an ordinary transition.
-        Admit::Cancel | Admit::Fail => ("CREATED", serde_json::json!(["CREATED"])),
-    };
+    let row = admit_row(&[serde_json::json!("CREATED")], admit);
+    let (row_state, row_history) = (row.state, row.history);
 
     let inputs = if inputs.is_object() {
         inputs
@@ -4623,7 +4776,7 @@ async fn insert_execution_gated(
             depth: 0,
             gate: Some(gate.clone()),
         },
-        admit,
+        row.disposition,
     ))
 }
 

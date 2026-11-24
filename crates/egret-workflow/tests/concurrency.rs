@@ -542,3 +542,775 @@ async fn force_run_starts_a_queued_execution_even_when_the_flow_is_at_its_limit(
         egret_workflow::worker::ForceRun::NotQueued("RUNNING".into())
     );
 }
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_queued_restart_resumes_to_restarted_not_created(pool: sqlx::PgPool) {
+    // Arrange: limit 1. One live execution holds the slot; one QUEUED row whose
+    // history ends on RESTARTED (as a restart-in-place gated to QUEUED would).
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let live = start(&pool, ws, Some(flow), &src).await;
+    let queued = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, queued).await, "QUEUED");
+    // Force the QUEUED row to look like a gated restart.
+    sqlx::query("UPDATE workflow.executions SET history = $2 WHERE id = $1")
+        .bind(queued)
+        .bind(json!([
+            "CREATED",
+            "RUNNING",
+            "FAILED",
+            "RESTARTED",
+            "QUEUED"
+        ]))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Act: terminate the live one, free the slot, drain.
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', \
+         history = history || '[\"SUCCESS\"]'::jsonb WHERE id = $1",
+    )
+    .bind(live)
+    .execute(&pool)
+    .await
+    .unwrap();
+    egret_workflow::worker::concurrency::concurrency_sweep(&pool)
+        .await
+        .unwrap();
+
+    // Then: it left the queue; the history pop restored RESTARTED, so the
+    // resumed run's history does NOT reset to ["CREATED"].
+    assert_ne!(state(&pool, queued).await, "QUEUED");
+    let h = history(&pool, queued).await;
+    let arr = h.as_array().unwrap();
+    assert!(
+        arr.iter().any(|s| s == "RESTARTED"),
+        "pop must keep the RESTARTED history, got {h}"
+    );
+    assert_ne!(arr, &vec![json!("CREATED")], "must not reset to CREATED");
+}
+
+/// Force an execution terminal `SUCCESS` (so it may be replayed and frees its slot).
+async fn finish_success(pool: &sqlx::PgPool, id: Uuid) {
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', \
+         history = history || '[\"SUCCESS\"]'::jsonb, ended_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .expect("finish");
+}
+
+/// A whole replay of `from`, through the public worker entry.
+async fn whole_replay(pool: &sqlx::PgPool, ws: Uuid, from: Uuid, src: &str) -> Uuid {
+    let owner: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_one(pool)
+        .await
+        .expect("owner");
+    egret_workflow::worker::replay_execution(
+        pool,
+        &egret_workflow::worker::ReplayRequest {
+            workspace_id: ws,
+            from,
+            source: src,
+            kind: egret_workflow::worker::ReplayKind::Whole,
+            inputs: egret_workflow::worker::ReplayInputs::Reuse,
+            started_by: owner,
+            id: Uuid::new_v4(),
+            input_files: Vec::new(),
+        },
+    )
+    .await
+    .expect("replay")
+    .expect("not refused")
+}
+
+/// Limit 1: one execution finished (to replay), one live holding the slot.
+/// The whole replay is born `terminal` (or QUEUED), no task run.
+async fn whole_replay_over_limit(pool: sqlx::PgPool, behavior: &str, terminal: &str) {
+    let src = flow_src(Some((1, behavior)));
+    let (ws, flow) = setup(&pool, &src).await;
+    let old = start(&pool, ws, Some(flow), &src).await;
+    finish_success(&pool, old).await;
+    let live = start(&pool, ws, Some(flow), &src).await;
+
+    let replayed = whole_replay(&pool, ws, old, &src).await;
+
+    assert_eq!(state(&pool, replayed).await, terminal);
+    assert_eq!(run_count(&pool, replayed).await, 0, "no task run");
+    if terminal == "QUEUED" {
+        assert_eq!(history(&pool, replayed).await, json!(["CREATED", "QUEUED"]));
+        // The drain resumes it: free the slot, sweep, and it leaves QUEUED
+        // with its replay identity (attempt, labels, origin) intact.
+        let snapshot = |id| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (i32, Option<serde_json::Value>, Option<Uuid>)>(
+                    "SELECT attempt_number, labels, replayed_from_execution_id \
+                     FROM workflow.executions WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot")
+            }
+        };
+        let before = snapshot(replayed).await;
+        assert_eq!(before.2, Some(old), "born as a replay of the old execution");
+        finish_success(&pool, live).await;
+        egret_workflow::worker::concurrency::concurrency_sweep(&pool)
+            .await
+            .expect("sweep");
+        assert_eq!(
+            state(&pool, replayed).await,
+            "RUNNING",
+            "the drain resumed it"
+        );
+        assert!(
+            run_count(&pool, replayed).await > 0,
+            "its first settle made runs"
+        );
+        assert_eq!(
+            snapshot(replayed).await,
+            before,
+            "attempt/labels/origin kept"
+        );
+    } else {
+        assert_eq!(history(&pool, replayed).await, json!(["CREATED", terminal]));
+        assert!(
+            has_ended_at(&pool, replayed).await,
+            "a terminal start stamps ended_at"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_whole_replay_over_the_limit_is_queued(pool: sqlx::PgPool) {
+    whole_replay_over_limit(pool, "QUEUE", "QUEUED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_whole_replay_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
+    whole_replay_over_limit(pool, "CANCEL", "CANCELLED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_whole_replay_over_a_fail_limit_is_failed(pool: sqlx::PgPool) {
+    whole_replay_over_limit(pool, "FAIL", "FAILED").await;
+}
+
+// A copy (partial replay from a task) over a full limit WAS ungated through
+// Task 3 (soft overshoot) and is now gated by Task 4: see
+// `a_partial_replay_over_the_limit_is_queued_then_resumes` and
+// `a_partial_replay_over_a_cancel_limit_is_cancelled` below.
+
+// ---- Task 3 (8c): the subflow child is gated on the CHILD flow's limit -----
+
+const PARENT_SRC: &str = "id: parent\nnamespace: t\ntasks:\n  - id: s\n    \
+     type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: child\n    wait: true\n";
+
+fn child_src(behavior: &str) -> String {
+    format!(
+        "id: child\nnamespace: t\nconcurrency:\n  limit: 1\n  behavior: {behavior}\n\
+         tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    )
+}
+
+/// File a second flow in an existing workspace.
+async fn add_flow(pool: &sqlx::PgPool, ws: Uuid, src: &str) -> Uuid {
+    let user: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_one(pool)
+        .await
+        .expect("owner");
+    let flow = egret_workflow::spec::parse(src).expect("parses");
+    let input = egret_workflow::CreateFlowInput {
+        namespace: flow.namespace.clone(),
+        flow_id: flow.id.clone(),
+        source: src.to_string(),
+        plan: serde_json::to_value(&flow).expect("serialises"),
+        folder_id: None,
+    };
+    egret_workflow::FlowRepo::new(Db { pool: pool.clone() })
+        .create(ws, egret_core::UserId(user), &input)
+        .await
+        .expect("file the flow")
+        .id
+}
+
+/// Child flow at its limit (one live execution), then the parent runs.
+/// Returns (ws, child_flow, holder, parent, child).
+async fn parent_over_full_child(
+    pool: &sqlx::PgPool,
+    behavior: &str,
+) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
+    let csrc = child_src(behavior);
+    let (ws, child_flow) = setup(pool, &csrc).await;
+    let hold = start(pool, ws, Some(child_flow), &csrc).await;
+    let parent_flow = add_flow(pool, ws, PARENT_SRC).await;
+    // The Subflow spawns its child inside the parent's first settle; no tick,
+    // which would also finish the holder and free the slot.
+    let parent = start(pool, ws, Some(parent_flow), PARENT_SRC).await;
+    let child: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE flow_id = $1 AND trigger_execution_id = $2",
+    )
+    .bind(child_flow)
+    .bind(parent)
+    .fetch_one(pool)
+    .await
+    .expect("the child exists");
+    (ws, child_flow, hold, parent, child)
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_over_the_childs_limit_is_queued(pool: sqlx::PgPool) {
+    // Act
+    let (_ws, _cf, _hold, parent, child) = parent_over_full_child(&pool, "QUEUE").await;
+
+    // Assert
+    assert_eq!(state(&pool, child).await, "QUEUED");
+    assert_eq!(history(&pool, child).await, json!(["CREATED", "QUEUED"]));
+    assert_eq!(
+        run_count(&pool, child).await,
+        0,
+        "a queued child runs no task"
+    );
+    assert_eq!(
+        state(&pool, parent).await,
+        "RUNNING",
+        "the parent keeps waiting on a non-terminal child"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_queued_subflow_child_runs_when_the_slot_frees_and_the_parent_completes(
+    pool: sqlx::PgPool,
+) {
+    // Arrange
+    let (_ws, _cf, hold, parent, child) = parent_over_full_child(&pool, "QUEUE").await;
+
+    // Act: the holder finishes through the worker, which drains the child.
+    tick(&pool, 1).await;
+    tick(&pool, 5).await;
+
+    // Assert
+    assert_eq!(state(&pool, hold).await, "SUCCESS");
+    assert_eq!(state(&pool, child).await, "SUCCESS");
+    assert_eq!(state(&pool, parent).await, "SUCCESS");
+}
+
+async fn subflow_child_terminal(
+    pool: sqlx::PgPool,
+    behavior: &str,
+    terminal: &str,
+    expected_parent: &str,
+) {
+    // Act
+    let (_ws, _cf, _hold, parent, child) = parent_over_full_child(&pool, behavior).await;
+
+    // Assert
+    assert_eq!(state(&pool, child).await, terminal);
+    assert_eq!(
+        run_count(&pool, child).await,
+        0,
+        "a terminal child runs no task"
+    );
+    // Pins the parent's reaction to the terminal child.
+    assert_eq!(
+        state(&pool, parent).await,
+        expected_parent,
+        "parent outcome over a {terminal} child"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
+    // Pins existing Subflow behaviour: a CANCELLED child does not fail the
+    // parent. A later change to that is noticed here.
+    subflow_child_terminal(pool, "CANCEL", "CANCELLED", "SUCCESS").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_over_a_fail_limit_is_failed(pool: sqlx::PgPool) {
+    // A FAILED child propagates to the parent (transmitFailed).
+    subflow_child_terminal(pool, "FAIL", "FAILED", "FAILED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_under_the_limit_runs(pool: sqlx::PgPool) {
+    // Arrange: nothing holds the child's slot.
+    let csrc = child_src("QUEUE");
+    let (ws, child_flow) = setup(&pool, &csrc).await;
+    let parent_flow = add_flow(&pool, ws, PARENT_SRC).await;
+    let parent = start(&pool, ws, Some(parent_flow), PARENT_SRC).await;
+
+    // Act
+    tick(&pool, 3).await;
+
+    // Assert
+    let child: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE flow_id = $1 AND trigger_execution_id = $2",
+    )
+    .bind(child_flow)
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .expect("child");
+    assert_ne!(state(&pool, child).await, "QUEUED");
+    assert_eq!(state(&pool, parent).await, "SUCCESS");
+}
+
+// ---- Task 4 (8c): the walk-based starts (restart-in-place, partial replay) --
+
+/// Drive `n` task runs through the REAL worker, FAILING every task, so a
+/// one-task execution reaches `FAILED` through the real `settle`.
+async fn tick_failing(pool: &sqlx::PgPool, n: usize) {
+    egret_workflow::worker::tick(pool, n, &common::Answering(false))
+        .await
+        .expect("tick");
+}
+
+/// How many of `id`'s task runs are `RUNNING` — the "not claimable" invariant
+/// (the worker's claim query only ever takes `RUNNING`/`KILLING` runs).
+async fn running_run_count(pool: &sqlx::PgPool, id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs WHERE execution_id = $1 AND state = 'RUNNING'",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .expect("running runs")
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_in_place_over_the_limit_is_queued_then_resumes(pool: sqlx::PgPool) {
+    // Arrange: limit 1. A FAILED execution to restart; a live one holding the slot.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let failed = start(&pool, ws, Some(flow), &src).await;
+    tick_failing(&pool, 3).await;
+    assert_eq!(state(&pool, failed).await, "FAILED");
+    let live = start(&pool, ws, Some(flow), &src).await; // holds the slot
+    assert_eq!(state(&pool, live).await, "RUNNING");
+
+    // Act: restart the failed execution while over the limit.
+    egret_workflow::worker::restart_execution(&pool, failed)
+        .await
+        .unwrap();
+
+    // Then: it is QUEUED (not RESTARTED/RUNNING); the history records the
+    // RESTARTED it would have taken, and no run is RUNNING (the reset run is
+    // CREATED, which the claim query never takes — the safety invariant).
+    assert_eq!(state(&pool, failed).await, "QUEUED");
+    let h = history(&pool, failed).await;
+    let arr = h.as_array().unwrap();
+    assert_eq!(arr.last().unwrap(), "QUEUED");
+    assert!(arr.iter().any(|s| s == "RESTARTED"), "history was {h}");
+    assert_eq!(
+        running_run_count(&pool, failed).await,
+        0,
+        "a QUEUED restart leaves no RUNNING run"
+    );
+
+    // And: freeing the slot drains it back to a real restart.
+    finish_success(&pool, live).await;
+    egret_workflow::worker::concurrency::concurrency_sweep(&pool)
+        .await
+        .unwrap();
+    assert_ne!(state(&pool, failed).await, "QUEUED");
+    let h = history(&pool, failed).await;
+    assert!(
+        h.as_array().unwrap().iter().any(|s| s == "RESTARTED"),
+        "the pop kept RESTARTED, got {h}"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_in_place_over_a_fail_limit_is_failed(pool: sqlx::PgPool) {
+    let src = flow_src(Some((1, "FAIL")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let failed = start(&pool, ws, Some(flow), &src).await;
+    tick_failing(&pool, 3).await;
+    assert_eq!(state(&pool, failed).await, "FAILED");
+    let _live = start(&pool, ws, Some(flow), &src).await;
+    egret_workflow::worker::restart_execution(&pool, failed)
+        .await
+        .unwrap();
+    // Re-failed by the gate, through settle (no drive).
+    assert_eq!(state(&pool, failed).await, "FAILED");
+    assert_eq!(
+        running_run_count(&pool, failed).await,
+        0,
+        "a FAILED restart drives nothing"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_in_place_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
+    let src = flow_src(Some((1, "CANCEL")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let failed = start(&pool, ws, Some(flow), &src).await;
+    tick_failing(&pool, 3).await;
+    assert_eq!(state(&pool, failed).await, "FAILED");
+    let _live = start(&pool, ws, Some(flow), &src).await;
+    egret_workflow::worker::restart_execution(&pool, failed)
+        .await
+        .unwrap();
+    assert_eq!(state(&pool, failed).await, "CANCELLED");
+    assert_eq!(running_run_count(&pool, failed).await, 0);
+}
+
+/// A restart in place of a FAILED execution UNDER the limit still runs
+/// (the gate does not queue when a slot is free).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_restart_in_place_under_the_limit_runs(pool: sqlx::PgPool) {
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let failed = start(&pool, ws, Some(flow), &src).await;
+    tick_failing(&pool, 3).await;
+    assert_eq!(state(&pool, failed).await, "FAILED");
+
+    // No live holder: the slot is free, so the restart drives.
+    egret_workflow::worker::restart_execution(&pool, failed)
+        .await
+        .unwrap();
+    assert_ne!(state(&pool, failed).await, "QUEUED");
+    assert!(
+        running_run_count(&pool, failed).await > 0 || state(&pool, failed).await == "SUCCESS",
+        "the restart drove its reset run"
+    );
+}
+
+/// A partial replay (from a task run of a finished execution) over the limit is
+/// QUEUED with its copied prefix, then drained to a correct resume.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_partial_replay_over_the_limit_is_queued_then_resumes(pool: sqlx::PgPool) {
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let old = start(&pool, ws, Some(flow), &src).await;
+    tick(&pool, 1).await;
+    assert_eq!(state(&pool, old).await, "SUCCESS");
+    let run_a: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(old)
+    .fetch_one(&pool)
+    .await
+    .expect("run a");
+    let live = start(&pool, ws, Some(flow), &src).await; // holds the slot
+    assert_eq!(state(&pool, live).await, "RUNNING");
+    let owner: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_one(&pool)
+        .await
+        .expect("owner");
+
+    // Act: replay from task a while over the limit.
+    let new = egret_workflow::worker::replay_execution(
+        &pool,
+        &egret_workflow::worker::ReplayRequest {
+            workspace_id: ws,
+            from: old,
+            source: &src,
+            kind: egret_workflow::worker::ReplayKind::FromTaskRun(run_a),
+            inputs: egret_workflow::worker::ReplayInputs::Reuse,
+            started_by: owner,
+            id: Uuid::new_v4(),
+            input_files: Vec::new(),
+        },
+    )
+    .await
+    .expect("replay")
+    .expect("not refused");
+
+    // Then: QUEUED with the copied prefix present, RESTARTED recorded, no run
+    // RUNNING.
+    assert_eq!(state(&pool, new).await, "QUEUED");
+    let h = history(&pool, new).await;
+    let arr = h.as_array().unwrap();
+    assert_eq!(arr.last().unwrap(), "QUEUED");
+    assert!(arr.iter().any(|s| s == "RESTARTED"), "history was {h}");
+    assert!(
+        run_count(&pool, new).await > 0,
+        "the copied runs exist for the drain to resume"
+    );
+    assert_eq!(
+        running_run_count(&pool, new).await,
+        0,
+        "a QUEUED partial replay leaves no RUNNING run"
+    );
+
+    // And: freeing the slot drains it to a resume that completes.
+    finish_success(&pool, live).await;
+    egret_workflow::worker::concurrency::concurrency_sweep(&pool)
+        .await
+        .unwrap();
+    assert_ne!(state(&pool, new).await, "QUEUED");
+    tick(&pool, 5).await;
+    assert_eq!(state(&pool, new).await, "SUCCESS");
+}
+
+/// A partial replay over a CANCEL limit terminalizes through settle.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_partial_replay_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
+    let src = flow_src(Some((1, "CANCEL")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let old = start(&pool, ws, Some(flow), &src).await;
+    tick(&pool, 1).await;
+    let run_a: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(old)
+    .fetch_one(&pool)
+    .await
+    .expect("run a");
+    let _live = start(&pool, ws, Some(flow), &src).await;
+    let owner: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_one(&pool)
+        .await
+        .expect("owner");
+
+    let new = egret_workflow::worker::replay_execution(
+        &pool,
+        &egret_workflow::worker::ReplayRequest {
+            workspace_id: ws,
+            from: old,
+            source: &src,
+            kind: egret_workflow::worker::ReplayKind::FromTaskRun(run_a),
+            inputs: egret_workflow::worker::ReplayInputs::Reuse,
+            started_by: owner,
+            id: Uuid::new_v4(),
+            input_files: Vec::new(),
+        },
+    )
+    .await
+    .expect("replay")
+    .expect("not refused");
+
+    assert_eq!(state(&pool, new).await, "CANCELLED");
+    assert_eq!(running_run_count(&pool, new).await, 0);
+}
+
+/// A `concurrency: {limit, behavior: QUEUE}` flow whose single `Loop` iteration
+/// fails.
+fn loop_src(behavior: &str) -> String {
+    format!(
+        "id: lc\nnamespace: t\nconcurrency:\n  limit: 1\n  behavior: {behavior}\n\
+         tasks:\n  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\"]'\n    \
+         tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: x\n"
+    )
+}
+
+/// The Task-4 review finding: a restart that reopens a `Loop` (D8 iteration
+/// restarts, which live in `restart::open`) must NOT be queued over a QUEUE
+/// limit. The drain resumes via `promote_queued`'s plain settle, which never
+/// re-enters `open`, so a queued-then-drained loop restart would reopen the Loop
+/// run WITHOUT restarting its failing iteration — a silently-wrong result.
+/// Instead it SOFT-OVERSHOOTS (runs now, driving the iteration restart), which
+/// spec §9 sanctions for this rare intractable sub-case.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_reopening_restart_over_the_limit_soft_overshoots(pool: sqlx::PgPool) {
+    let src = loop_src("QUEUE");
+    let (ws, flow) = setup(&pool, &src).await;
+    let failed = start(&pool, ws, Some(flow), &src).await;
+    for _ in 0..30 {
+        if state(&pool, failed).await == "FAILED" {
+            break;
+        }
+        tick_failing(&pool, 8).await;
+    }
+    assert_eq!(state(&pool, failed).await, "FAILED");
+    // The failing iteration row (a Loop sub-execution).
+    let iter: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 \
+           AND loop_index IS NOT NULL ORDER BY loop_index DESC LIMIT 1",
+    )
+    .bind(failed)
+    .fetch_one(&pool)
+    .await
+    .expect("the failing iteration");
+    assert_eq!(state(&pool, iter).await, "FAILED");
+
+    // A live holder occupies the flow's only slot.
+    let _live = start(&pool, ws, Some(flow), &src).await;
+
+    // Act: restart the loop execution while over the limit.
+    egret_workflow::worker::restart_execution(&pool, failed)
+        .await
+        .unwrap();
+
+    // Then: soft-overshoot — it ran now (not left QUEUED) and its failing
+    // iteration was restarted in place (D8), not silently skipped.
+    assert_ne!(
+        state(&pool, failed).await,
+        "QUEUED",
+        "a loop-reopening restart soft-overshoots instead of queueing"
+    );
+    let ih = history(&pool, iter).await;
+    assert!(
+        ih.as_array().unwrap().iter().any(|s| s == "RESTARTED"),
+        "the failing iteration was restarted in place, got {ih}"
+    );
+}
+
+/// A loop-reopening restart over a CANCEL limit still terminalizes (a cancelled
+/// restart restarts nothing, so the D8 concern does not apply).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_reopening_restart_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
+    let src = loop_src("CANCEL");
+    let (ws, flow) = setup(&pool, &src).await;
+    let failed = start(&pool, ws, Some(flow), &src).await;
+    for _ in 0..30 {
+        if state(&pool, failed).await == "FAILED" {
+            break;
+        }
+        tick_failing(&pool, 8).await;
+    }
+    assert_eq!(state(&pool, failed).await, "FAILED");
+    let _live = start(&pool, ws, Some(flow), &src).await;
+
+    egret_workflow::worker::restart_execution(&pool, failed)
+        .await
+        .unwrap();
+    assert_eq!(state(&pool, failed).await, "CANCELLED");
+}
+
+// ---- Task 5: 8b residual race pins -------------------------------------------
+
+/// Live = neither terminal nor `QUEUED`, the limit's own definition.
+async fn live_count(pool: &sqlx::PgPool, flow: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions \
+         WHERE flow_id = $1 AND NOT workflow.state_is_terminal(state) AND state <> 'QUEUED'",
+    )
+    .bind(flow)
+    .fetch_one(pool)
+    .await
+    .expect("live")
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_bulk_force_run_over_the_limit_loses_nothing_and_the_drain_counts_correctly(
+    pool: sqlx::PgPool,
+) {
+    // Arrange: limit 1; one RUNNING and three QUEUED.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let running = start(&pool, ws, Some(flow), &src).await;
+    let queued: Vec<Uuid> = {
+        let mut v = Vec::new();
+        for _ in 0..3 {
+            v.push(start(&pool, ws, Some(flow), &src).await);
+        }
+        v
+    };
+    assert_eq!(live_count(&pool, flow).await, 1);
+
+    // Act: force-run two of the three, crossing the limit (1 -> 3 live).
+    for id in &queued[..2] {
+        let out = egret_workflow::worker::force_run(&pool, ws, *id)
+            .await
+            .expect("force-run");
+        assert_eq!(out, egret_workflow::worker::ForceRun::Started);
+    }
+
+    // Assert: the bypass is real and the untouched one is still parked.
+    assert_eq!(live_count(&pool, flow).await, 3);
+    assert_eq!(state(&pool, queued[2]).await, "QUEUED");
+
+    // Drain: each tick finishes one execution. The drain must not promote the
+    // parked one while any other is live (live >= limit), only after the last.
+    let mut parked_promoted_early = false;
+    for _ in 0..3 {
+        tick(&pool, 1).await;
+        let others_live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workflow.executions WHERE id = ANY($1) \
+             AND NOT workflow.state_is_terminal(state)",
+        )
+        .bind(vec![running, queued[0], queued[1]])
+        .fetch_one(&pool)
+        .await
+        .expect("others");
+        if others_live > 0 && state(&pool, queued[2]).await != "QUEUED" {
+            parked_promoted_early = true;
+        }
+    }
+    assert!(!parked_promoted_early, "drain promoted over a live pool");
+
+    // Finally nothing is lost: all four end SUCCESS once the parked one runs.
+    tick(&pool, 3).await;
+    for id in [running, queued[0], queued[1], queued[2]] {
+        assert_eq!(state(&pool, id).await, "SUCCESS", "{id}");
+    }
+    assert_eq!(live_count(&pool, flow).await, 0);
+}
+
+/// Advisory locks held in this database by backends other than the caller.
+async fn foreign_advisory_locks(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted \
+         AND pid <> pg_backend_pid() \
+         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("pg_locks")
+}
+
+/// The ABBA 8b's deadlock-retry absorbs, built with explicit lock ordering.
+/// `A` plays a settle-drain-style mutator (row lock, then the flow's advisory
+/// lock). `B` is the real `force_run` (advisory, then row). `A` takes the row
+/// first; `B` is only released once it holds the advisory lock (observed in
+/// `pg_locks`, not a sleep), and `A` requests the advisory lock only after
+/// that, so the cycle is certain. Postgres picks a victim; whichever it is,
+/// both must complete and the final state must be correct.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_row_then_advisory_mutator_and_force_run_deadlock_and_both_complete(pool: sqlx::PgPool) {
+    // Arrange: limit 1, one RUNNING, one QUEUED target.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let running = start(&pool, ws, Some(flow), &src).await;
+    let target = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, target).await, "QUEUED");
+
+    // A: take the target's row lock first, hold it.
+    let mut a = pool.begin().await.expect("begin A");
+    sqlx::query("SELECT id FROM workflow.executions WHERE id = $1 FOR UPDATE")
+        .bind(target)
+        .fetch_one(&mut *a)
+        .await
+        .expect("A row lock");
+
+    // B: force-run the target; it takes the advisory lock, then blocks on A's row.
+    let b = tokio::spawn({
+        let pool = pool.clone();
+        async move { egret_workflow::worker::force_run(&pool, ws, target).await }
+    });
+    while foreign_advisory_locks(&pool).await == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    // A now asks for the advisory lock B holds: the ABBA is closed.
+    let a_advisory = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(flow)
+        .execute(&mut *a)
+        .await;
+    let a_done = match a_advisory {
+        Ok(_) => a.commit().await.is_ok(),
+        Err(_) => false, // A was the victim; its transaction is aborted.
+    };
+
+    // Assert: B completes (rerun by the retry if it was the victim) and starts the row.
+    let out = b.await.expect("join B").expect("force-run survives");
+    assert_eq!(out, egret_workflow::worker::ForceRun::Started);
+    assert_eq!(state(&pool, target).await, "RUNNING");
+    assert_eq!(state(&pool, running).await, "RUNNING");
+    // A neither hung nor was left half-done: it committed, or was the victim.
+    // That it returned at all proves the cycle was broken by a deadlock abort
+    // (with no deadlock, A would wait on B's advisory lock, B on A's row, forever).
+    let _ = a_done;
+}

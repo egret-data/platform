@@ -51,11 +51,19 @@ pub enum Admit {
 /// The running pool is every execution of the flow that is neither terminal
 /// (`workflow.state_is_terminal`, the one list of terminal states) nor
 /// `QUEUED`.
+///
+/// `exclude` is the execution being gated, when its own row already exists and
+/// is itself live (package 8c Task 4: a walk-based start — a partial replay or
+/// a restart-on-source — is gated AFTER its new row is inserted `CREATED`, so
+/// it would otherwise count itself). A fresh start and a subflow child gate
+/// BEFORE their row exists and pass `None`; a restart-in-place's row is
+/// `FAILED` (never counted) so the exclusion is a no-op for it.
 pub async fn concurrency_admit(
     tx: &mut PgConnection,
     flow_id: Uuid,
     limit: i32,
     behavior: ConcurrencyBehavior,
+    exclude: Option<Uuid>,
 ) -> Result<Admit> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
         .bind(flow_id)
@@ -64,9 +72,11 @@ pub async fn concurrency_admit(
         .map_err(db_err)?;
     let live: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM workflow.executions \
-         WHERE flow_id = $1 AND NOT workflow.state_is_terminal(state) AND state <> 'QUEUED'",
+         WHERE flow_id = $1 AND NOT workflow.state_is_terminal(state) AND state <> 'QUEUED' \
+           AND ($2::uuid IS NULL OR id <> $2)",
     )
     .bind(flow_id)
+    .bind(exclude)
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;

@@ -5319,6 +5319,53 @@ async fn unqueue_refuses_a_non_terminal_target_and_a_non_queued_execution() {
 }
 
 #[tokio::test]
+async fn unqueue_refuses_an_unknown_state_with_the_coded_error() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let queued = exec_in(&db, ws, user, "QUEUED").await;
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{queued}/unqueue?state=bogus"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    assert_eq!(
+        common::json(res).await["code"],
+        "unqueue_state_not_terminal"
+    );
+    assert_eq!(state_of(&db, queued).await, "QUEUED");
+}
+
+#[tokio::test]
+async fn unqueue_and_force_run_by_ids_cap_at_max_bulk() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let app = common::app(&db).await;
+    let many: Vec<Uuid> = (0..=egret_workflow::bulk::MAX_BULK)
+        .map(|_| Uuid::new_v4())
+        .collect();
+    for action in ["unqueue", "force-run"] {
+        let res = common::post(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{action}/by-ids"),
+            user,
+            serde_json::json!({"ids": many}),
+        )
+        .await;
+        assert_eq!(res.status(), 400, "{action}");
+        assert!(
+            common::json(res).await["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("too_many"),
+            "{action}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn unqueue_by_ids_is_all_or_nothing() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = bulk_manager(&db).await;

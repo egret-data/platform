@@ -99,12 +99,13 @@ use serde_json::{json, Value};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
+use super::concurrency::Admit;
 use super::render::Surface;
 use super::{claim, WorkerError};
 use crate::executor::{
     apply, build_plan, Command, ExecutionState, RunIx, RunState, TaskIx, TaskKind,
 };
-use crate::models::{Flow, Subflow, TaskKind as ModelTaskKind};
+use crate::models::{Concurrency, Flow, Subflow, TaskKind as ModelTaskKind};
 use crate::runners::{render_str, RenderContext};
 use crate::trigger::flow::DEFAULT_MAX_EXECUTION_DEPTH;
 
@@ -548,14 +549,29 @@ pub(super) async fn spawn_one(
     // refusal rolls the row back and fails this run naming the input, the way
     // a target that does not resolve fails it above. The parent's run is the
     // author's to fix, never the worker's.
+    //
+    // Package 8c: the child is gated on the CHILD flow's own `concurrency:`.
+    // The admit takes the child flow's advisory lock, held to the end of this
+    // transaction, so it sits BEFORE the savepoint (a rollback of the savepoint
+    // must not release it) and the count and the INSERT are one atomic step.
+    let admit = match child.concurrency.as_ref() {
+        Some(Concurrency {
+            limit: Some(limit),
+            behavior,
+        }) => {
+            super::concurrency::concurrency_admit(conn, child_flow, *limit, *behavior, None).await?
+        }
+        _ => Admit::Run,
+    };
+    let row = claim::admit_row(&[json!("CREATED")], admit);
     let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
     let child_id: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
                 trigger_execution_id, trigger_run_ix, inputs, execution_depth, secret_inputs, ",
         super::stamps::stamp_columns!(),
-        ") VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9,$10, ",
-        super::stamps::stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
+        ") VALUES ($1,$2,$3,$4,$5,$11,$12::jsonb,$6,$7,$8,$9,$10, ",
+        super::stamps::stamp_values!("$11", "$12"),
         ") RETURNING id",
     ))
     .bind(ctx.workspace_id)
@@ -568,6 +584,8 @@ pub(super) async fn spawn_one(
     .bind(&inputs)
     .bind(child_depth)
     .bind(secret_inputs)
+    .bind(&row.state)
+    .bind(&row.history)
     .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
@@ -620,7 +638,29 @@ pub(super) async fn spawn_one(
     // nests inside its own (`claim::Frame`'s re-entrancy). The walk runs them
     // where the inline calls ran.
     let wait = sub.wait;
-    let mut jobs = vec![claim::Job::Settle(Box::new(claim::Frame::first(child_ctx)))];
+    // Package 8c: a child over a QUEUE limit stays `QUEUED` with no first
+    // settle (the drain resumes it, and its terminal settle notifies the
+    // parent); one over a CANCEL/FAIL limit is terminalized by its first
+    // settle with no task run. Either way the parent's `Subflow` run reads the
+    // child's state like any other.
+    let mut jobs = Vec::new();
+    match row.disposition {
+        claim::Disposition::Run => {
+            jobs.push(claim::Job::Settle(Box::new(claim::Frame::first(child_ctx))));
+        }
+        claim::Disposition::Queue => {}
+        claim::Disposition::Terminal(state) => {
+            let empty = ExecutionState::new(&child_ctx.plan);
+            let mut terminal = empty.clone();
+            apply(&mut terminal, &Command::SetExecutionState { state });
+            jobs.push(claim::Job::Settle(Box::new(claim::Frame::loaded(
+                child_ctx,
+                empty,
+                terminal,
+                crate::executor::Tick(0),
+            ))));
+        }
+    }
     if !wait {
         jobs.push(claim::Job::Complete(Completion {
             execution_id: ctx.id,

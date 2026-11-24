@@ -28,7 +28,10 @@ use super::claim::{self, NewExecution, Stack};
 use super::kill::{is_deadlock, DEADLOCK_RETRIES};
 use super::restart::{self, CopyOp, REPLAY_LABEL_KEY, REPLAY_LABEL_VALUE};
 use super::txn::{transaction, Gate, InTxn};
-use crate::executor::{CopiedRuns, CopyRefusal, CopySelection, MatchFault, Plan, TaskKind};
+use crate::executor::{
+    apply, Command, CopiedRuns, CopyRefusal, CopySelection, ExecutionState, MatchFault, Plan,
+    TaskKind, Tick,
+};
 
 /// What [`replay_execution`] is asked to do. The route has scoped `from` to
 /// the caller's workspace and chosen `source` (D6, S6).
@@ -206,44 +209,49 @@ async fn replay_locked(
 
     // 9. The row: `check_start` judges the chosen source with the caller
     // (D8), and FILE inputs are checked.
-    let ctx = claim::insert_execution(
-        conn,
-        gate,
-        NewExecution {
-            workspace_id: req.workspace_id,
-            flow_id: old.flow_id,
-            source: req.source,
-            inputs,
-            trigger: None,
-            scheduled_date: None,
-            trigger_execution_id: None,
-            execution_depth: 0,
-            flow_trigger_event_id: None,
-            born_failed: false,
-            replayed_from_execution_id: Some(req.from),
-            id: Some(req.id),
-            input_files: req.input_files.clone(),
-            labels,
-            backfill_id: None,
-            // The column holds the run's WHOLE variables value and wins over
-            // the source's `variables:` at render time. A replay follows
-            // Kestra `applyNewRevision` (`ES:514-517`, user decision
-            // 2026-11-14): it travels only on the frozen source; on any
-            // other source, NULL, so that source's `variables:` apply. A
-            // restart on a source carries it, as Kestra's restart on a
-            // revision does: `restart(.., revision)` never calls
-            // `applyNewRevision` (`ES:353-368`) and `Execution.childExecution`
-            // copies `this.variables` (user decision 2026-11-14, final
-            // review I2).
-            variables: if req.kind == ReplayKind::RestartOnSource || req.source == old_ctx.source {
-                old.variables.clone()
-            } else {
-                None
-            },
-            started_by: Some(req.started_by),
+    // Only a whole replay is gated here (package 8c); a copy drives through the
+    // walk, which Task 4 gates.
+    let new = NewExecution {
+        workspace_id: req.workspace_id,
+        flow_id: old.flow_id,
+        source: req.source,
+        inputs,
+        trigger: None,
+        scheduled_date: None,
+        trigger_execution_id: None,
+        execution_depth: 0,
+        flow_trigger_event_id: None,
+        born_failed: false,
+        replayed_from_execution_id: Some(req.from),
+        id: Some(req.id),
+        input_files: req.input_files.clone(),
+        labels,
+        backfill_id: None,
+        // The column holds the run's WHOLE variables value and wins over
+        // the source's `variables:` at render time. A replay follows
+        // Kestra `applyNewRevision` (`ES:514-517`, user decision
+        // 2026-11-14): it travels only on the frozen source; on any
+        // other source, NULL, so that source's `variables:` apply. A
+        // restart on a source carries it, as Kestra's restart on a
+        // revision does: `restart(.., revision)` never calls
+        // `applyNewRevision` (`ES:353-368`) and `Execution.childExecution`
+        // copies `this.variables` (user decision 2026-11-14, final
+        // review I2).
+        variables: if req.kind == ReplayKind::RestartOnSource || req.source == old_ctx.source {
+            old.variables.clone()
+        } else {
+            None
         },
-    )
-    .await?;
+        started_by: Some(req.started_by),
+    };
+    let (ctx, disposition) = if req.kind == ReplayKind::Whole {
+        claim::insert_execution_admitted(conn, gate, new).await?
+    } else {
+        (
+            claim::insert_execution(conn, gate, new).await?,
+            claim::Disposition::Run,
+        )
+    };
     // Package 7d D6 (S6): the copy carries the whole visible list when the
     // old execution's labels were replaced, so its flag goes with it. Before
     // the first settle, which is the first render.
@@ -263,7 +271,19 @@ async fn replay_locked(
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
-        claim::settle_new(conn, &ctx).await?;
+        match disposition {
+            // Over a QUEUE limit: the row stays QUEUED, no task; the drain
+            // (`promote_queued`) resumes it.
+            claim::Disposition::Queue => {}
+            // Over a CANCEL/FAIL limit: terminalize through the first settle.
+            claim::Disposition::Terminal(state) => {
+                let empty = ExecutionState::new(&ctx.plan);
+                let mut terminal = empty.clone();
+                apply(&mut terminal, &Command::SetExecutionState { state });
+                claim::settle(conn, &ctx, &empty, terminal, Tick(0), None).await?;
+            }
+            claim::Disposition::Run => claim::settle_new(conn, &ctx).await?,
+        }
         return Ok(Ok(ctx.id));
     };
 
