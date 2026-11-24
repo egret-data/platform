@@ -203,15 +203,14 @@ fn slot(plan: &Plan, state: &ExecutionState, run: RunIx) -> Option<Slot> {
                 TaskKind::Parallel { tasks, .. } => {
                     v.push((Role::Tasks, Shape::Parallel, tasks.clone()))
                 }
-                // 9a: a `Pause` runs its `onPause:` task, then (after the
-                // resume) its `tasks:` body, one sequential chain.
-                TaskKind::Pause {
-                    tasks, on_pause, ..
-                } => v.push((
-                    Role::Tasks,
-                    Shape::Chain,
-                    on_pause.iter().chain(tasks).copied().collect(),
-                )),
+                // 9a: a `Pause`'s `tasks:` body is one sequential chain under the
+                // pause run (after the resume). Its `onPause:` task is NOT listed
+                // here: that run is a PARENTLESS sibling (`CreateRun { parent:
+                // None }` in `flowable::pause::drive`), so `slot()` looks it up
+                // through the `parent == None` arm above, not under the pause --
+                // chaining it here would be dead (no run with `parent ==
+                // Some(pause)` ever carries the `onPause:` task).
+                TaskKind::Pause { tasks, .. } => v.push((Role::Tasks, Shape::Chain, tasks.clone())),
                 TaskKind::If { then_, else_, .. } => {
                     v.push((Role::Tasks, Shape::Chain, then_.clone()));
                     v.push((Role::Tasks, Shape::Chain, else_.clone()));

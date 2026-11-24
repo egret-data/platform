@@ -662,8 +662,22 @@ mod tests {
     /// back at `:4393`). A list #2 adds may only be APPENDED: an execution that
     /// was running at deploy time is re-planned from its own source at its next
     /// claim, and a shifted index would hand its runs another task's spec.
-    /// `EGRET_WRITE_PLAN_LAYOUT=1` rewrites the fixture; that is allowed only in
-    /// Task A1, at `68c9f4de`, before any planner change.
+    /// `EGRET_WRITE_PLAN_LAYOUT=1` rewrites the fixture; it was first written in
+    /// Task A1 (`68c9f4de`, before any planner change).
+    ///
+    /// **9a Task 6 RE-ANCHORED three entries, and that is honest rather than
+    /// append-only.** `valids/pause-behavior`,
+    /// `valids/pause-errors-finally-after-execution` and `valids/pause_on_pause`
+    /// were hard-REFUSED from 2026-10-11 until 9a Task 6 (an opaque `Pause` with a
+    /// body, `unsupported_pause_property`): they had no live execution, so no
+    /// stored `task_ix` was ever written against their pre-9a layout, and there
+    /// is no append-only history to preserve for them. 9a makes them a full
+    /// flowable, so their entries were rewritten to the 9a plan -- and for
+    /// `pause-errors-finally-after-execution` that was NOT a pure append (its
+    /// errors handler `logError` takes index 1 and the top-level `log` shifts to
+    /// 2). The rewritten snapshot is the NEW anchor: the append-only invariant
+    /// below holds for every change to these flows AFTER 9a, and they stay
+    /// guarded like every other LIVE flow (they are not exempted).
     #[test]
     fn the_plan_before_end_hooks_is_a_prefix_of_every_plan_after() {
         let path = concat!(
@@ -687,12 +701,14 @@ mod tests {
             frozen.len()
         );
         let mut moved = Vec::new();
-        // 9a Task 6: the three Pause-body flows are no longer exempted. The
-        // frozen pre-#2 layout drew their `Pause` as a leaf at its own index
-        // with no children; the full flowable only APPENDS its body (tasks /
-        // errors / onPause / finally) after the pre-#2 nodes, so the prefix
-        // rule below (same index, id and kind; every old child still a child)
-        // holds for them as it does for every other flowable.
+        // 9a Task 6: the three Pause-body flows are guarded here, NOT exempted.
+        // Their frozen entries are the 9a layout this package re-anchored them to
+        // (see the doc above): they were refused and never live before 9a, so
+        // there was no pre-9a stored plan to carry forward, and for
+        // `pause-errors-finally-after-execution` the 9a layout is not an append of
+        // the old one (its `logError` took index 1). From this anchor on, the
+        // prefix rule below (same index, id and kind; every old child still a
+        // child) must hold for them as it does for every other live flow.
         for (id, old) in &frozen {
             let old: Vec<(usize, String, String, Vec<usize>)> =
                 serde_json::from_value(old.clone()).unwrap();
