@@ -135,6 +135,34 @@ pub(super) async fn concurrency_drain(
     Ok(promoted)
 }
 
+/// **Force-run** (package 8b): start the `QUEUED` execution `id` of `flow_id`
+/// now, WITHOUT the drain's `live < limit` guard, so it runs even when the
+/// flow is at or over its limit. It takes the same per-flow advisory lock as
+/// [`concurrency_admit`] / [`concurrency_drain`] (held to the end of the
+/// caller's transaction), so it serializes with them and slot accounting
+/// stays consistent: the flow is simply transiently over its limit.
+pub(super) async fn concurrency_force_start(
+    tx: &mut PgConnection,
+    stack: &Stack,
+    flow_id: Uuid,
+    id: Uuid,
+) -> Result<()> {
+    take_flow_lock(tx, flow_id).await?;
+    DRAINING
+        .scope(flow_id, promote_queued(tx, id, stack.clone()))
+        .await
+}
+
+/// Take the flow's advisory lock for the rest of the transaction.
+pub(super) async fn take_flow_lock(tx: &mut PgConnection, flow_id: Uuid) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(flow_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
 /// `source`'s `concurrency: {limit, behavior: QUEUE}` limit, if it has one.
 fn queue_limit(source: &str) -> Option<i32> {
     match crate::spec::parse(source).ok()?.concurrency? {

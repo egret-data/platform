@@ -85,6 +85,7 @@ mod copy;
 mod delete;
 mod flow_outputs;
 mod force_close;
+mod force_run;
 pub mod handlers;
 pub mod k8s;
 mod kill;
@@ -158,6 +159,7 @@ pub use copy::{
     replay_execution, replay_would_refuse, ReplayInputs, ReplayKind, ReplayRefused, ReplayRequest,
 };
 pub use delete::{delete_execution, delete_would_refuse, DeleteRefused, DeleteRequest, Deleted};
+pub use force_run::{force_run, force_run_refusal, ForceRun};
 pub use kill::{
     kill_execution, kill_execution_reporting, kill_refusal, kill_would_refuse, KillOutcome,
 };

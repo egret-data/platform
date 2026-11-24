@@ -6174,3 +6174,140 @@ async fn delete_bulk_paths_do_not_collide_with_the_single_delete() {
     assert_eq!(common::json(res).await["count"], 1);
     assert!(!exists(&db, bulk_one).await);
 }
+
+// -- force-run (package 8b) --
+
+#[tokio::test]
+async fn force_run_starts_a_queued_execution_and_refuses_a_non_queued_one() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let queued = exec_in(&db, ws, user, "QUEUED").await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{running}/force-run"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 409);
+    assert_eq!(common::json(res).await["code"], "not_queued");
+    assert_eq!(state_of(&db, running).await, "RUNNING");
+
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{queued}/force-run"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_ne!(state_of(&db, queued).await, "QUEUED");
+}
+
+#[tokio::test]
+async fn force_run_by_ids_is_all_or_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "QUEUED").await,
+        exec_in(&db, ws, user, "QUEUED").await,
+    );
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/executions/force-run/by-ids");
+    let res = common::post(
+        &app,
+        &path,
+        user,
+        serde_json::json!({"ids": [a, running, b]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(running.to_string(), "not queued".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "QUEUED");
+    assert_eq!(state_of(&db, b).await, "QUEUED");
+
+    let res = common::post(&app, &path, user, serde_json::json!({"ids": [a, b]})).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_ne!(state_of(&db, id).await, "QUEUED");
+    }
+}
+
+#[tokio::test]
+async fn force_run_by_query_starts_the_matched_queued_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "QUEUED").await,
+        exec_in(&db, ws, user, "QUEUED").await,
+    );
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!(
+            "/api/ws/{ws}/workflows/executions/force-run/by-query?namespace=a.write&state=QUEUED"
+        ),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_ne!(state_of(&db, id).await, "QUEUED");
+    }
+}
+
+#[tokio::test]
+async fn force_run_treats_a_foreign_id_as_not_found_and_needs_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (other_ws, other_user) = bulk_manager(&db).await;
+    let mine = exec_in(&db, ws, user, "QUEUED").await;
+    let foreign = exec_in(&db, other_ws, other_user, "QUEUED").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/force-run/by-ids"),
+        user,
+        serde_json::json!({"ids": [mine, foreign]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(foreign.to_string(), "not found".to_string())]
+    );
+    assert_eq!(state_of(&db, mine).await, "QUEUED");
+    assert_eq!(state_of(&db, foreign).await, "QUEUED");
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{foreign}/force-run"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 404);
+
+    let (rws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, rws, reader, &["workflow:read"]).await;
+    let q = exec_in(&db, rws, reader, "QUEUED").await;
+    for path in [
+        format!("/api/ws/{rws}/workflows/executions/{q}/force-run"),
+        format!("/api/ws/{rws}/workflows/executions/force-run/by-query"),
+    ] {
+        let res = common::post_no_body(&app, &path, reader).await;
+        assert_eq!(res.status(), 403, "{path}");
+    }
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{rws}/workflows/executions/force-run/by-ids"),
+        reader,
+        serde_json::json!({"ids": [q]}),
+    )
+    .await;
+    assert_eq!(res.status(), 403);
+    assert_eq!(state_of(&db, q).await, "QUEUED");
+}

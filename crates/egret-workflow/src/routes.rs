@@ -5230,9 +5230,13 @@ async fn unqueue_would_refuse(
 }
 
 fn not_queued_error(id: Uuid, state: &str) -> ExecOpError {
+    not_queued_for(id, state, "unqueued")
+}
+
+fn not_queued_for(id: Uuid, state: &str, verb: &str) -> ExecOpError {
     ExecOpError::conflict(
         NOT_QUEUED_CODE,
-        format!("execution {id} is {state}; only a QUEUED execution can be unqueued"),
+        format!("execution {id} is {state}; only a QUEUED execution can be {verb}"),
     )
 }
 
@@ -5386,6 +5390,156 @@ async fn unqueue_executions_by_query(
     let filter = execution_filter(q)?;
     let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
     unqueue_bulk(&st, &ctx, ids, target).await
+}
+
+/// Read-only: may the manager force-run `id`? Exists in this workspace, the
+/// caller may manage it, and it is `QUEUED` -- the worker's one rule
+/// ([`crate::worker::force_run_refusal`]). The single route and the bulk
+/// pre-flight share it.
+async fn force_run_would_refuse(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> std::result::Result<Option<String>, ExecOpError> {
+    require_exec(st, ctx, id, WF_MANAGE).await?;
+    let before = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(crate::worker::force_run_refusal(crate::worker::from_wire(
+        &before.execution.state,
+    )))
+}
+
+/// The force-run and its audit, with the single route's coded refusal.
+async fn force_run_write(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> std::result::Result<(), ExecOpError> {
+    let ws = ctx.workspace_id.0;
+    match crate::worker::force_run(&st.db.pool, ws, id).await? {
+        crate::worker::ForceRun::Started => {}
+        crate::worker::ForceRun::NotQueued(state) => {
+            return Err(not_queued_for(id, &state, "force-run"))
+        }
+    }
+    st.audit.emit(egret_audit::mutation_for(
+        &ctx.principal,
+        Some(ws),
+        "workflow_execution:force_run",
+        "workflow_execution",
+        Some(id.to_string()),
+        serde_json::json!({}),
+    ));
+    Ok(())
+}
+
+async fn force_run_check(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    id: Uuid,
+) -> std::result::Result<(), bulk::Invalid> {
+    match force_run_would_refuse(st, ctx, id).await {
+        Ok(None) => Ok(()),
+        Ok(Some(_)) => Err(invalid_id(id, "not queued")),
+        Err(e) => Err(invalid_id(id, gate_reason(&e))),
+    }
+}
+
+async fn force_run_bulk(
+    st: &WorkflowState,
+    ctx: &egret_core::WorkspaceContext,
+    ids: Vec<Uuid>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    Ok(bulk::bulk_apply(
+        ids,
+        |id| force_run_check(st, ctx, id),
+        |id| async move { force_run_write(st, ctx, id).await.map_err(op_error_to_core) },
+    )
+    .await?)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/{id}/force-run",
+    operation_id = "force_run_execution",
+    tag = "workflow",
+    params(WorkspacePath, ("id" = Uuid, Path, description = "Execution id")),
+    responses(
+        (status = 200, description = "The queued execution started now, bypassing the flow's concurrency limit. The body is its detail afterwards.", body = ExecutionDto),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "`not_queued`: the execution is not `QUEUED` (the message names the state). Nothing is written.", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Start a `QUEUED` execution now, bypassing its flow's concurrency limit
+/// (package 8b).
+async fn force_run_execution(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Path((_ws, id)): Path<(String, Uuid)>,
+) -> std::result::Result<Json<ExecutionDto>, ExecOpError> {
+    if let Some(state) = force_run_would_refuse(&st, &ctx, id).await? {
+        return Err(not_queued_for(id, &state, "force-run"));
+    }
+    force_run_write(&st, &ctx, id).await?;
+    let detail = st.executions.get(ctx.workspace_id.0, id).await?;
+    Ok(Json(ExecutionDto::new(
+        detail,
+        true,
+        st.trigger_flags.worker_enabled,
+    )))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/force-run/by-ids",
+    operation_id = "force_run_executions_by_ids",
+    tag = "workflow",
+    params(WorkspacePath),
+    request_body = BulkIds,
+    responses(
+        (status = 200, description = "Every listed execution started now, bypassing the flow's limit.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was started: `too_many` (more than 1000 ids), or an `invalids` list naming every id that is missing, not yours to manage, or not `QUEUED`.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Force-run several `QUEUED` executions, all or none (package 8b).
+async fn force_run_executions_by_ids(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Json(body): Json<BulkIds>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, body.ids.len()).await?;
+    force_run_bulk(&st, &ctx, body.ids).await
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/ws/{workspace}/workflows/executions/force-run/by-query",
+    operation_id = "force_run_executions_by_query",
+    tag = "workflow",
+    params(WorkspacePath, ExportExecutionsQuery),
+    responses(
+        (status = 200, description = "Every matched execution started now, bypassing the flow's limit.", body = bulk::BulkResponse),
+        (status = 400, description = "Nothing was started: `too_many` (the filter matches more than 1000) or an `invalids` list.", body = bulk::BulkErrorResponse),
+        (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
+        (status = 403, description = "Missing workflow:manage permission", body = egret_core::http::ErrorBody),
+        (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
+    ),
+)]
+/// Force-run every execution a filter matches, all or none (package 8b).
+async fn force_run_executions_by_query(
+    State(st): State<WorkflowState>,
+    WsContext(ctx): WsContext,
+    Query(q): Query<ExportExecutionsQuery>,
+) -> std::result::Result<Json<bulk::BulkResponse>, BulkRouteError> {
+    bulk_gate(&st, &ctx, 0).await?;
+    let filter = execution_filter(q)?;
+    let ids = bulk::resolve_ids_by_query(&st.executions, ctx.workspace_id.0, &filter).await?;
+    force_run_bulk(&st, &ctx, ids).await
 }
 
 /// What a resume finds waiting, read from the scoped detail before any body
@@ -8550,6 +8704,10 @@ pub fn management_router() -> Router<WorkflowState> {
             post(unqueue_execution),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/{id}/force-run",
+            post(force_run_execution),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/{id}/resume",
             // As the start route: the handler limits each content type itself.
             post(resume_execution).layer(axum::extract::DefaultBodyLimit::disable()),
@@ -8642,6 +8800,14 @@ pub fn management_router() -> Router<WorkflowState> {
             post(unqueue_executions_by_query),
         )
         .route(
+            "/ws/{workspace}/workflows/executions/force-run/by-ids",
+            post(force_run_executions_by_ids),
+        )
+        .route(
+            "/ws/{workspace}/workflows/executions/force-run/by-query",
+            post(force_run_executions_by_query),
+        )
+        .route(
             "/ws/{workspace}/workflows/executions/resume/by-ids",
             post(resume_executions_by_ids),
         )
@@ -8708,6 +8874,8 @@ pub fn management_router() -> Router<WorkflowState> {
         pause_executions_by_query,
         unqueue_executions_by_ids,
         unqueue_executions_by_query,
+        force_run_executions_by_ids,
+        force_run_executions_by_query,
         resume_executions_by_ids,
         resume_executions_by_query,
         download_execution_logs,
@@ -8719,6 +8887,7 @@ pub fn management_router() -> Router<WorkflowState> {
         validate_execution_inputs,
         pause_execution,
         unqueue_execution,
+        force_run_execution,
         resume_execution,
         validate_resume_inputs,
         replay_execution,

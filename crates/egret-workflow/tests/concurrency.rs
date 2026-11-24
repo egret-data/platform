@@ -503,3 +503,42 @@ async fn an_over_limit_start_with_queue_is_still_queued(pool: sqlx::PgPool) {
     assert_eq!(state(&pool, over).await, "QUEUED");
     assert_eq!(history(&pool, over).await, json!(["CREATED", "QUEUED"]));
 }
+
+// -- force-run (package 8b) --
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn force_run_starts_a_queued_execution_even_when_the_flow_is_at_its_limit(
+    pool: sqlx::PgPool,
+) {
+    // Arrange: limit 1, one RUNNING, one QUEUED.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let running = start(&pool, ws, Some(flow), &src).await;
+    let queued = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, queued).await, "QUEUED");
+
+    // Act
+    let out = egret_workflow::worker::force_run(&pool, ws, queued)
+        .await
+        .expect("force-run");
+
+    // Assert: it left QUEUED and runs; the first is still running, so the
+    // flow is transiently at 2 against a limit of 1.
+    assert_eq!(out, egret_workflow::worker::ForceRun::Started);
+    assert_eq!(state(&pool, queued).await, "RUNNING");
+    assert_eq!(state(&pool, running).await, "RUNNING");
+    assert_eq!(history(&pool, queued).await, json!(["CREATED", "RUNNING"]));
+    assert_eq!(
+        run_count(&pool, queued).await,
+        run_count(&pool, running).await
+    );
+
+    // A second force-run of the same row is refused, nothing changes.
+    let again = egret_workflow::worker::force_run(&pool, ws, queued)
+        .await
+        .expect("force-run again");
+    assert_eq!(
+        again,
+        egret_workflow::worker::ForceRun::NotQueued("RUNNING".into())
+    );
+}
