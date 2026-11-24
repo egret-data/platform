@@ -749,3 +749,152 @@ async fn a_partial_replay_over_a_full_limit_is_not_gated_yet(pool: sqlx::PgPool)
         "a copy is ungated until Task 4, got {s}"
     );
 }
+
+// ---- Task 3 (8c): the subflow child is gated on the CHILD flow's limit -----
+
+const PARENT_SRC: &str = "id: parent\nnamespace: t\ntasks:\n  - id: s\n    \
+     type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: child\n    wait: true\n";
+
+fn child_src(behavior: &str) -> String {
+    format!(
+        "id: child\nnamespace: t\nconcurrency:\n  limit: 1\n  behavior: {behavior}\n\
+         tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    )
+}
+
+/// File a second flow in an existing workspace.
+async fn add_flow(pool: &sqlx::PgPool, ws: Uuid, src: &str) -> Uuid {
+    let user: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_one(pool)
+        .await
+        .expect("owner");
+    let flow = egret_workflow::spec::parse(src).expect("parses");
+    let input = egret_workflow::CreateFlowInput {
+        namespace: flow.namespace.clone(),
+        flow_id: flow.id.clone(),
+        source: src.to_string(),
+        plan: serde_json::to_value(&flow).expect("serialises"),
+        folder_id: None,
+    };
+    egret_workflow::FlowRepo::new(Db { pool: pool.clone() })
+        .create(ws, egret_core::UserId(user), &input)
+        .await
+        .expect("file the flow")
+        .id
+}
+
+/// Child flow at its limit (one live execution), then the parent runs.
+/// Returns (ws, child_flow, holder, parent, child).
+async fn parent_over_full_child(
+    pool: &sqlx::PgPool,
+    behavior: &str,
+) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
+    let csrc = child_src(behavior);
+    let (ws, child_flow) = setup(pool, &csrc).await;
+    let hold = start(pool, ws, Some(child_flow), &csrc).await;
+    let parent_flow = add_flow(pool, ws, PARENT_SRC).await;
+    // The Subflow spawns its child inside the parent's first settle; no tick,
+    // which would also finish the holder and free the slot.
+    let parent = start(pool, ws, Some(parent_flow), PARENT_SRC).await;
+    let child: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE flow_id = $1 AND trigger_execution_id = $2",
+    )
+    .bind(child_flow)
+    .bind(parent)
+    .fetch_one(pool)
+    .await
+    .expect("the child exists");
+    (ws, child_flow, hold, parent, child)
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_over_the_childs_limit_is_queued(pool: sqlx::PgPool) {
+    // Act
+    let (_ws, _cf, _hold, parent, child) = parent_over_full_child(&pool, "QUEUE").await;
+
+    // Assert
+    assert_eq!(state(&pool, child).await, "QUEUED");
+    assert_eq!(history(&pool, child).await, json!(["CREATED", "QUEUED"]));
+    assert_eq!(
+        run_count(&pool, child).await,
+        0,
+        "a queued child runs no task"
+    );
+    assert_eq!(
+        state(&pool, parent).await,
+        "RUNNING",
+        "the parent keeps waiting on a non-terminal child"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_queued_subflow_child_runs_when_the_slot_frees_and_the_parent_completes(
+    pool: sqlx::PgPool,
+) {
+    // Arrange
+    let (_ws, _cf, hold, parent, child) = parent_over_full_child(&pool, "QUEUE").await;
+
+    // Act: the holder finishes through the worker, which drains the child.
+    tick(&pool, 1).await;
+    tick(&pool, 5).await;
+
+    // Assert
+    assert_eq!(state(&pool, hold).await, "SUCCESS");
+    assert_eq!(state(&pool, child).await, "SUCCESS");
+    assert_eq!(state(&pool, parent).await, "SUCCESS");
+}
+
+async fn subflow_child_terminal(pool: sqlx::PgPool, behavior: &str, terminal: &str) {
+    // Act
+    let (_ws, _cf, _hold, parent, child) = parent_over_full_child(&pool, behavior).await;
+
+    // Assert
+    assert_eq!(state(&pool, child).await, terminal);
+    assert_eq!(
+        run_count(&pool, child).await,
+        0,
+        "a terminal child runs no task"
+    );
+    // The parent reacts to the terminal child as to any terminal child: it is
+    // no longer waiting.
+    let parent_state = state(&pool, parent).await;
+    assert!(
+        !matches!(parent_state.as_str(), "RUNNING" | "CREATED"),
+        "the parent must settle over a {terminal} child, got {parent_state}"
+    );
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
+    subflow_child_terminal(pool, "CANCEL", "CANCELLED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_over_a_fail_limit_is_failed(pool: sqlx::PgPool) {
+    subflow_child_terminal(pool, "FAIL", "FAILED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_under_the_limit_runs(pool: sqlx::PgPool) {
+    // Arrange: nothing holds the child's slot.
+    let csrc = child_src("QUEUE");
+    let (ws, child_flow) = setup(&pool, &csrc).await;
+    let parent_flow = add_flow(&pool, ws, PARENT_SRC).await;
+    let parent = start(&pool, ws, Some(parent_flow), PARENT_SRC).await;
+
+    // Act
+    tick(&pool, 3).await;
+
+    // Assert
+    let child: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE flow_id = $1 AND trigger_execution_id = $2",
+    )
+    .bind(child_flow)
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .expect("child");
+    assert_ne!(state(&pool, child).await, "QUEUED");
+    assert_eq!(state(&pool, parent).await, "SUCCESS");
+}
