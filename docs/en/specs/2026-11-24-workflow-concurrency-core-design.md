@@ -50,3 +50,9 @@ Port Kestra's flow-level concurrency core: a flow may declare `concurrency: { li
 - **Gate** = per-flow `pg_advisory_xact_lock` + count ✅.
 - **Limit counts** live non-terminal non-QUEUED executions ✅.
 - **Drain** oldest-first on terminalize + safety sweep ✅.
+
+## 8a enforcement scope — refined 2026-11-24 (Task 2 review)
+
+**8a's admission gate enforces FRESH starts only** — scheduled, manual (API), flow-trigger, and webhook starts (all funnel through `start_execution_in_with` → `insert_execution_gated`). Executions created by **replay**, **restart-on-source**, and **subflow children** are **counted in the live pool** (so they consume capacity and fresh starts still respect the limit) but are **NOT themselves gated/queued** in 8a. Consequence: a replay/restart/subflow-child can push a flow transiently over its `limit` (a bounded, soft overshoot — not corruption, not a race; the pool self-corrects as fresh starts remain gated).
+
+This reconciles spec line "concurrency is a property of a flow, enforced on every execution of it": **8a enforces it on fresh starts; gating replay/restart/subflow-children is a FOLLOW-UP** (it needs a drain that can resume a copied/linked execution — a copied replay has task_runs + `replayed_from_execution_id`, a subflow child has `trigger_execution_id`/`trigger_run_ix` — which 8a's `settle_new`-based drain does not reconstitute). Tracked for 8b or a dedicated follow-up.
