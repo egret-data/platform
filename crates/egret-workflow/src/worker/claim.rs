@@ -4468,8 +4468,9 @@ pub(super) fn admit_row(current_history: &[serde_json::Value], admit: Admit) -> 
     }
 }
 
-/// Start a `QUEUED` execution (package 8a's drain): the row goes back to
-/// `CREATED` and takes the first settle a fresh start takes, so it runs
+/// Start a `QUEUED` execution (package 8a's drain): the row restores its
+/// pre-queue state (`CREATED`, or `RESTARTED` for a restart) by popping the
+/// trailing `QUEUED` from its history, and takes the first settle a fresh start takes, so it runs
 /// identically. The one difference is the clock: the settle's tick is the
 /// real time since `created_at` (what `load` reads) rather than `Tick(0)`,
 /// because the execution waited in the queue and every deadline is measured
@@ -4631,8 +4632,10 @@ pub(super) async fn insert_execution_admitted(
 /// `behavior: QUEUE`; with `CANCEL`/`FAIL` the start is admitted as
 /// `Admit::Cancel`/`Admit::Fail` and the caller terminalizes it (`CANCELLED`/
 /// `FAILED`, no run) through its first settle. Only a
-/// fresh start is gated (`start_execution_in_on`); a copy (replay/restart)
-/// is not, and a born-`FAILED` start never is.
+/// fresh start and a whole replay are gated here (the replay via
+/// [`insert_execution_admitted`]); the walk-based paths (partial replay,
+/// restart-on-source, restart-in-place) are gated in `restart::open`/`gate_admit`.
+/// A born-`FAILED` start is never gated.
 async fn insert_execution_gated(
     conn: &mut PgConnection,
     gate: &Gate,

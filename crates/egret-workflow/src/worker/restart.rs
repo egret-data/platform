@@ -596,6 +596,8 @@ pub(super) async fn open(
     // drive. A `PAUSED -> RESTARTED` resume is not `failedThenRestarted` and is
     // never re-gated (spec §2); nested restarts and a task-run state change carry
     // `gate = false`.
+    // Gates any restart whose prior state isn't PAUSED: broader than Kestra's
+    // `failedThenRestarted()`, diverging only for a non-failed, non-paused terminal (e.g. CANCELLED) that `prepare` refuses.
     if gate && before.history.last() != Some(&RunState::Paused) {
         if let Some(admit) = gate_admit(conn, &ctx, id).await? {
             let history: Vec<serde_json::Value> = state
