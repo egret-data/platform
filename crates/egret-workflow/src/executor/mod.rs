@@ -8863,6 +8863,46 @@ tasks:
         );
     }
 
+    /// 9a Task 3 (D4): the resumed body's `aggregate(tasks)` is softened by the
+    /// `Pause`'s own `allowFailure:`/`allowWarning:`, as `descend` softens every
+    /// other flowable's `Done`. A `Pause` whose step `descend` returns unmapped
+    /// would otherwise end `FAILED` on a failing body where Kestra ends
+    /// `WARNING` (and `SUCCESS` with `allowWarning:` too).
+    #[test]
+    fn a_resumed_pause_body_terminal_is_softened_by_allow_failure() {
+        for (flags, terminal) in [
+            ("    allowFailure: true\n", RunState::Warning),
+            (
+                "    allowFailure: true\n    allowWarning: true\n",
+                RunState::Success,
+            ),
+        ] {
+            let src = format!(
+                "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                 type: io.kestra.plugin.core.flow.Pause\n{flags}    tasks:\n      \
+                 - id: b1\n        type: io.kestra.plugin.core.log.Log\n        \
+                 message: body\n"
+            );
+            let plan = plan::plan_stored(&src).expect("plans");
+            assert!(
+                plan.tasks[0].allow_failure,
+                "{flags:?}: the fixture must actually set allowFailure:"
+            );
+
+            let mut state = run_to_fixpoint(&plan, RunState::Success);
+            assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+            // The body fails; the Pause's flags decide the run's terminal.
+            resume_to_fixpoint_with(&plan, &mut state, |_| RunState::Failed);
+
+            assert_eq!(
+                state.runs[0].history.last(),
+                Some(&terminal),
+                "{flags:?}: a failing body under these flags ends {terminal:?}, \
+                 not FAILED"
+            );
+        }
+    }
+
     /// 9a Task 3 (D4): an **empty**-body `Pause` is unchanged — a resume ends it
     /// `SUCCESS` directly, with no re-open and no body, exactly as before 9a.
     /// This guards that the resumed-body routing does not reach a bare pause.

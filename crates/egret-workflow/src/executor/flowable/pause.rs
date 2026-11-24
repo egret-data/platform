@@ -233,9 +233,23 @@ fn resume_body(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, no
     let errors = plan.tasks[task].errors.as_slice();
     let finally = plan.tasks[task].finally.as_slice();
     match super::sequential::drive(plan, state, tasks, errors, finally, Some(run), now) {
+        // **The body's `aggregate(tasks)` is softened by the Pause's own
+        // `allowFailure:`/`allowWarning:`**, which is the mapping
+        // [`super::descend`] applies to every other flowable's `Done`
+        // (`Execution.guessFinalState`'s tail, called with the task's flags). A
+        // `Pause`'s step is returned from `descend` UNMAPPED, so without this a
+        // `Pause { allowFailure: true, tasks: [<failing child>] }` would end
+        // `FAILED` where Kestra ends `WARNING`. Only the resumed-BODY terminal:
+        // the deadline/`timeout:` terminal is `pause::deadline`'s and already
+        // carries its own `allow_failure::fail` mapping (and `behavior:` is Task
+        // 4).
         Step::Done(aggregate) => Step::Commands(vec![Command::SetRunState {
             run,
-            state: aggregate,
+            state: crate::executor::allow_failure::soften(
+                aggregate,
+                plan.tasks[task].allow_failure,
+                plan.tasks[task].allow_warning,
+            ),
         }]),
         other => other,
     }
