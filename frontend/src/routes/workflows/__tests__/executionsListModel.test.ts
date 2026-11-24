@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_FILTERS,
+  EXECUTION_STATE_NAMES,
   isFiltering,
   PAGE_SIZE,
   pageCount,
@@ -130,6 +131,11 @@ describe("toQueryParams", () => {
   it("sends root_only=true while the child switch is off, and no root_only once it is on", () => {
     expect(toQueryParams(DEFAULT_FILTERS, NOW)).toEqual({ root_only: true, limit: PAGE_SIZE, offset: 0 });
     expect(toQueryParams({ ...DEFAULT_FILTERS, showChildren: true }, NOW)).not.toHaveProperty("root_only");
+  });
+
+  it("offers QUEUED in the state picker and sends state=QUEUED for it", () => {
+    expect(EXECUTION_STATE_NAMES).toContain("QUEUED");
+    expect(toQueryParams({ ...DEFAULT_FILTERS, states: ["QUEUED"] }, NOW)).toMatchObject({ state: "QUEUED" });
   });
 
   it("sends the states as one comma list, the namespace, the flow and the page's offset", () => {
