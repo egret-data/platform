@@ -635,6 +635,82 @@ mod tests {
         );
     }
 
+    /// 9a Task 5: a `Pause` with a three-task body, paused, released, then
+    /// driven with `fail` deciding each leaf's outcome.
+    fn resumed_pause_body(fail: &[(&str, RunState)]) -> (Plan, ExecutionState) {
+        let src = flow(&format!(
+            "tasks:\n  - id: gate\n    type: io.kestra.plugin.core.flow.Pause\n    tasks:\n{}{}{}{}",
+            leaf("b1", 6),
+            leaf("b2", 6),
+            leaf("b3", 6),
+            leaf("after", 2)
+        ));
+        let plan = crate::executor::plan::plan_stored(&src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        drive(&plan, &mut state, &[]);
+        assert_eq!(state.history.last(), Some(&RunState::Paused));
+        assert_eq!(
+            crate::executor::release_paused_pauses(&mut state, T0),
+            vec![0]
+        );
+        drive(&plan, &mut state, fail);
+        (plan, state)
+    }
+
+    // 9a Task 5: restart a FAILED execution whose Pause body had a failing child.
+    #[test]
+    fn a_failed_pause_body_reopens_the_pause_and_reruns_only_the_failed_child() {
+        let (plan, state) = resumed_pause_body(&[("b2", RunState::Failed)]);
+        let (gate, b1, b2) = (
+            run(&plan, &state, "gate"),
+            run(&plan, &state, "b1"),
+            run(&plan, &state, "b2"),
+        );
+        assert_eq!(state.history.last(), Some(&RunState::Failed));
+        assert_eq!(last(&state, gate), Some(RunState::Failed));
+        assert_eq!(last(&state, b1), Some(RunState::Success));
+        assert_eq!(last(&state, b2), Some(RunState::Failed));
+        assert!(
+            !state.runs.iter().any(|r| plan.tasks[r.task].id == "b3"),
+            "b3 never ran"
+        );
+
+        let out = restart(&plan, &state, NOW).expect("restartable");
+        let s = applied(&state, &out);
+
+        assert_eq!(last(&s, gate), Some(RunState::Running), "reopened");
+        assert_eq!(s.runs[gate].attempt_started_at(), Some(NOW));
+        assert_eq!(last(&s, b1), Some(RunState::Success), "b1 is kept");
+        assert_eq!(s.runs[b1].history, state.runs[b1].history);
+        assert_eq!(last(&s, b2), Some(RunState::Created), "b2 is reset");
+        let mut reset = out.reset.clone();
+        reset.sort();
+        assert_eq!(reset, vec![gate, b2]);
+        assert_eq!(s.history.last(), Some(&RunState::Restarted));
+
+        // The pause does not pause again: it runs the failed child, then b3.
+        let (cmds, next) = one_round(&plan, &s, NOW);
+        assert!(
+            cmds.contains(&Command::StartRun { run: b2, at: NOW }),
+            "{cmds:?}"
+        );
+        assert_eq!(last(&next, gate), Some(RunState::Running));
+        assert!(!next.runs[gate].history.ends_with(&[RunState::Paused]));
+        let mut fin = next.clone();
+        drive(&plan, &mut fin, &[]);
+        assert_eq!(
+            last(&fin, gate),
+            Some(RunState::Success),
+            "terminal recomputed"
+        );
+        assert_eq!(last(&fin, run(&plan, &fin, "b3")), Some(RunState::Success));
+        assert_eq!(
+            last(&fin, run(&plan, &fin, "after")),
+            Some(RunState::Success)
+        );
+        assert_eq!(fin.history.last(), Some(&RunState::Success));
+    }
+
     // 8.
     #[test]
     fn a_paused_pause_is_reopened_and_ends_success_as_if_resumed() {
