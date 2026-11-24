@@ -1846,6 +1846,9 @@ mod tests {
         ];
         const RUN: &[(&str, &str)] = &[
             (FLOW_ROW, "afterExecution"),
+            // Package 8a: `behavior: QUEUE` runs (the admission gate); CANCEL and
+            // FAIL still warn at save.
+            (FLOW_ROW, "concurrency"),
             (FLOW_ROW, "description"),
             (FLOW_ROW, "disabled"),
             (FLOW_ROW, "errors"),
