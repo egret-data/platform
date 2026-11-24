@@ -19,8 +19,18 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use super::claim::{promote_queued, ExecutionCtx, Stack};
+use super::subflow::MAX_SPAWN_CHAIN;
 use super::txn::{transaction, InTxn};
 use crate::models::{Concurrency, ConcurrencyBehavior};
+
+tokio::task_local! {
+    /// The flow a [`concurrency_drain`] on this task is promoting for. A
+    /// promoted execution that terminalizes inside its first settle must not
+    /// start a drain of its own: the enclosing loop re-counts after every
+    /// promotion and carries on iteratively, so nesting is what would make a
+    /// backlog recurse.
+    static DRAINING: Uuid;
+}
 
 /// What the gate decided for a new start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +114,9 @@ pub(super) async fn concurrency_drain(
         .await
         .map_err(db_err)?;
         let Some(id) = next else { break };
-        promote_queued(tx, id, stack.clone()).await?;
+        DRAINING
+            .scope(flow_id, promote_queued(tx, id, stack.clone()))
+            .await?;
         promoted.push(id);
     }
     Ok(promoted)
@@ -128,6 +140,15 @@ pub(super) async fn on_terminal(conn: &mut PgConnection, ctx: &ExecutionCtx) -> 
     let Some(flow_id) = ctx.flow_id else {
         return Ok(());
     };
+    // A promoted execution that terminalizes INSIDE its first settle comes
+    // back here. The drain that promoted it is still looping over its flow
+    // (and re-counts), so a nested drain of the same flow would only recurse
+    // down the whole backlog: skip. For any other nesting (a child of another
+    // flow, say) the depth is capped as a spawn chain is, and the sweep
+    // (`concurrency_sweep`, next reaper tick) starts what was skipped.
+    if DRAINING.try_with(|f| *f == flow_id).unwrap_or(false) || ctx.depth + 1 > MAX_SPAWN_CHAIN {
+        return Ok(());
+    }
     let waiting: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM workflow.executions WHERE flow_id = $1 AND state = 'QUEUED')",
     )

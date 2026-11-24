@@ -377,3 +377,57 @@ async fn a_queued_execution_is_not_reaped_and_the_sweep_leaves_a_full_flow_alone
     assert_eq!(history(&pool, queued).await, json!(["CREATED", "QUEUED"]));
     assert_eq!(run_count(&pool, queued).await, 0);
 }
+
+/// A backlog of QUEUED executions that each complete INSIDE their first
+/// settle (their only task is skipped) must drain iteratively, not by one
+/// nested settle per execution: 40 of them overflow the default test-thread
+/// stack if each promotion recurses.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_inline_completing_backlog_drains_with_bounded_recursion(pool: sqlx::PgPool) {
+    // Arrange: limit 1, one RUNNING, 40 QUEUED rows whose source completes
+    // inline (same flow_id, as a republished version would be).
+    const BACKLOG: i64 = 40;
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let _running = start(&pool, ws, Some(flow), &src).await;
+    for _ in 0..BACKLOG {
+        start(&pool, ws, Some(flow), &src).await;
+    }
+    let inline = src.replace(
+        "    message: hi\n",
+        "    message: hi\n    runIf: \"{{ false }}\"\n",
+    );
+    assert_ne!(inline, src);
+    sqlx::query(
+        "UPDATE workflow.executions SET source = $2 WHERE flow_id = $1 AND state = 'QUEUED'",
+    )
+    .bind(flow)
+    .bind(&inline)
+    .execute(&pool)
+    .await
+    .expect("make the backlog inline-completing");
+    let queued = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.executions WHERE flow_id = $1 AND state = 'QUEUED'",
+        )
+        .bind(flow)
+        .fetch_one(&pool)
+        .await
+        .expect("queued")
+    };
+
+    // Act: the running one finishes; its drain starts the backlog.
+    tick(&pool, 1).await;
+
+    // Assert: the whole backlog drained, without overflowing the stack.
+    assert_eq!(queued().await, 0, "the drain starts the whole backlog");
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions WHERE flow_id = $1 \
+         AND NOT workflow.state_is_terminal(state)",
+    )
+    .bind(flow)
+    .fetch_one(&pool)
+    .await
+    .expect("live");
+    assert_eq!(live, 0, "every inline-completing execution ended");
+}
