@@ -103,6 +103,7 @@ pub use flowable::branch::is_truthy;
 
 /// A manual resume: see [`flowable::pause::release_now`].
 pub(crate) use flowable::pause::release_now as release_paused_pauses;
+pub(crate) use flowable::pause::rendered_expression as pause_rendered_expression;
 /// Java's `Duration.parse` over the ISO-8601 subset a flow can write.
 ///
 /// **A visibility change, not a semantic one, and this is the sentence the
@@ -8901,6 +8902,167 @@ tasks:
                  not FAILED"
             );
         }
+    }
+
+    /// A `Pause` with a one-child body, `pauseDuration: PT1S`, the given extra
+    /// properties and a successor, planned with `plan_stored` (`spec::validate`
+    /// still refuses a body until 9a Task 6).
+    fn behavior_pause_plan(props: &str) -> Plan {
+        let src = format!(
+            "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+             type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n{props}    \
+             tasks:\n      - id: b1\n        type: io.kestra.plugin.core.log.Log\n        \
+             message: body\n  - id: after\n    type: io.kestra.plugin.core.debug.Return\n    \
+             format: done\n"
+        );
+        plan::plan_stored(&src).expect("plans")
+    }
+
+    /// Settle at `now`, completing every in-flight `Runnable` `SUCCESS`.
+    fn settle_at(plan: &Plan, state: &mut ExecutionState, now: Tick) {
+        for _ in 0..1000 {
+            if !round_at(plan, state, now).is_empty() {
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => apply(
+                    state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: RunState::Success,
+                    },
+                ),
+                None => return,
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// Pause (answering the `behavior:` render when given), then reach the
+    /// `PT1S` deadline and settle. Returns the final state.
+    fn pause_then_deadline(plan: &Plan, rendered_behavior: Option<&str>) -> ExecutionState {
+        let mut state = ExecutionState::new(plan);
+        round_at(plan, &mut state, T0); // CreateRun
+        state.runs[0].rendered = rendered_behavior.map(str::to_string);
+        settle_at(plan, &mut state, T0);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"],
+            "paused and waiting for the deadline"
+        );
+        settle_at(plan, &mut state, Tick(1_000));
+        state
+    }
+
+    /// 9a Task 4 (D2/D3): `behavior:` decides the terminal at the deadline.
+    /// RESUME (and unset) is SUCCESS and runs the body; WARN ends the pause
+    /// WARNING with no body and the execution goes on; FAIL ends it FAILED;
+    /// CANCEL cancels the execution.
+    #[test]
+    fn behavior_decides_the_pause_terminal_at_its_deadline() {
+        for resume in ["", "    behavior: RESUME\n"] {
+            let plan = behavior_pause_plan(resume);
+            let state = pause_then_deadline(&plan, None);
+            assert_eq!(state.runs[0].history.last(), Some(&RunState::Success));
+            assert!(
+                run_ids(&plan, &state).contains(&"b1".to_string()),
+                "body ran"
+            );
+            assert_eq!(state.history.last(), Some(&RunState::Success));
+        }
+
+        let plan = behavior_pause_plan("    behavior: WARN\n");
+        let state = pause_then_deadline(&plan, None);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Warning));
+        let ids = run_ids(&plan, &state);
+        assert!(
+            !ids.contains(&"b1".to_string()),
+            "WARN runs no body: {ids:?}"
+        );
+        assert!(ids.contains(&"after".to_string()), "execution continues");
+        assert_eq!(state.history.last(), Some(&RunState::Warning));
+
+        let plan = behavior_pause_plan("    behavior: FAIL\n");
+        let state = pause_then_deadline(&plan, None);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Failed));
+        let ids = run_ids(&plan, &state);
+        assert!(!ids.contains(&"b1".to_string()) && !ids.contains(&"after".to_string()));
+
+        let plan = behavior_pause_plan("    behavior: CANCEL\n");
+        let state = pause_then_deadline(&plan, None);
+        assert_eq!(state.history.last(), Some(&RunState::Cancelled));
+        let ids = run_ids(&plan, &state);
+        assert!(!ids.contains(&"b1".to_string()) && !ids.contains(&"after".to_string()));
+    }
+
+    /// 9a Task 4 (D3): a manual resume before the deadline ignores `behavior:`.
+    #[test]
+    fn a_manual_resume_ignores_a_non_resume_behavior() {
+        for b in ["WARN", "CANCEL", "FAIL"] {
+            let plan = behavior_pause_plan(&format!("    behavior: {b}\n"));
+            let mut state = ExecutionState::new(&plan);
+            settle_at(&plan, &mut state, T0);
+            assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+            settle_at(&plan, &mut state, T0);
+            assert_eq!(
+                state.runs[0].history.last(),
+                Some(&RunState::Success),
+                "{b}"
+            );
+            assert!(
+                run_ids(&plan, &state).contains(&"b1".to_string()),
+                "{b}: body ran"
+            );
+            assert_eq!(state.history.last(), Some(&RunState::Success), "{b}");
+        }
+    }
+
+    /// 9a Task 4 (D2): an expression `behavior:` is honoured when it renders to
+    /// one of the four, and a render outside them FAILS the pause at its
+    /// deadline rather than leaving it stuck.
+    #[test]
+    fn an_expression_behavior_is_honoured_and_an_invalid_render_fails_the_pause() {
+        let plan = behavior_pause_plan("    behavior: \"{{ inputs.b }}\"\n");
+        let state = pause_then_deadline(&plan, Some("WARN"));
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Warning));
+
+        let state = pause_then_deadline(&plan, Some("RESUME"));
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Success));
+        assert!(run_ids(&plan, &state).contains(&"b1".to_string()));
+
+        let state = pause_then_deadline(&plan, Some("bogus"));
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Failed));
+        assert_eq!(state.history.last(), Some(&RunState::Failed));
+
+        // Unrendered: a wait, not a default.
+        let mut state = ExecutionState::new(&plan);
+        round_at(&plan, &mut state, T0);
+        settle_at(&plan, &mut state, T0);
+        assert_eq!(wire(&state.runs[0].history), ["CREATED", "RUNNING"]);
+    }
+
+    /// Both `pauseDuration:` and `behavior:` expressions share the one render
+    /// slot and are told apart.
+    #[test]
+    fn both_expressions_share_one_rendered_slot() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    \
+                   pauseDuration: \"{{ inputs.d }}\"\n    behavior: \"{{ inputs.b }}\"\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let expr = pause_rendered_expression(&plan.tasks[0].kind).expect("both need a render");
+        assert!(expr.contains("inputs.d") && expr.contains("inputs.b"));
+        let mut state = ExecutionState::new(&plan);
+        round_at(&plan, &mut state, T0);
+        state.runs[0].rendered = Some("PT1S\u{1f}FAIL".to_string());
+        settle_at(&plan, &mut state, T0);
+        settle_at(&plan, &mut state, Tick(1_000));
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Failed));
     }
 
     /// 9a Task 3 (D4): an **empty**-body `Pause` is unchanged — a resume ends it

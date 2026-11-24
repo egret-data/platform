@@ -209,7 +209,7 @@ fn line(state: &ExecutionState, run: RunIx) -> Vec<RunIx> {
 
 /// `SUCCESS`, `WARNING`, `FAILED`, `CANCELLED`: the run, its ancestors and the
 /// execution take it; nothing else is touched (D5).
-fn end_with(state: &ExecutionState, run: RunIx, s: RunState) -> Vec<Command> {
+pub(crate) fn end_with(state: &ExecutionState, run: RunIx, s: RunState) -> Vec<Command> {
     let mut cmds: Vec<Command> = line(state, run)
         .into_iter()
         .map(|r| Command::SetRunState { run: r, state: s })

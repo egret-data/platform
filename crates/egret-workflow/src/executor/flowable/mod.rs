@@ -127,6 +127,16 @@ pub(crate) fn resume_paused(plan: &Plan, state: &ExecutionState, run: RunIx, now
             // that map `behavior: WARN|CANCEL|FAIL` to a non-`SUCCESS` terminal
             // are 9a Task 4; this gate (`SUCCESS` only) is forward-compatible
             // with them.
+            // `behavior: CANCEL` at the deadline ends the EXECUTION, as an
+            // `Exit` with `CANCELLED` does (spec D2/D3).
+            if s == RunState::Cancelled
+                && matches!(
+                    plan.tasks[state.runs[run].task].kind,
+                    TaskKind::Pause { .. }
+                )
+            {
+                return Step::Commands(crate::executor::exit::end_with(state, run, s));
+            }
             if s == RunState::Success {
                 if let TaskKind::Pause { tasks, .. } = &plan.tasks[state.runs[run].task].kind {
                     if !tasks.is_empty() {

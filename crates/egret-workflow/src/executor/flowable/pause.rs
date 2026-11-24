@@ -354,46 +354,143 @@ enum Bound {
 /// has not been measured to produce, and an unbounded pause is the one answer
 /// that can never be an over-acceptance.
 fn deadline(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, started: Tick) -> Bound {
-    let crate::executor::plan::TaskKind::Pause { duration, .. } = &plan.tasks[task].kind else {
+    let crate::executor::plan::TaskKind::Pause {
+        duration, behavior, ..
+    } = &plan.tasks[task].kind
+    else {
         // Unreachable for the same reason `drive`'s missing attempt is: both
         // callers match on this kind before they get here.
         return Bound::Unbounded;
     };
 
-    if let Some(source) = duration.as_deref() {
+    // The caller's render, split back into the two expressions it answers
+    // ([`rendered_expression`]). `None` while an expression is unanswered.
+    let rendered = state.runs[run].rendered.as_deref();
+    let (duration_expr, behavior_expr) = expressions(duration.as_deref(), behavior.as_deref());
+    let rendered_parts = rendered.map(|r| split_rendered(r, duration_expr, behavior_expr));
+
+    // 1. When the deadline is, and what it ends as when `behavior:` is unset.
+    let (at, unset_terminal) = if let Some(source) = duration.as_deref() {
         // An expression goes through the caller, exactly as an `If`'s condition
         // does -- `advance()` is pure. A literal is parsed straight, without
         // waiting for a render that would only hand back the same text:
         // `valids/pause-delay` writes `PT1S` and must not stall on a caller
         // that renders nothing.
-        let text = match parse_duration(source) {
-            Some(_) => source,
-            None => match state.runs[run].rendered.as_deref() {
-                Some(rendered) => rendered,
-                None => return Bound::NotRenderedYet,
-            },
+        let text = if duration_expr {
+            match rendered_parts {
+                Some((Some(d), _)) => d,
+                _ => return Bound::NotRenderedYet,
+            }
+        } else {
+            source
         };
-        return match parse_duration(text) {
-            Some(d) => Bound::Until(plus(started, d), RunState::Success),
-            None => Bound::Unbounded,
-        };
-    }
+        match parse_duration(text) {
+            Some(d) => (plus(started, d), RunState::Success),
+            None => return Bound::Unbounded,
+        }
+    } else {
+        // **`timeout:` and `pauseDuration:` take DIFFERENT terminals from the
+        // two `allow*` flags, and the artifact's own line is what says so** --
+        // W8 Task 5. `ExecutorService.java:937` is
+        // `.state(duration != null ? behavior.mapToState() : State.Type.fail(pauseTask))`,
+        // so the flags reach the `timeout:` branch and NOT the `pauseDuration:`
+        // one above, which keeps `RunState::Success` whatever anybody wrote.
+        // `valids/pause-timeout-allow-failure` is the flow that measures it: a
+        // `Pause` with `timeout: PT1S` and `allowFailure: true` whose golden run
+        // is `["CREATED","RUNNING","PAUSED","WARNING"]`.
+        let task = &plan.tasks[task];
+        match task.timeout {
+            Some(d) => (
+                plus(started, d),
+                crate::executor::allow_failure::fail(task.allow_failure, task.allow_warning),
+            ),
+            None => return Bound::Unbounded,
+        }
+    };
 
-    // **`timeout:` and `pauseDuration:` take DIFFERENT terminals from the two
-    // `allow*` flags, and the artifact's own line is what says so** -- W8 Task
-    // 5. `ExecutorService.java:937` is
-    // `.state(duration != null ? behavior.mapToState() : State.Type.fail(pauseTask))`,
-    // so the flags reach the `timeout:` branch and NOT the `pauseDuration:`
-    // one above, which keeps `RunState::Success` whatever anybody wrote.
-    // `valids/pause-timeout-allow-failure` is the flow that measures it: a
-    // `Pause` with `timeout: PT1S` and `allowFailure: true` whose golden run is
-    // `["CREATED","RUNNING","PAUSED","WARNING"]`.
-    let task = &plan.tasks[task];
-    match task.timeout {
-        Some(d) => Bound::Until(
-            plus(started, d),
-            crate::executor::allow_failure::fail(task.allow_failure, task.allow_warning),
-        ),
-        None => Bound::Unbounded,
+    // 2. **`behavior:` (package 9a D2/D3), applied at the deadline only.** A
+    // manual resume never gets here ([`release_now`] ignores it), so a Pause
+    // that is resumed before its deadline succeeds whatever it says. Unset
+    // keeps the terminal above, which is every pre-9a figure unchanged.
+    let Some(source) = behavior.as_deref() else {
+        return Bound::Until(at, unset_terminal);
+    };
+    let text = if behavior_expr {
+        match rendered_parts {
+            Some((_, Some(b))) => b,
+            _ => return Bound::NotRenderedYet,
+        }
+    } else {
+        source
+    };
+    Bound::Until(at, behavior_terminal(text))
+}
+
+/// What `behavior:` ends the pause as at its deadline. `RESUME` is `SUCCESS`,
+/// which the resume gate ([`super::resume_paused`]) answers by running the
+/// body; the other three are non-`SUCCESS`, so that gate runs no body.
+///
+/// **A value outside the four fails the run** (spec D2) where Kestra's
+/// `Behavior.valueOf` throws inside the executor and leaves the pause
+/// `RUNNING` for ever. A literal never gets here with one -- `pause_plan_gap`
+/// refuses it -- so this is the rendered-expression case.
+fn behavior_terminal(text: &str) -> RunState {
+    match text.trim() {
+        "RESUME" => RunState::Success,
+        "WARN" => RunState::Warning,
+        "CANCEL" => RunState::Cancelled,
+        _ => RunState::Failed,
+    }
+}
+
+/// Which of a `Pause`'s two expressions need the caller: `(pauseDuration,
+/// behavior)`. A `pauseDuration:` that already parses is a complete answer; a
+/// `behavior:` needs a render only when it contains a template tag.
+fn expressions(duration: Option<&str>, behavior: Option<&str>) -> (bool, bool) {
+    (
+        duration.is_some_and(|d| parse_duration(d).is_none()),
+        behavior.is_some_and(crate::executor::plan::behavior_is_expression),
+    )
+}
+
+/// Joins the two renders in the single `rendered` slot when both are needed.
+const RENDER_SEP: char = '\u{1f}';
+
+/// The one template the caller renders for a `Pause`, or `None` when nothing
+/// needs it. A lone expression is rendered as itself (so `pauseDuration:`'s
+/// `rendered` is unchanged from before 9a); both are joined by [`RENDER_SEP`]
+/// and read back by [`split_rendered`]. One slot rather than a second column:
+/// `rendered` is stored, and a new field would be a migration.
+pub(crate) fn rendered_expression(kind: &TaskKind) -> Option<String> {
+    let TaskKind::Pause {
+        duration, behavior, ..
+    } = kind
+    else {
+        return None;
+    };
+    let (d, b) = expressions(duration.as_deref(), behavior.as_deref());
+    match (d, b) {
+        (false, false) => None,
+        (true, false) => duration.clone(),
+        (false, true) => behavior.clone(),
+        (true, true) => Some(format!(
+            "{}{RENDER_SEP}{}",
+            duration.as_deref().unwrap_or_default(),
+            behavior.as_deref().unwrap_or_default()
+        )),
+    }
+}
+
+/// [`rendered_expression`]'s answer split back: `(duration, behavior)`, each
+/// `Some` only for an expression that was rendered.
+fn split_rendered(rendered: &str, d: bool, b: bool) -> (Option<&str>, Option<&str>) {
+    match (d, b) {
+        (true, true) => match rendered.split_once(RENDER_SEP) {
+            Some((d, b)) => (Some(d), Some(b)),
+            None => (Some(rendered), None),
+        },
+        (true, false) => (Some(rendered), None),
+        (false, true) => (None, Some(rendered)),
+        (false, false) => (None, None),
     }
 }

@@ -966,7 +966,7 @@ pub(crate) fn pause_finally_is_dropped(p: &crate::models::Pause) -> bool {
 
 /// Whether a `behavior:` source is an expression, which only a render can
 /// resolve (package 9a D2).
-fn behavior_is_expression(source: &str) -> bool {
+pub(crate) fn behavior_is_expression(source: &str) -> bool {
     source.contains("{{") || source.contains("{%")
 }
 

@@ -2151,10 +2151,7 @@ fn expression_of(plan: &Plan, task: usize) -> Option<String> {
         TaskKind::LoopUntil { condition, .. } => Some(condition.clone()),
         TaskKind::Switch { value, .. } => Some(value.clone()),
         TaskKind::Loop { values, .. } => Some(values.clone()),
-        TaskKind::Pause {
-            duration: Some(source),
-            ..
-        } if crate::executor::parse_duration(source).is_none() => Some(source.clone()),
+        kind @ TaskKind::Pause { .. } => crate::executor::pause_rendered_expression(kind),
         // Kill-and-exit Task 3, narrow the way the `Pause` arm is: a literal
         // one of the five is read off the plan, and anything else -- an
         // expression, or a literal outside the five -- is rendered, so a bad
