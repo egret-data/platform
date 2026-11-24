@@ -35732,6 +35732,264 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/force-run/by-ids": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Force-run several `QUEUED` executions, all or none (package 8b).",
+        "operationId": "force_run_executions_by_ids",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkIds"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Every listed execution started now, bypassing the flow's limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Nothing was started: `too_many` (more than 1000 ids), or an `invalids` list naming every id that is missing, not yours to manage, or not `QUEUED`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/force-run/by-query": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Force-run every execution a filter matches, all or none (package 8b).",
+        "operationId": "force_run_executions_by_query",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "namespace_prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "flow_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Comma-separated states, as on the list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "root_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "parent",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every matched execution started now, bypassing the flow's limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Nothing was started: `too_many` (the filter matches more than 1000) or an `invalids` list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/kill/by-ids": {
       "delete": {
         "tags": [
@@ -37810,6 +38068,288 @@
         }
       }
     },
+    "/api/ws/{workspace}/workflows/executions/unqueue/by-ids": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Unqueue several `QUEUED` executions to one terminal state, all or none\n(package 8b).",
+        "operationId": "unqueue_executions_by_ids",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "The terminal state the queued execution(s) move to, as an execution\nstate wire value (`CANCELLED`, `FAILED`, `KILLED`, `SUCCESS`, ...).\nDefault `CANCELLED`. A non-terminal state is 400\n`unqueue_state_not_terminal`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkIds"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Every listed execution left the queue for the target terminal state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Nothing was unqueued: `unqueue_state_not_terminal`, `too_many` (more than 1000 ids), or an `invalids` list naming every id that is missing, not yours to manage, or not `QUEUED`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/unqueue/by-query": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Unqueue every execution a filter matches to one terminal state, all or\nnone (package 8b). The filter's `state` picks WHICH executions; the target\nis `target_state`.",
+        "operationId": "unqueue_executions_by_query",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "flow_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "namespace_prefix",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "flow_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Comma-separated states, as on the list.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "root_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "parent",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "target_state",
+            "in": "query",
+            "description": "As [`UnqueueStateQuery::state`]. Default `CANCELLED`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every matched execution left the queue for the target terminal state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Nothing was unqueued: `unqueue_state_not_terminal`, `too_many` (the filter matches more than 1000) or an `invalids` list.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ws/{workspace}/workflows/executions/{id}": {
       "get": {
         "tags": [
@@ -38558,6 +39098,106 @@
           },
           "404": {
             "description": "No such execution in this workspace, indistinguishably from one that never existed. **Answered before the stream opens**, so a foreign id is a 404 response and never a 200 stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}/force-run": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Start a `QUEUED` execution now, bypassing its flow's concurrency limit\n(package 8b).",
+        "operationId": "force_run_execution",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The queued execution started now, bypassing the flow's concurrency limit. The body is its detail afterwards.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`not_queued`: the execution is not `QUEUED` (the message names the state). Nothing is written.",
             "content": {
               "application/json": {
                 "schema": {
@@ -40618,6 +41258,128 @@
           },
           "409": {
             "description": "Nothing is written. The flow is disabled (no code, as for a replay). The worker then checks, in this order: loop iteration (the 400 above), `files_pruned`, `after_execution_running` (the execution has ended but its `afterExecution:` still runs), `not_restartable` (the execution has not ended, or ended `KILLED`; the message names its state), then the run itself: no such run (the 404 above), `state_unchanged` (the run is already in that state), `inside_working_directory` (the run is inside a `WorkingDirectory`; restart the execution instead).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ws/{workspace}/workflows/executions/{id}/unqueue": {
+      "post": {
+        "tags": [
+          "workflow"
+        ],
+        "summary": "Take a `QUEUED` execution out of its flow's queue by moving it to a\nterminal state (package 8b).",
+        "operationId": "unqueue_execution",
+        "parameters": [
+          {
+            "name": "workspace",
+            "in": "path",
+            "description": "Workspace slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "The terminal state the queued execution(s) move to, as an execution\nstate wire value (`CANCELLED`, `FAILED`, `KILLED`, `SUCCESS`, ...).\nDefault `CANCELLED`. A non-terminal state is 400\n`unqueue_state_not_terminal`.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The execution left the queue for the target terminal state (`CANCELLED` unless `?state=` says otherwise). It never runs. The body is its detail afterwards.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`unqueue_state_not_terminal`: `?state=` is not a terminal state (or not an execution state at all). Nothing is written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing workflow:manage permission, or the workflows module is disabled for this workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such execution in this workspace, indistinguishably from one that never existed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`not_queued`: the execution is not `QUEUED` (the message names the state). Nothing is written.",
             "content": {
               "application/json": {
                 "schema": {
@@ -49947,6 +50709,30 @@
           }
         }
       },
+      "Concurrency": {
+        "type": "object",
+        "description": "`Concurrency.java`. `limit` is `@NotNull @Min(1) Integer` with no\n`@Builder.Default` -- absent *or* explicit `null` both leave it `null` in\nJava, so it is `Option<i32>` here (Task 4 owes the not-null and `>= 1`\nchecks); the brief's interface typed this field as a bare `limit: i32`,\nbut the `@NotNull`-is-bean-validation principle applies here exactly as it\ndoes to `Parallel::concurrent` in `task.rs`, so the source wins.",
+        "properties": {
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "behavior": {
+            "$ref": "#/components/schemas/ConcurrencyBehavior"
+          }
+        }
+      },
+      "ConcurrencyBehavior": {
+        "type": "string",
+        "enum": [
+          "QUEUE",
+          "CANCEL",
+          "FAIL"
+        ]
+      },
       "ConditionDto": {
         "type": "object",
         "description": "One `dependsOn` entry, labelled by its condition key.",
@@ -55852,6 +56638,17 @@
           "worker_enabled": {
             "type": "boolean",
             "description": "Whether this deployment runs the workflow worker\n(`workflow.worker_enabled`, `EGRET_WORKFLOW__WORKER_ENABLED`; off by\ndefault). **False: an execution is created and stays `RUNNING`, and\nnothing runs it until an administrator turns the worker on** (KI-013).\nThe same flag the trigger routes echo ([`TriggerFlags`])."
+          },
+          "concurrency": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Concurrency",
+                "description": "The flow's declared `concurrency` (limit + behavior); null when the\nflow declares none."
+              }
+            ]
           }
         }
       },

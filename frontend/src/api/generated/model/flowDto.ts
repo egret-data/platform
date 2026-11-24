@@ -5,6 +5,7 @@
  * egret unified data portal HTTP API.
  * OpenAPI spec version: 0.1.0
  */
+import type { Concurrency } from './concurrency';
 import type { FlowDtoPlan } from './flowDtoPlan';
 import type { ValidationReportDto } from './validationReportDto';
 
@@ -56,4 +57,5 @@ export interface FlowDto {
      * The same flag the trigger routes echo ([`TriggerFlags`]).
      */
   worker_enabled: boolean;
+  concurrency?: null | Concurrency;
 }
