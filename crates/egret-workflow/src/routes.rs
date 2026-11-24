@@ -5201,8 +5201,15 @@ fn unqueue_target(raw: Option<&str>) -> std::result::Result<RunState, ExecOpErro
     let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
         return Ok(RunState::Cancelled);
     };
-    let state = crate::worker::from_wire(&raw.to_ascii_uppercase())
-        .ok_or_else(|| Error::InvalidInput(format!("unknown execution state `{raw}`")))?;
+    let state = crate::worker::from_wire(&raw.to_ascii_uppercase()).ok_or_else(|| {
+        ExecOpError::Coded(
+            StatusCode::BAD_REQUEST,
+            UNQUEUE_STATE_NOT_TERMINAL_CODE,
+            format!(
+                "`{raw}` is not an execution state; an unqueued execution must end in a terminal one"
+            ),
+        )
+    })?;
     if !state.is_terminal() {
         return Err(ExecOpError::Coded(
             StatusCode::BAD_REQUEST,

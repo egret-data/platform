@@ -1178,3 +1178,139 @@ async fn a_loop_reopening_restart_over_a_cancel_limit_is_cancelled(pool: sqlx::P
         .unwrap();
     assert_eq!(state(&pool, failed).await, "CANCELLED");
 }
+
+// ---- Task 5: 8b residual race pins -------------------------------------------
+
+/// Live = neither terminal nor `QUEUED`, the limit's own definition.
+async fn live_count(pool: &sqlx::PgPool, flow: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions \
+         WHERE flow_id = $1 AND NOT workflow.state_is_terminal(state) AND state <> 'QUEUED'",
+    )
+    .bind(flow)
+    .fetch_one(pool)
+    .await
+    .expect("live")
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_bulk_force_run_over_the_limit_loses_nothing_and_the_drain_counts_correctly(
+    pool: sqlx::PgPool,
+) {
+    // Arrange: limit 1; one RUNNING and three QUEUED.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let running = start(&pool, ws, Some(flow), &src).await;
+    let queued: Vec<Uuid> = {
+        let mut v = Vec::new();
+        for _ in 0..3 {
+            v.push(start(&pool, ws, Some(flow), &src).await);
+        }
+        v
+    };
+    assert_eq!(live_count(&pool, flow).await, 1);
+
+    // Act: force-run two of the three, crossing the limit (1 -> 3 live).
+    for id in &queued[..2] {
+        let out = egret_workflow::worker::force_run(&pool, ws, *id)
+            .await
+            .expect("force-run");
+        assert_eq!(out, egret_workflow::worker::ForceRun::Started);
+    }
+
+    // Assert: the bypass is real and the untouched one is still parked.
+    assert_eq!(live_count(&pool, flow).await, 3);
+    assert_eq!(state(&pool, queued[2]).await, "QUEUED");
+
+    // Drain: each tick finishes one execution. The drain must not promote the
+    // parked one while any other is live (live >= limit), only after the last.
+    let mut parked_promoted_early = false;
+    for _ in 0..3 {
+        tick(&pool, 1).await;
+        let others_live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workflow.executions WHERE id = ANY($1) \
+             AND NOT workflow.state_is_terminal(state)",
+        )
+        .bind(vec![running, queued[0], queued[1]])
+        .fetch_one(&pool)
+        .await
+        .expect("others");
+        if others_live > 0 && state(&pool, queued[2]).await != "QUEUED" {
+            parked_promoted_early = true;
+        }
+    }
+    assert!(!parked_promoted_early, "drain promoted over a live pool");
+
+    // Finally nothing is lost: all four end SUCCESS once the parked one runs.
+    tick(&pool, 3).await;
+    for id in [running, queued[0], queued[1], queued[2]] {
+        assert_eq!(state(&pool, id).await, "SUCCESS", "{id}");
+    }
+    assert_eq!(live_count(&pool, flow).await, 0);
+}
+
+/// Advisory locks held in this database by backends other than the caller.
+async fn foreign_advisory_locks(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted \
+         AND pid <> pg_backend_pid() \
+         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("pg_locks")
+}
+
+/// The ABBA 8b's deadlock-retry absorbs, built with explicit lock ordering.
+/// `A` plays a settle-drain-style mutator (row lock, then the flow's advisory
+/// lock). `B` is the real `force_run` (advisory, then row). `A` takes the row
+/// first; `B` is only released once it holds the advisory lock (observed in
+/// `pg_locks`, not a sleep), and `A` requests the advisory lock only after
+/// that, so the cycle is certain. Postgres picks a victim; whichever it is,
+/// both must complete and the final state must be correct.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_row_then_advisory_mutator_and_force_run_deadlock_and_both_complete(pool: sqlx::PgPool) {
+    // Arrange: limit 1, one RUNNING, one QUEUED target.
+    let src = flow_src(Some((1, "QUEUE")));
+    let (ws, flow) = setup(&pool, &src).await;
+    let running = start(&pool, ws, Some(flow), &src).await;
+    let target = start(&pool, ws, Some(flow), &src).await;
+    assert_eq!(state(&pool, target).await, "QUEUED");
+
+    // A: take the target's row lock first, hold it.
+    let mut a = pool.begin().await.expect("begin A");
+    sqlx::query("SELECT id FROM workflow.executions WHERE id = $1 FOR UPDATE")
+        .bind(target)
+        .fetch_one(&mut *a)
+        .await
+        .expect("A row lock");
+
+    // B: force-run the target; it takes the advisory lock, then blocks on A's row.
+    let b = tokio::spawn({
+        let pool = pool.clone();
+        async move { egret_workflow::worker::force_run(&pool, ws, target).await }
+    });
+    while foreign_advisory_locks(&pool).await == 0 {
+        tokio::task::yield_now().await;
+    }
+
+    // A now asks for the advisory lock B holds: the ABBA is closed.
+    let a_advisory = sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(flow)
+        .execute(&mut *a)
+        .await;
+    let a_done = match a_advisory {
+        Ok(_) => a.commit().await.is_ok(),
+        Err(_) => false, // A was the victim; its transaction is aborted.
+    };
+
+    // Assert: B completes (rerun by the retry if it was the victim) and starts the row.
+    let out = b.await.expect("join B").expect("force-run survives");
+    assert_eq!(out, egret_workflow::worker::ForceRun::Started);
+    assert_eq!(state(&pool, target).await, "RUNNING");
+    assert_eq!(state(&pool, running).await, "RUNNING");
+    // A neither hung nor was left half-done: it committed, or was the victim.
+    // That it returned at all proves the cycle was broken by a deadlock abort
+    // (with no deadlock, A would wait on B's advisory lock, B on A's row, forever).
+    let _ = a_done;
+}
