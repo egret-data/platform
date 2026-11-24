@@ -8280,27 +8280,10 @@ tasks:
     /// that refused every `Pause`.
     #[test]
     fn a_pause_this_executor_does_not_reproduce_is_refused_at_plan() {
-        let rows: [(&str, &str); 5] = [
-            (
-                "tasks",
-                "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        \
-                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-            ),
-            (
-                "errors",
-                "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        \
-                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-            ),
-            ("behavior", "    pauseDuration: PT1S\n    behavior: FAIL\n"),
-            (
-                "behavior",
-                "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
-            ),
-            (
-                "onPause",
-                "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      \
-                 type: io.kestra.plugin.core.debug.Return\n      format: x\n",
-            ),
+        // 9a: only a LITERAL `behavior:` outside the enum is still a gap.
+        let rows: [(&str, &str); 2] = [
+            ("behavior", "    pauseDuration: PT1S\n    behavior: NOPE\n"),
+            ("behavior", "    pauseDuration: PT1S\n    behavior: fail\n"),
         ];
         for (property, props) in rows {
             let src = pause_flow(props);
@@ -8320,13 +8303,34 @@ tasks:
             );
         }
 
+        // 9a: every other property plans as a `TaskKind::Pause`.
+        for props in [
+            "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        \
+             type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        \
+             type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            "    pauseDuration: PT1S\n    behavior: FAIL\n",
+            "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
+            "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      \
+             type: io.kestra.plugin.core.debug.Return\n      format: x\n",
+        ] {
+            let plan = build_plan(&pause_flow(props)).unwrap_or_else(|e| panic!("{props}: {e:?}"));
+            assert!(
+                matches!(plan.tasks[0].kind, TaskKind::Pause { .. }),
+                "{props}"
+            );
+        }
+
         // The control.
         let src = pause_flow("    pauseDuration: PT1S\n");
         let plan = build_plan(&src).unwrap();
         assert_eq!(
             plan.tasks[0].kind,
             TaskKind::Pause {
-                duration: Some("PT1S".to_string())
+                duration: Some("PT1S".to_string()),
+                tasks: Vec::new(),
+                on_pause: None,
+                behavior: None,
             }
         );
         let report = crate::spec::validate(&crate::spec::parse(&src).unwrap());
@@ -10205,7 +10209,7 @@ tasks:
                 continue;
             };
             for ix in 0..plan.tasks.len() {
-                let TaskKind::Pause { duration } = &plan.tasks[ix].kind else {
+                let TaskKind::Pause { duration, .. } = &plan.tasks[ix].kind else {
                     continue;
                 };
                 planned_pauses += 1;

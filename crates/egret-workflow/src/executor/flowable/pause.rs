@@ -221,7 +221,7 @@ enum Bound {
 /// has not been measured to produce, and an unbounded pause is the one answer
 /// that can never be an over-acceptance.
 fn deadline(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, started: Tick) -> Bound {
-    let crate::executor::plan::TaskKind::Pause { duration } = &plan.tasks[task].kind else {
+    let crate::executor::plan::TaskKind::Pause { duration, .. } = &plan.tasks[task].kind else {
         // Unreachable for the same reason `drive`'s missing attempt is: both
         // callers match on this kind before they get here.
         return Bound::Unbounded;

@@ -2153,6 +2153,7 @@ fn expression_of(plan: &Plan, task: usize) -> Option<String> {
         TaskKind::Loop { values, .. } => Some(values.clone()),
         TaskKind::Pause {
             duration: Some(source),
+            ..
         } if crate::executor::parse_duration(source).is_none() => Some(source.clone()),
         // Kill-and-exit Task 3, narrow the way the `Pause` arm is: a literal
         // one of the five is read off the plan, and anything else -- an

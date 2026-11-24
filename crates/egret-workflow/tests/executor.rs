@@ -6073,8 +6073,9 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     }
 
     assert_eq!(
-        in_an_errors_list, 14,
-        "the runs Task 7 alone added to the plan: every one is a task written in \
+        in_an_errors_list, 15,
+        "(15 = 14 + the `errors:` run of `valids/pause-errors-finally-after-execution`, \
+         planned since 9a Task 1.) the runs Task 7 alone added to the plan: every one is a task written in \
          a TASK-level `errors:` list, which W1's model dropped until Task 7 \
          widened it. The flow's own `errors:` is not among them -- `Plan::errors` \
          has been populated since Task 3. The four more are the AllowFailure \
