@@ -367,53 +367,58 @@ fn deadline(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, start
     // ([`rendered_expression`]). `None` while an expression is unanswered.
     let rendered = state.runs[run].rendered.as_deref();
     let (duration_expr, behavior_expr) = expressions(duration.as_deref(), behavior.as_deref());
-    let rendered_parts = rendered.map(|r| split_rendered(r, duration_expr, behavior_expr));
+    let rendered_parts = match rendered {
+        None => None,
+        Some(r) => match split_rendered(r, duration_expr, behavior_expr) {
+            Some(parts) => Some(parts),
+            // Both were expected and the separator is missing (D2): fail.
+            None => return Bound::Until(started, RunState::Failed),
+        },
+    };
 
-    // 1. When the deadline is, and what it ends as when `behavior:` is unset.
-    let (at, unset_terminal) = if let Some(source) = duration.as_deref() {
-        // An expression goes through the caller, exactly as an `If`'s condition
-        // does -- `advance()` is pure. A literal is parsed straight, without
-        // waiting for a render that would only hand back the same text:
-        // `valids/pause-delay` writes `PT1S` and must not stall on a caller
-        // that renders nothing.
-        let text = if duration_expr {
-            match rendered_parts {
-                Some((Some(d), _)) => d,
-                _ => return Bound::NotRenderedYet,
-            }
-        } else {
-            source
-        };
-        match parse_duration(text) {
-            Some(d) => (plus(started, d), RunState::Success),
-            None => return Bound::Unbounded,
-        }
-    } else {
-        // **`timeout:` and `pauseDuration:` take DIFFERENT terminals from the
-        // two `allow*` flags, and the artifact's own line is what says so** --
-        // W8 Task 5. `ExecutorService.java:937` is
+    let Some(source) = duration.as_deref() else {
+        // **`timeout:` takes the `allow*` flags and NOT `behavior:`** -- W8
+        // Task 5. `ExecutorService.java:937` is
         // `.state(duration != null ? behavior.mapToState() : State.Type.fail(pauseTask))`,
-        // so the flags reach the `timeout:` branch and NOT the `pauseDuration:`
-        // one above, which keeps `RunState::Success` whatever anybody wrote.
-        // `valids/pause-timeout-allow-failure` is the flow that measures it: a
+        // so only the `pauseDuration:` branch reads `behavior:` and the
+        // `timeout:` one is `fail(allowFailure, allowWarning)` whatever
+        // `behavior:` says. `valids/pause-timeout-allow-failure` measures it: a
         // `Pause` with `timeout: PT1S` and `allowFailure: true` whose golden run
         // is `["CREATED","RUNNING","PAUSED","WARNING"]`.
         let task = &plan.tasks[task];
-        match task.timeout {
-            Some(d) => (
+        return match task.timeout {
+            Some(d) => Bound::Until(
                 plus(started, d),
                 crate::executor::allow_failure::fail(task.allow_failure, task.allow_warning),
             ),
-            None => return Bound::Unbounded,
-        }
+            None => Bound::Unbounded,
+        };
     };
 
-    // 2. **`behavior:` (package 9a D2/D3), applied at the deadline only.** A
-    // manual resume never gets here ([`release_now`] ignores it), so a Pause
-    // that is resumed before its deadline succeeds whatever it says. Unset
-    // keeps the terminal above, which is every pre-9a figure unchanged.
+    // An expression goes through the caller, exactly as an `If`'s condition
+    // does -- `advance()` is pure. A literal is parsed straight, without
+    // waiting for a render that would only hand back the same text:
+    // `valids/pause-delay` writes `PT1S` and must not stall on a caller
+    // that renders nothing.
+    let text = if duration_expr {
+        match rendered_parts {
+            Some((Some(d), _)) => d,
+            _ => return Bound::NotRenderedYet,
+        }
+    } else {
+        source
+    };
+    let Some(d) = parse_duration(text) else {
+        return Bound::Unbounded;
+    };
+    let at = plus(started, d);
+
+    // **`behavior:` (package 9a D2/D3), applied at the `pauseDuration:`
+    // deadline only.** A manual resume never gets here ([`release_now`]), so a
+    // Pause resumed before its deadline succeeds whatever it says. Unset is
+    // `RESUME`, `SUCCESS`: every pre-9a figure unchanged.
     let Some(source) = behavior.as_deref() else {
-        return Bound::Until(at, unset_terminal);
+        return Bound::Until(at, RunState::Success);
     };
     let text = if behavior_expr {
         match rendered_parts {
@@ -449,7 +454,10 @@ fn behavior_terminal(text: &str) -> RunState {
 fn expressions(duration: Option<&str>, behavior: Option<&str>) -> (bool, bool) {
     (
         duration.is_some_and(|d| parse_duration(d).is_none()),
-        behavior.is_some_and(crate::executor::plan::behavior_is_expression),
+        // `behavior:` is read only at a `pauseDuration:` deadline
+        // (`ExecutorService.java:937`), so without one there is nothing to
+        // render.
+        duration.is_some() && behavior.is_some_and(crate::executor::plan::behavior_is_expression),
     )
 }
 
@@ -483,14 +491,18 @@ pub(crate) fn rendered_expression(kind: &TaskKind) -> Option<String> {
 
 /// [`rendered_expression`]'s answer split back: `(duration, behavior)`, each
 /// `Some` only for an expression that was rendered.
-fn split_rendered(rendered: &str, d: bool, b: bool) -> (Option<&str>, Option<&str>) {
-    match (d, b) {
-        (true, true) => match rendered.split_once(RENDER_SEP) {
-            Some((d, b)) => (Some(d), Some(b)),
-            None => (Some(rendered), None),
-        },
+///
+/// `None` is a rendered slot that should hold both but has no separator, which
+/// the caller cannot have written: [`deadline`] fails the pause on it (spec
+/// D2, never a hang) instead of waiting for an answer that will not come.
+fn split_rendered(rendered: &str, d: bool, b: bool) -> Option<(Option<&str>, Option<&str>)> {
+    Some(match (d, b) {
+        (true, true) => {
+            let (d, b) = rendered.split_once(RENDER_SEP)?;
+            (Some(d), Some(b))
+        }
         (true, false) => (Some(rendered), None),
         (false, true) => (None, Some(rendered)),
         (false, false) => (None, None),
-    }
+    })
 }

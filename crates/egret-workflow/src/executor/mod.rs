@@ -9047,6 +9047,51 @@ tasks:
         assert_eq!(wire(&state.runs[0].history), ["CREATED", "RUNNING"]);
     }
 
+    /// 9a Task 4 fix: `behavior:` is read only at a `pauseDuration:` deadline.
+    /// A `timeout:`-only pause keeps the `allow*` mapping whatever it says, and
+    /// runs no body and cancels nothing.
+    #[test]
+    fn a_timeout_deadline_ignores_behavior() {
+        for b in ["WARN", "CANCEL", "FAIL", "RESUME"] {
+            for (flags, want) in [
+                ("", RunState::Failed),
+                ("    allowFailure: true\n", RunState::Warning),
+            ] {
+                let src = format!(
+                    "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                     type: io.kestra.plugin.core.flow.Pause\n    timeout: PT1S\n    \
+                     behavior: {b}\n{flags}    tasks:\n      - id: b1\n        \
+                     type: io.kestra.plugin.core.log.Log\n        message: body\n"
+                );
+                let plan = plan::plan_stored(&src).expect("plans");
+                let state = pause_then_deadline(&plan, None);
+                assert_eq!(state.runs[0].history.last(), Some(&want), "{b} {flags}");
+                assert!(!run_ids(&plan, &state).contains(&"b1".to_string()), "{b}");
+                assert_ne!(state.history.last(), Some(&RunState::Cancelled), "{b}");
+            }
+        }
+        // And no render is awaited for an expression behavior without a duration.
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    timeout: PT1S\n    \
+                   behavior: \"{{ inputs.b }}\"\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        assert_eq!(pause_rendered_expression(&plan.tasks[0].kind), None);
+    }
+
+    /// D2: a joined render with no separator fails the pause, never hangs.
+    #[test]
+    fn a_joined_render_without_its_separator_fails_the_pause() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    \
+                   pauseDuration: \"{{ inputs.d }}\"\n    behavior: \"{{ inputs.b }}\"\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        round_at(&plan, &mut state, T0);
+        state.runs[0].rendered = Some("PT1S".to_string());
+        settle_at(&plan, &mut state, T0);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Failed));
+    }
+
     /// Both `pauseDuration:` and `behavior:` expressions share the one render
     /// slot and are told apart.
     #[test]
