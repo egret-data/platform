@@ -39,6 +39,10 @@ pub enum Admit {
     Run,
     /// At the limit: park the row in `QUEUED` and start no task.
     Queue,
+    /// At the limit with `behavior: CANCEL`: the row is born `CANCELLED`.
+    Cancel,
+    /// At the limit with `behavior: FAIL`: the row is born `FAILED`.
+    Fail,
 }
 
 /// Decide whether a new execution of `flow_id` may run now, under the flow's
@@ -47,7 +51,12 @@ pub enum Admit {
 /// The running pool is every execution of the flow that is neither terminal
 /// (`workflow.state_is_terminal`, the one list of terminal states) nor
 /// `QUEUED`.
-pub async fn concurrency_admit(tx: &mut PgConnection, flow_id: Uuid, limit: i32) -> Result<Admit> {
+pub async fn concurrency_admit(
+    tx: &mut PgConnection,
+    flow_id: Uuid,
+    limit: i32,
+    behavior: ConcurrencyBehavior,
+) -> Result<Admit> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
         .bind(flow_id)
         .execute(&mut *tx)
@@ -64,7 +73,11 @@ pub async fn concurrency_admit(tx: &mut PgConnection, flow_id: Uuid, limit: i32)
     Ok(if live < i64::from(limit) {
         Admit::Run
     } else {
-        Admit::Queue
+        match behavior {
+            ConcurrencyBehavior::Queue => Admit::Queue,
+            ConcurrencyBehavior::Cancel => Admit::Cancel,
+            ConcurrencyBehavior::Fail => Admit::Fail,
+        }
     })
 }
 
