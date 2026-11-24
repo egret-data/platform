@@ -590,3 +590,79 @@ async fn a_queued_restart_resumes_to_restarted_not_created(pool: sqlx::PgPool) {
     );
     assert_ne!(arr, &vec![json!("CREATED")], "must not reset to CREATED");
 }
+
+/// Force an execution terminal `SUCCESS` (so it may be replayed and frees its slot).
+async fn finish_success(pool: &sqlx::PgPool, id: Uuid) {
+    sqlx::query(
+        "UPDATE workflow.executions SET state = 'SUCCESS', \
+         history = history || '[\"SUCCESS\"]'::jsonb, ended_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .expect("finish");
+}
+
+/// A whole replay of `from`, through the public worker entry.
+async fn whole_replay(pool: &sqlx::PgPool, ws: Uuid, from: Uuid, src: &str) -> Uuid {
+    let owner: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .fetch_one(pool)
+        .await
+        .expect("owner");
+    egret_workflow::worker::replay_execution(
+        pool,
+        &egret_workflow::worker::ReplayRequest {
+            workspace_id: ws,
+            from,
+            source: src,
+            kind: egret_workflow::worker::ReplayKind::Whole,
+            inputs: egret_workflow::worker::ReplayInputs::Reuse,
+            started_by: owner,
+            id: Uuid::new_v4(),
+            input_files: Vec::new(),
+        },
+    )
+    .await
+    .expect("replay")
+    .expect("not refused")
+}
+
+/// Limit 1: one execution finished (to replay), one live holding the slot.
+/// The whole replay is born `terminal` (or QUEUED), no task run.
+async fn whole_replay_over_limit(pool: sqlx::PgPool, behavior: &str, terminal: &str) {
+    let src = flow_src(Some((1, behavior)));
+    let (ws, flow) = setup(&pool, &src).await;
+    let old = start(&pool, ws, Some(flow), &src).await;
+    finish_success(&pool, old).await;
+    let _live = start(&pool, ws, Some(flow), &src).await;
+
+    let replayed = whole_replay(&pool, ws, old, &src).await;
+
+    assert_eq!(state(&pool, replayed).await, terminal);
+    assert_eq!(run_count(&pool, replayed).await, 0, "no task run");
+    if terminal == "QUEUED" {
+        assert_eq!(history(&pool, replayed).await, json!(["CREATED", "QUEUED"]));
+    } else {
+        assert_eq!(history(&pool, replayed).await, json!(["CREATED", terminal]));
+        assert!(
+            has_ended_at(&pool, replayed).await,
+            "a terminal start stamps ended_at"
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_whole_replay_over_the_limit_is_queued(pool: sqlx::PgPool) {
+    whole_replay_over_limit(pool, "QUEUE", "QUEUED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_whole_replay_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
+    whole_replay_over_limit(pool, "CANCEL", "CANCELLED").await;
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_whole_replay_over_a_fail_limit_is_failed(pool: sqlx::PgPool) {
+    whole_replay_over_limit(pool, "FAIL", "FAILED").await;
+}

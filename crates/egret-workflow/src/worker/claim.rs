@@ -4556,6 +4556,17 @@ pub(super) async fn insert_execution(
     Ok(insert_execution_gated(conn, gate, new, false).await?.0)
 }
 
+/// [`insert_execution`] through the flow-concurrency gate (package 8c): the
+/// row is born at the admitted state and the [`Disposition`] says what the
+/// caller does next.
+pub(super) async fn insert_execution_admitted(
+    conn: &mut PgConnection,
+    gate: &Gate,
+    new: NewExecution<'_>,
+) -> Result<(ExecutionCtx, Disposition)> {
+    insert_execution_gated(conn, gate, new, true).await
+}
+
 /// [`insert_execution`] with the flow-concurrency gate (package 8a) when
 /// `gated`: under the flow's advisory lock, in THIS transaction, the row is
 /// born `QUEUED` instead of `CREATED` if the flow is at its limit with
