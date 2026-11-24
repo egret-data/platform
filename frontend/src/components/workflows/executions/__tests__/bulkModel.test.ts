@@ -35,6 +35,15 @@ describe("bulkEligibility", () => {
     expect(bulkEligibility([running]).pause.ok).toBe(true);
   });
 
+  it("offers unqueue and force run only when every row is QUEUED", () => {
+    const queued = row({ state: "QUEUED" });
+    expect(bulkEligibility([queued]).unqueue.ok).toBe(true);
+    expect(bulkEligibility([queued]).forceRun.ok).toBe(true);
+    const mixed = bulkEligibility([queued, row({ id: "e2", state: "RUNNING" })]);
+    expect(mixed.unqueue.ok).toBe(false);
+    expect(mixed.forceRun.ok).toBe(false);
+  });
+
   it("says why an action is unavailable", () => {
     const e = bulkEligibility([row({ state: "SUCCESS" })]);
     expect(e.kill).toEqual({ ok: false, reason: expect.stringMatching(/not ended|finished|running/i) });

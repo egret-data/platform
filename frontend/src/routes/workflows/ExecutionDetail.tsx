@@ -7,8 +7,10 @@ import { ApiError } from "@/api/client";
 import {
   getWorkflowFollowExecutionUrl,
   useWorkflowGetExecution,
+  useWorkflowForceRunExecution,
   useWorkflowKillExecution,
   useWorkflowPauseExecution,
+  useWorkflowUnqueueExecution,
   useWorkflowSetExecutionStatus,
 } from "@/api/generated/workflow/workflow";
 import type { ExecutionDto, TaskRunDto } from "@/api/generated/model";
@@ -399,7 +401,7 @@ function ExecutionHeader({ ws, execution, now }: { ws: string; execution: Execut
   );
 }
 
-type Pending = "resume" | "pause" | "replay" | "kill" | "restart" | "status" | "labels" | "delete" | null;
+type Pending = "resume" | "pause" | "replay" | "kill" | "restart" | "status" | "labels" | "delete" | "unqueue" | "forceRun" | null;
 
 /** The kill route's 409 code: the execution ended before the kill reached it (workflow kill spec D3). */
 const EXECUTION_TERMINATED = "execution_terminated";
@@ -416,6 +418,8 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   const refresh = useRefreshExecution(ws, execution.id);
   const pause = useWorkflowPauseExecution();
   const kill = useWorkflowKillExecution();
+  const unqueue = useWorkflowUnqueueExecution();
+  const forceRun = useWorkflowForceRunExecution();
   const setStatus = useWorkflowSetExecutionStatus();
   const [open, setOpen] = useState<Pending>(null);
   // "Also kill subflow executions": on by default, and on again each time the dialog opens.
@@ -438,6 +442,8 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
   const restartState = canRestart(execution);
   const statusShown = showsChangeStatus(execution);
   const statusState = canChangeStatus(execution);
+  // A queued execution waits on its flow's concurrency limit: it can be dropped, or run past the limit.
+  const queued = execution.state === "QUEUED";
   const labelsState = canEditLabels(execution);
   const deleteState = canDelete(execution);
 
@@ -459,6 +465,26 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
       refresh,
       refusal: (code) => stateChangeRefusal("status", code),
       onSuccess: () => toast.success(`Changed the status to ${state.charAt(0)}${state.slice(1).toLowerCase()}`),
+    });
+
+  const runUnqueue = () =>
+    runExecutionAction({
+      call: () => unqueue.mutateAsync({ workspace: ws, id: execution.id, params: { state: "CANCELLED" } }),
+      expected: 200,
+      failure: "The execution could not be unqueued. Try again.",
+      refresh,
+      refusal: () => null,
+      onSuccess: () => toast.success("Unqueued the execution"),
+    });
+
+  const runForceRun = () =>
+    runExecutionAction({
+      call: () => forceRun.mutateAsync({ workspace: ws, id: execution.id }),
+      expected: 200,
+      failure: "The execution could not be started. Try again.",
+      refresh,
+      refusal: () => null,
+      onSuccess: () => toast.success("Started the execution"),
     });
 
   const runKill = async () => {
@@ -513,6 +539,18 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
             Replay
           </ReasonButton>
         ) : null}
+        {queued ? (
+          <>
+            <Button type="button" variant="outline" onClick={() => setOpen("forceRun")}>
+              <Play aria-hidden />
+              Force run
+            </Button>
+            <Button type="button" variant="outline" onClick={() => setOpen("unqueue")}>
+              <CircleStop aria-hidden />
+              Unqueue
+            </Button>
+          </>
+        ) : null}
         {pauseShown ? (
           <ReasonButton enablement={pauseState} reasonId={`${reasonsId}-pause`} variant="outline" onClick={() => setOpen("pause")}>
             <PauseIcon aria-hidden />
@@ -566,6 +604,25 @@ function ExecutionActions({ ws, execution, now }: { ws: string; execution: Execu
         confirmLabel="Pause"
         onConfirm={runPause}
         fallbackError="The execution could not be paused. Try again."
+      />
+      <ConfirmAction
+        open={open === "unqueue"}
+        onOpenChange={(o) => setOpen(o ? "unqueue" : null)}
+        title="Unqueue this execution?"
+        description="Takes the execution out of its flow's queue and ends it as Cancelled. It will not run."
+        confirmLabel="Unqueue"
+        confirmVariant="destructive"
+        onConfirm={runUnqueue}
+        fallbackError="The execution could not be unqueued. Try again."
+      />
+      <ConfirmAction
+        open={open === "forceRun"}
+        onOpenChange={(o) => setOpen(o ? "forceRun" : null)}
+        title="Force run this execution?"
+        description="Starts the execution now, bypassing its flow's concurrency limit."
+        confirmLabel="Force run"
+        onConfirm={runForceRun}
+        fallbackError="The execution could not be started. Try again."
       />
       <ReplayDialog ws={ws} execution={execution} mode="restart" open={open === "restart"} onOpenChange={(o) => setOpen(o ? "restart" : null)} />
       <ChangeStateDialog

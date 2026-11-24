@@ -478,6 +478,11 @@ function FlowWorkspace({
               </Tooltip>
               </TooltipProvider>
             </span>
+            {flow.concurrency?.limit != null && (
+              <span className="text-sm text-muted-foreground tabular-nums" data-testid="flow-concurrency">
+                {`Concurrency: limit ${flow.concurrency.limit} (${flow.concurrency.behavior ?? "QUEUE"})`}
+              </span>
+            )}
             {changesPill && <Badge variant="outline">{changesPill}</Badge>}
             {dirty && <Badge variant="secondary">Unsaved changes</Badge>}
             {unsavedFiles > 0 && (
