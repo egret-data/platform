@@ -934,8 +934,24 @@ const WAIT_FOR_TYPE: &str = "waitfor";
 /// planner through this function would turn that `Pause` into an opaque
 /// `Runnable` the worker fails as not-a-leaf.
 pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
+    // Package 9a builds the body in the plan ([`pause_plan_gap`]) but the
+    // driver does not run it yet, so a NEW publish/start still refuses every
+    // property it refused before 9a. This is lifted last, once the driver runs
+    // a `Pause` body.
     if pause_finally_is_dropped(p) {
         return Some("finally");
+    }
+    if !p.tasks.is_empty() {
+        return Some("tasks");
+    }
+    if !p.errors.is_empty() {
+        return Some("errors");
+    }
+    if p.behavior.is_some() {
+        return Some("behavior");
+    }
+    if p.on_pause.is_some() {
+        return Some("onPause");
     }
     pause_plan_gap(p)
 }
@@ -2015,7 +2031,7 @@ mod pause_body_plan_tests {
         let src = pause_flow(
             "    tasks:\n      - {id: a, type: io.kestra.plugin.core.log.Log, message: m}\n      - {id: b, type: io.kestra.plugin.core.log.Log, message: m}\n",
         );
-        let plan = build_plan(&src).expect("a Pause with tasks: plans");
+        let plan = plan_stored(&src).expect("a Pause with tasks: plans");
         let TaskKind::Pause { tasks, .. } = &plan.tasks[0].kind else {
             panic!("not a Pause: {:?}", plan.tasks[0].kind);
         };
@@ -2029,7 +2045,7 @@ mod pause_body_plan_tests {
         let src = pause_flow(
             "    tasks:\n      - {id: a, type: io.kestra.plugin.core.log.Log, message: m}\n    errors:\n      - {id: e, type: io.kestra.plugin.core.log.Log, message: m}\n    finally:\n      - {id: z, type: io.kestra.plugin.core.log.Log, message: m}\n    onPause: {id: o, type: io.kestra.plugin.core.log.Log, message: m}\n",
         );
-        let plan = build_plan(&src).expect("plans");
+        let plan = plan_stored(&src).expect("plans");
         let TaskKind::Pause {
             tasks, on_pause, ..
         } = &plan.tasks[0].kind
@@ -2050,7 +2066,7 @@ mod pause_body_plan_tests {
     fn a_valid_literal_or_expression_behavior_plans_and_an_invalid_literal_is_a_gap() {
         for ok in ["WARN", "RESUME", "CANCEL", "FAIL", "\"{{ inputs.b }}\""] {
             let src = pause_flow(&format!("    behavior: {ok}\n"));
-            let plan = build_plan(&src).unwrap_or_else(|e| panic!("{ok}: {e:?}"));
+            let plan = plan_stored(&src).unwrap_or_else(|e| panic!("{ok}: {e:?}"));
             let TaskKind::Pause { behavior, .. } = &plan.tasks[0].kind else {
                 panic!("{ok}: not a Pause");
             };

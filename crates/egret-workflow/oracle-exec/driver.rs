@@ -851,12 +851,7 @@ const CREATE_REFUSED: usize = 4;
 /// (its `dependsOn` to `io.kestra.tests.trigger/other-flow`) leave
 /// [`VALIDATE_REFUSED`]. Measured, not assumed: the census line read `295 live,
 /// 46 draft-only (21 unported task type, 25 egret's own validate)`.
-///
-/// **295 -> 298 at package 9a Task 1**: the three corpus flows
-/// `pause-behavior`, `pause-errors-finally-after-execution` and
-/// `pause_on_pause` stopped being refused by `pause_gap` (a `Pause` is a full
-/// flowable now), so they publish.
-const LIVE: usize = 298;
+const LIVE: usize = 295;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the

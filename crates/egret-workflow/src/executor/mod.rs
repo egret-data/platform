@@ -603,6 +603,17 @@ mod tests {
         for (id, old) in &frozen {
             let old: Vec<(usize, String, String, Vec<usize>)> =
                 serde_json::from_value(old.clone()).unwrap();
+            // 9a Task 1: a `Pause` declaring a body now plans as a `Pause`
+            // carrying it. Those three corpus flows are refused for every new
+            // start (`pause_gap`), so no live execution holds the old layout.
+            if matches!(
+                id.as_str(),
+                "valids/pause-behavior"
+                    | "valids/pause-errors-finally-after-execution"
+                    | "valids/pause_on_pause"
+            ) {
+                continue;
+            }
             let Some(new) = now.get(id) else {
                 moved.push(format!("{id}: planned before #2, not now"));
                 continue;
@@ -643,7 +654,23 @@ mod tests {
                 continue;
             };
             judged += 1;
-            for task in &plan.tasks {
+            // 9a Task 1: the plan carries a `Pause` body but the topology graph
+            // still draws a `Pause` as a leaf until a later 9a task, so the
+            // tasks planned beneath a `Pause` have no node yet.
+            let mut under_pause = BTreeSet::new();
+            let mut stack: Vec<usize> = (0..plan.tasks.len())
+                .filter(|&i| matches!(plan.tasks[i].kind, TaskKind::Pause { .. }))
+                .flat_map(|i| plan.children_of(i))
+                .collect();
+            while let Some(i) = stack.pop() {
+                if under_pause.insert(i) {
+                    stack.extend(plan.children_of(i));
+                }
+            }
+            for (ix, task) in plan.tasks.iter().enumerate() {
+                if under_pause.contains(&ix) {
+                    continue;
+                }
                 let nodes = graph
                     .nodes
                     .iter()
@@ -3871,7 +3898,7 @@ mod tests {
         // the probe is asserted for that below rather than driven through
         // the loop.
         let pause_plain = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
-        let pause_with_behavior = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    behavior: FAIL\n";
+        let pause_with_behavior = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    behavior: NOPE\n";
         // The other side of `loop_until_gap`, for the reason both sides of
         // `pause_gap` are probed: a list holding one outcome leaves the other
         // classified by nothing. `maxIterations:` is an expression here, which
@@ -4358,7 +4385,7 @@ mod tests {
             ),
             (
                 "Pause",
-                "      - id: lu\n        type: io.kestra.plugin.core.flow.Pause\n        behavior: FAIL\n",
+                "      - id: lu\n        type: io.kestra.plugin.core.flow.Pause\n        behavior: NOPE\n",
             ),
         ] {
             let (missing, n) = unrefused_opaque(&synthetic(inner)).expect(label);
@@ -4375,7 +4402,10 @@ mod tests {
         assert_eq!(
             by_type,
             BTreeMap::from([
-                ("pause".to_string(), 3),
+                // `pause` left this map at package 9a Task 1: the three corpus
+                // `Pause` flows declare a body, which the plan builds now, so
+                // they are `TaskKind::Pause` and not opaque (they stay refused
+                // for a new start by `pause_gap`).
                 // `allowfailure` left this map at spec §5.2, and
                 // `workingdirectory` at plan Task 3 (spec §4.2): both are planned
                 // flowables now, so neither is an opaque task. The 15 that were
@@ -8280,10 +8310,27 @@ tasks:
     /// that refused every `Pause`.
     #[test]
     fn a_pause_this_executor_does_not_reproduce_is_refused_at_plan() {
-        // 9a: only a LITERAL `behavior:` outside the enum is still a gap.
-        let rows: [(&str, &str); 2] = [
-            ("behavior", "    pauseDuration: PT1S\n    behavior: NOPE\n"),
-            ("behavior", "    pauseDuration: PT1S\n    behavior: fail\n"),
+        let rows: [(&str, &str); 5] = [
+            (
+                "tasks",
+                "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        \
+                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            (
+                "errors",
+                "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        \
+                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            ("behavior", "    pauseDuration: PT1S\n    behavior: FAIL\n"),
+            (
+                "behavior",
+                "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
+            ),
+            (
+                "onPause",
+                "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      \
+                 type: io.kestra.plugin.core.debug.Return\n      format: x\n",
+            ),
         ];
         for (property, props) in rows {
             let src = pause_flow(props);
@@ -8300,24 +8347,6 @@ tasks:
                 err.message.contains(&format!("[tasks.gate.{property}]")),
                 "{property}: the refusal names the property: {}",
                 err.message
-            );
-        }
-
-        // 9a: every other property plans as a `TaskKind::Pause`.
-        for props in [
-            "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        \
-             type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-            "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        \
-             type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-            "    pauseDuration: PT1S\n    behavior: FAIL\n",
-            "    pauseDuration: PT1S\n    behavior: \"{{ inputs.b }}\"\n",
-            "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      \
-             type: io.kestra.plugin.core.debug.Return\n      format: x\n",
-        ] {
-            let plan = build_plan(&pause_flow(props)).unwrap_or_else(|e| panic!("{props}: {e:?}"));
-            assert!(
-                matches!(plan.tasks[0].kind, TaskKind::Pause { .. }),
-                "{props}"
             );
         }
 
