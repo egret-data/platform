@@ -11262,6 +11262,85 @@ mod allow_failure_drive_tests {
             ]
         );
     }
+
+    /// `isErrorOrFinallyHandlingPending`: a retry owned by the block is NOT
+    /// reopened while the block's `errors:` run is still in flight, however far
+    /// `now` is past its `not_before`; it is reopened (and the error run thrown
+    /// away) once the run terminates. Fails if `reopen_due`'s hold is deleted.
+    #[test]
+    fn a_block_retry_waits_for_the_blocks_errors_to_terminate() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"
+        ))
+        .expect("the corpus flow");
+        let plan = super::plan_stored(&src).expect("a stored source plans");
+        let mut state = ExecutionState::new(&plan);
+        let ix_of = |state: &ExecutionState, id: &str| {
+            (0..state.runs.len()).find(|&i| plan.tasks[state.runs[i].task].id == id)
+        };
+        let mut guard = 0;
+        // Fail run_script once, stopping with incr_counter RUNNING.
+        loop {
+            guard += 1;
+            assert!(guard < 200, "never reached the held state");
+            let cmds = advance(&plan, &state, T0);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            if let Some(e) = ix_of(&state, "incr_counter") {
+                if state.runs[e].history.last() == Some(&RunState::Running) {
+                    break;
+                }
+            }
+            let in_flight = (0..state.runs.len()).find(|&i| {
+                matches!(
+                    plan.tasks[state.runs[i].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[i].history.last() == Some(&RunState::Running)
+            });
+            let i = in_flight.expect("something is in flight");
+            let raw = if plan.tasks[state.runs[i].task].id == "run_script" {
+                RunState::Failed
+            } else {
+                RunState::Success
+            };
+            apply(&mut state, &Command::SetRunState { run: i, state: raw });
+        }
+        let child = ix_of(&state, "run_script").unwrap();
+        let errors = ix_of(&state, "incr_counter").unwrap();
+        let not_before = state.runs[child].not_before.expect("a retry is scheduled");
+        let late = Tick(not_before.0 + 1_000_000);
+        assert_eq!(state.runs[child].history.last(), Some(&RunState::Retrying));
+        let held = advance(&plan, &state, late);
+        assert!(
+            !held.iter().any(|c| matches!(
+                c,
+                Command::SetRunState { run, state: RunState::Created } if *run == child
+            )),
+            "the retry was reopened while the block's errors were running: {held:?}"
+        );
+        assert_eq!(state.runs[child].history.last(), Some(&RunState::Retrying));
+        // The errors run ends: the retry now reopens and the error run is emptied.
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: errors,
+                state: RunState::Success,
+            },
+        );
+        let cmds = advance(&plan, &state, late);
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, Command::EmptyRun { run } if *run == errors)));
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Command::SetRunState { run, state: RunState::Created } if *run == child
+        )));
+    }
 }
 
 /// End hooks A4 (spec §4.1, D2): every flowable and the flow itself choose
