@@ -423,21 +423,33 @@ fn pause_mark(state: &ExecutionState, work: &[Command]) -> Option<RunState> {
     {
         return Some(RunState::Running);
     }
-    // "This batch ends a pause" is read as "it sets the state of a run that is
-    // `PAUSED` right now", which is exact: `Command::PauseRun` is the only
-    // producer of that state and `flowable::resume_paused` is the only thing
-    // that moves a run out of it. Matching on the command's own state instead
-    // would have to guess, because a pause ends `SUCCESS` or `FAILED`
+    // "This batch ends a pause" is read as "it moves a run that is `PAUSED`
+    // right now out of `PAUSED`", which is exact: `Command::PauseRun` is the
+    // only producer of that state and `flowable::resume_paused` is the only
+    // thing that moves a run out of it. Matching on the command's own state
+    // instead would have to guess, because a pause ends `SUCCESS` or `FAILED`
     // depending on which bound was written and both are ordinary terminals
     // everywhere else.
+    //
+    // **Two commands do the moving.** A bare pause ends with a
+    // `SetRunState { terminal }`; a `Pause` with a `tasks:` body (9a D4)
+    // re-enters `RUNNING` with a `Command::ReopenFlowable` to drive that body,
+    // and owes the execution the same `RESTARTED` the bare resume does
+    // (`CREATED RUNNING PAUSED RESTARTED RUNNING ...`). `ReopenFlowable` is also
+    // 7a's restart command, but that path builds its own batch and never
+    // reaches `pause_mark`; the only `ReopenFlowable` `advance` emits is this
+    // resume's.
     work.iter()
-        .any(|c| match c {
-            Command::SetRunState { run, .. } => state
+        .any(|c| {
+            let run = match c {
+                Command::SetRunState { run, .. } | Command::ReopenFlowable { run, .. } => run,
+                _ => return false,
+            };
+            state
                 .runs
                 .get(*run)
                 .and_then(|r| r.history.last())
-                .is_some_and(|s| *s == RunState::Paused),
-            _ => false,
+                .is_some_and(|s| *s == RunState::Paused)
         })
         .then_some(RunState::Restarted)
 }
@@ -8700,6 +8712,193 @@ tasks:
         }
         assert_eq!(run_ids(&plan, &state), ["gate"]);
         assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "PAUSED"]);
+    }
+
+    /// Drive `advance` from the current state to a standstill, completing every
+    /// `Runnable` left `RUNNING` by `outcome_of(task_id)` — 9a Task 3's resumed
+    /// `Pause` body tests, where different body children take different
+    /// terminals (the failing-body row needs one `FAILED` among `SUCCESS`es).
+    fn resume_to_fixpoint_with(
+        plan: &Plan,
+        state: &mut ExecutionState,
+        outcome_of: impl Fn(&str) -> RunState,
+    ) {
+        for _ in 0..1000 {
+            if !round_at(plan, state, T0).is_empty() {
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => {
+                    let outcome = outcome_of(&plan.tasks[state.runs[ix].task].id);
+                    apply(
+                        state,
+                        &Command::SetRunState {
+                            run: ix,
+                            state: outcome,
+                        },
+                    );
+                }
+                None => return,
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// 9a Task 3 (D4): a `Pause` with a `tasks:` body enters `PAUSED` without
+    /// running the body; a manual resume (`release_now`) then runs the body
+    /// **in order, with the pause run as parent**, and the pause run's terminal
+    /// is `aggregate(tasks)`. The successor runs after the pause succeeds, and
+    /// the execution re-enters `RUNNING` through `RESTARTED` as any resumed
+    /// pause does. The plan is built with `plan_stored` because `spec::validate`
+    /// still refuses a `Pause` with a body until 9a Task 6.
+    #[test]
+    fn a_resumed_pause_runs_its_tasks_body_under_itself() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    tasks:\n      \
+                   - id: b1\n        type: io.kestra.plugin.core.log.Log\n        \
+                   message: one\n      - id: b2\n        \
+                   type: io.kestra.plugin.core.log.Log\n        message: two\n  \
+                   - id: after\n    type: io.kestra.plugin.core.debug.Return\n    \
+                   format: done\n";
+        let plan = plan::plan_stored(src).expect("plans");
+
+        // To PAUSED, and the body has NOT run (it runs only after resume).
+        let mut state = run_to_fixpoint(&plan, RunState::Success);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["gate"],
+            "no body and no successor while the pause waits"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"]
+        );
+
+        // Manual resume, then run to the end.
+        assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+        resume_to_fixpoint_with(&plan, &mut state, |_| RunState::Success);
+
+        let ids = run_ids(&plan, &state);
+        let b1 = ids.iter().position(|i| i == "b1").expect("b1 ran");
+        let b2 = ids.iter().position(|i| i == "b2").expect("b2 ran");
+        assert!(b1 < b2, "the body runs in declaration order: {ids:?}");
+        assert_eq!(
+            state.runs[b1].parent,
+            Some(0),
+            "a body child's parent is the pause run"
+        );
+        assert_eq!(state.runs[b2].parent, Some(0));
+        assert_eq!(
+            state.runs[0].history.last(),
+            Some(&RunState::Success),
+            "the pause terminal is aggregate(tasks) = SUCCESS"
+        );
+        // RESTARTED then RUNNING between the pause and the body, then the
+        // successor and the execution's own SUCCESS.
+        assert!(
+            state.history.contains(&RunState::Restarted),
+            "a resumed pause owes RESTARTED: {:?}",
+            wire(&state.history)
+        );
+        assert_eq!(
+            run_ids(&plan, &state).last().map(String::as_str),
+            Some("after")
+        );
+        assert_eq!(state.history.last(), Some(&RunState::Success));
+    }
+
+    /// 9a Task 3 (D4/D6): a failing body child routes to the `Pause`'s
+    /// `errors:`, then its `finally:` runs, and the pause terminal is
+    /// `aggregate(tasks)` — `FAILED` — which a failing `finally:` child does not
+    /// change (spec §0.2, enforced by the shared sequential driver). This is the
+    /// same shape a `Sequential` body has; the test pins that a `Pause` body
+    /// gets it too.
+    #[test]
+    fn a_failing_pause_body_runs_errors_and_finally_and_aggregates_tasks() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    tasks:\n      \
+                   - id: b1\n        type: io.kestra.plugin.core.log.Log\n        \
+                   message: body\n    errors:\n      - id: eh\n        \
+                   type: io.kestra.plugin.core.log.Log\n        message: err\n    \
+                   finally:\n      - id: fin\n        \
+                   type: io.kestra.plugin.core.log.Log\n        message: fin\n";
+        let plan = plan::plan_stored(src).expect("plans");
+
+        let mut state = run_to_fixpoint(&plan, RunState::Success);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["gate"],
+            "nothing runs while paused"
+        );
+
+        assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+        // The body fails; the error handler succeeds; the finally child ALSO
+        // fails, to prove it cannot change the terminal.
+        resume_to_fixpoint_with(&plan, &mut state, |id| match id {
+            "b1" | "fin" => RunState::Failed,
+            _ => RunState::Success,
+        });
+
+        let ids = run_ids(&plan, &state);
+        assert!(ids.iter().any(|i| i == "eh"), "errors: ran: {ids:?}");
+        assert!(ids.iter().any(|i| i == "fin"), "finally: ran: {ids:?}");
+        for id in ["b1", "eh", "fin"] {
+            let ix = ids.iter().position(|i| i == id).unwrap();
+            assert_eq!(
+                state.runs[ix].parent,
+                Some(0),
+                "{id}: a pause body/handler child's parent is the pause run"
+            );
+        }
+        assert_eq!(
+            state.runs[0].history.last(),
+            Some(&RunState::Failed),
+            "aggregate(tasks) is FAILED, and a failing finally: does not change it"
+        );
+    }
+
+    /// 9a Task 3 (D4): an **empty**-body `Pause` is unchanged — a resume ends it
+    /// `SUCCESS` directly, with no re-open and no body, exactly as before 9a.
+    /// This guards that the resumed-body routing does not reach a bare pause.
+    #[test]
+    fn an_empty_body_pause_still_ends_success_on_resume() {
+        let plan = build_plan(&pause_flow("")).unwrap();
+        let mut state = run_to_fixpoint(&plan, RunState::Success);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"]
+        );
+
+        assert_eq!(release_paused_pauses(&mut state, T0), vec![0]);
+        let cmds = round(&plan, &mut state);
+        assert!(
+            cmds.contains(&Command::SetRunState {
+                run: 0,
+                state: RunState::Success
+            }),
+            "a bare pause resumes straight to SUCCESS: {cmds:?}"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, Command::ReopenFlowable { .. })),
+            "a bare pause is not re-opened: {cmds:?}"
+        );
+        assert_eq!(
+            state.runs[0].attempts.len(),
+            1,
+            "no second attempt: the pause was not re-opened"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
+        );
     }
 
     /// **A second pause that begins a round LATER does not repeat the

@@ -370,7 +370,7 @@ pub(crate) fn drive_concurrent(
             // by `the_corpus_pauses_that_sit_inside_another_flowable_are_named`.
             // The arm is here because the alternative is not a guard nobody
             // sees fail, it is a stall.
-            Some(RunState::Paused) => super::resume_paused(state, ix, now),
+            Some(RunState::Paused) => super::resume_paused(plan, state, ix, now),
             _ => continue,
         };
         match step {

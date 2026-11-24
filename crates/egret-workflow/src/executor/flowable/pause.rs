@@ -138,12 +138,15 @@ pub(crate) fn release_now(state: &mut ExecutionState, now: Tick) -> Vec<RunIx> {
 /// from `PAUSED`, and a `Pause` is never retried (`retry::is_retried_kind`).
 /// It is a run command and not a `Step::Done`, because `descend` returns this
 /// step unmapped and a `Done` would end the enclosing list instead.
-pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx) -> Step {
+pub(crate) fn drive(
+    plan: &Plan,
+    state: &ExecutionState,
+    run: RunIx,
+    task: TaskIx,
+    now: Tick,
+) -> Step {
     if state.runs[run].history.contains(&RunState::Paused) {
-        return Step::Commands(vec![Command::SetRunState {
-            run,
-            state: RunState::Success,
-        }]);
+        return resume_body(plan, state, run, task, now);
     }
     let Some(started) = state.runs[run].attempt_started_at() else {
         // A `Pause` run reaches `RUNNING` only through
@@ -192,6 +195,50 @@ pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskI
     }
     cmds.push(Command::PauseRun { run, resume });
     Step::Commands(cmds)
+}
+
+/// Drive a **resumed** `Pause`'s `tasks:` body (package 9a D4/D6).
+///
+/// Reached once the pause run is `RUNNING` again with `PAUSED` behind it: a
+/// RESUME re-opens it ([`flowable::resume_paused`](super::resume_paused) emits
+/// a [`Command::ReopenFlowable`] for a `Pause` with a body), and package 7a's
+/// restart reaches it too. The body runs as a sequential list with the pause
+/// run as its parent, its `errors:`/`finally:` driven by the shared
+/// [`sequential::drive`](super::sequential::drive), and the pause run's
+/// terminal is `aggregate(tasks)` — the standard flowable rule, so a failing
+/// `finally:` child does not change it (spec §0.2, which the sequential driver
+/// already enforces).
+///
+/// An **empty** body ends `SUCCESS`, which is a bare pause's resumed /
+/// restarted behaviour unchanged — the one answer this arm gave for every
+/// pause before 9a.
+///
+/// It never returns [`Step::Done`]: [`super::descend`] returns a `Pause`'s
+/// step without the `Done` mapping every other flowable goes through, so the
+/// body's `Done(aggregate)` is mapped to the run's terminal **here** instead.
+fn resume_body(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, now: Tick) -> Step {
+    let TaskKind::Pause { tasks, .. } = &plan.tasks[task].kind else {
+        // Unreachable: `descend` matches on this kind before it gets here.
+        return Step::Commands(vec![Command::SetRunState {
+            run,
+            state: RunState::Success,
+        }]);
+    };
+    if tasks.is_empty() {
+        return Step::Commands(vec![Command::SetRunState {
+            run,
+            state: RunState::Success,
+        }]);
+    }
+    let errors = plan.tasks[task].errors.as_slice();
+    let finally = plan.tasks[task].finally.as_slice();
+    match super::sequential::drive(plan, state, tasks, errors, finally, Some(run), now) {
+        Step::Done(aggregate) => Step::Commands(vec![Command::SetRunState {
+            run,
+            state: aggregate,
+        }]),
+        other => other,
+    }
 }
 
 /// Whether a `Pause`'s `onPause:` run exists and has not reached a terminal
