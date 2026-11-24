@@ -47,19 +47,19 @@
 //!   the family Task 3 already had to make distinguishable.
 //! - **`isErrorOrFinallyHandlingPending`** (`ExecutorService.java:868`), which
 //!   holds an ancestor-owned retry timer until that ancestor's `errors:`/
-//!   `finally:` runs have terminated. It is **not implemented**, and the
-//!   reason is that nothing could see it fire: the two corpus flows that reach
-//!   it (`valids/retry-with-flowable-errors`, `valids/allow-failure-with-retry`)
-//!   both hang the retry on an `AllowFailure`, which `build_plan` plans as an
-//!   opaque [`Runnable`](super::TaskKind::Runnable) and whose children
-//!   therefore get no run at all. A guard nobody can see fail is the thing
-//!   this package has now paid for six times.
+//!   `finally:` runs have terminated. It is implemented for the one shape that
+//!   can see it fire: a retry owned by an `AllowFailure` block (package 9b,
+//!   `valids/retry-with-flowable-errors`), where [`reopen_due`] holds the timer
+//!   until the block's `errors:` runs end -- see [`is_block_retried_child`].
+//!   The `finally:` half and other ancestors are not implemented: nothing could
+//!   see them fire.
 
 use std::time::Duration;
 
 use crate::models::{Retry as ModelRetry, RetryBehavior as ModelBehavior};
 
 use super::command::Command;
+use super::flowable::is_terminal;
 use super::plan::{Plan, RetryBehavior, RetryDelay, RetryPolicy, TaskIx, TaskKind};
 use super::state::{ExecutionState, RunIx, RunState, Tick};
 
@@ -214,6 +214,55 @@ pub(crate) fn is_retried_kind(plan: &Plan, state: &ExecutionState, run: RunIx) -
         plan.tasks.get(state.runs[run].task).map(|t| &t.kind),
         Some(TaskKind::Runnable { .. } | TaskKind::Executable { .. })
     )
+}
+
+/// Whether `run` is a child whose retry is its parent **`AllowFailure` block's**
+/// own `retry:` (the child declares none), the one shape where Kestra runs the
+/// block's `errors:` while the child waits to be retried.
+///
+/// Package 9b. Kestra's `hasFailedNoRetry` asks a failed child for its **own**
+/// `retry:` only, so a child that inherits its retry from the block counts as
+/// "failed, no retry" and the block's `errors:` start at once; the retry timer
+/// is held until they terminate (`isErrorOrFinallyHandlingPending`,
+/// `ExecutorService.java:868`) and the superseded error runs are deleted when
+/// the child is reopened (`valids/retry-with-flowable-errors`: three surfaced
+/// runs, yet `incr_counter`'s side effect ran before attempt 2). Narrowed to a
+/// direct `AllowFailure` parent, the only block whose `retry:` the corpus
+/// measures this way, and to `RETRY_FAILED_TASK`, the only behavior that leaves
+/// the child `RETRYING` (the other marks the block `RETRIED`).
+pub(crate) fn is_block_retried_child(plan: &Plan, state: &ExecutionState, run: RunIx) -> bool {
+    let Some(parent) = state.runs[run].parent else {
+        return false;
+    };
+    let (Some(child), Some(block)) = (
+        plan.tasks.get(state.runs[run].task),
+        plan.tasks.get(state.runs[parent].task),
+    ) else {
+        return false;
+    };
+    matches!(block.kind, TaskKind::AllowFailure { .. })
+        && child.retry.is_none()
+        && is_retried_kind(plan, state, run)
+        && block
+            .retry
+            .as_ref()
+            .is_some_and(|p| p.behavior == RetryBehavior::RetryFailedTask)
+}
+
+/// The runs of `block`'s `errors:` (and everything under them) that exist now.
+fn block_error_runs(plan: &Plan, state: &ExecutionState, block: RunIx) -> Vec<RunIx> {
+    let errors = &plan.tasks[state.runs[block].task].errors;
+    let roots: Vec<RunIx> = (0..state.runs.len())
+        .filter(|&ix| state.runs[ix].parent == Some(block) && errors.contains(&state.runs[ix].task))
+        .collect();
+    (0..state.runs.len())
+        .filter(|&ix| {
+            roots.contains(&ix)
+                || roots
+                    .iter()
+                    .any(|&r| super::state::is_descendant_of(state, ix, r))
+        })
+        .collect()
 }
 
 /// Kestra's `TaskRun.nextRetryDate(retry)` and `nextRetryDate(retry,
@@ -515,6 +564,16 @@ pub(super) fn reopen_due(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<
                 && state.runs[ix].not_before.is_some_and(|t| t <= now)
                 && plan.tasks.contains_index(state.runs[ix].task)
         })
+        // `isErrorOrFinallyHandlingPending`: a retry owned by an `AllowFailure`
+        // block waits for the block's `errors:` runs to terminate.
+        .filter(|&ix| {
+            !(is_block_retried_child(plan, state, ix)
+                && state.runs[ix].parent.is_some_and(|b| {
+                    block_error_runs(plan, state, b)
+                        .into_iter()
+                        .any(|e| !state.runs[e].history.is_empty() && !is_terminal(state, e))
+                }))
+        })
         .collect();
     if due.is_empty() {
         return Vec::new();
@@ -526,10 +585,24 @@ pub(super) fn reopen_due(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<
     let mut cmds = vec![Command::SetExecutionState {
         state: RunState::Running,
     }];
-    cmds.extend(due.into_iter().map(|run| Command::SetRunState {
-        run,
-        state: RunState::Created,
-    }));
+    for run in due {
+        // The error runs of the attempt being superseded are thrown away, as
+        // Kestra deletes them: they ran for their side effect and are not part
+        // of the execution's record.
+        if is_block_retried_child(plan, state, run) {
+            if let Some(block) = state.runs[run].parent {
+                cmds.extend(
+                    block_error_runs(plan, state, block)
+                        .into_iter()
+                        .map(|run| Command::EmptyRun { run }),
+                );
+            }
+        }
+        cmds.push(Command::SetRunState {
+            run,
+            state: RunState::Created,
+        });
+    }
     cmds
 }
 

@@ -11120,6 +11120,148 @@ mod allow_failure_drive_tests {
         assert_eq!(last_of(&plan, &state, "handler"), None);
         assert_eq!(flow, RunState::Success);
     }
+
+    /// **Package 9b Task 1: a `retry:` on an `AllowFailure` block**, driven
+    /// through the stored-plan seam because `spec::validate` still refuses it
+    /// (`unsupported_allow_failure_retry`). This is `valids/retry-with-flowable-errors`
+    /// with the KV counter simulated: `run_script` fails while the counter is
+    /// below 2 and succeeds once `incr_counter` has bumped it.
+    ///
+    /// Kestra's golden has THREE surfaced runs: `set_kv` (1 attempt), the
+    /// block (1 attempt, SUCCESS: a flowable is never retried as a unit) and
+    /// `run_script` (2 attempts, FAILED then SUCCESS). The execution goes
+    /// CREATED, RUNNING, RETRYING, RUNNING, SUCCESS. The block's `errors:` task
+    /// `incr_counter` is not among them in the golden, yet its side effect must
+    /// have run for attempt 2 to succeed. egret runs it while the child waits
+    /// for its retry (`retry::is_block_retried_child`) and throws the run away
+    /// when the child is reopened, so it is not surfaced.
+    #[test]
+    fn a_block_retry_retries_the_child_and_the_block_succeeds() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"
+        ))
+        .expect("the corpus flow");
+        assert!(
+            super::build_plan(&src).is_err(),
+            "the refusal is still active, so this must go through plan_stored"
+        );
+        let plan = super::plan_stored(&src).expect("a stored source plans");
+        let block = plan.tasks.iter().find(|t| t.id == "retry_block").unwrap();
+        assert!(
+            matches!(block.kind, TaskKind::AllowFailure { .. }),
+            "the planner keeps an AllowFailure with a retry a flowable"
+        );
+
+        let mut state = ExecutionState::new(&plan);
+        let mut counter = 0_i64;
+        let mut now = T0;
+        let mut exec_states = vec![];
+        for _ in 0..400 {
+            let cmds = advance(&plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    if let Command::SetExecutionState { state } = cmd {
+                        exec_states.push(*state);
+                    }
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => {
+                    let id = plan.tasks[state.runs[ix].task].id.as_str();
+                    let raw = match id {
+                        "set_kv" => {
+                            counter = 1;
+                            RunState::Success
+                        }
+                        "incr_counter" => {
+                            counter += 1;
+                            RunState::Success
+                        }
+                        "run_script" if counter < 2 => RunState::Failed,
+                        _ => RunState::Success,
+                    };
+                    let outcome = super::allow_failure::for_runnable(&plan, &state, ix, raw, now);
+                    apply(
+                        &mut state,
+                        &Command::SetRunState {
+                            run: ix,
+                            state: outcome,
+                        },
+                    );
+                }
+                None => match state
+                    .runs
+                    .iter()
+                    .filter_map(|r| r.not_before)
+                    .filter(|t| *t > now)
+                    .min()
+                {
+                    Some(t) => now = t,
+                    None => break,
+                },
+            }
+        }
+        // A run with no history was thrown away (Kestra deletes it): it is not
+        // surfaced, so the golden does not list it.
+        let surfaced: Vec<(String, usize, Option<RunState>)> = state
+            .runs
+            .iter()
+            .filter(|r| !r.history.is_empty())
+            .map(|r| {
+                (
+                    plan.tasks[r.task].id.clone(),
+                    r.attempts.len(),
+                    r.history.last().copied(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            surfaced,
+            [
+                ("set_kv".to_string(), 1, Some(RunState::Success)),
+                ("retry_block".to_string(), 1, Some(RunState::Success)),
+                ("run_script".to_string(), 2, Some(RunState::Success)),
+            ],
+            "the golden's three surfaced runs"
+        );
+        let run_script = state
+            .runs
+            .iter()
+            .find(|r| plan.tasks[r.task].id == "run_script")
+            .unwrap();
+        assert_eq!(
+            run_script
+                .attempts
+                .iter()
+                .map(|a| a.history.last().copied())
+                .collect::<Vec<_>>(),
+            [Some(RunState::Failed), Some(RunState::Success)]
+        );
+        assert!(run_script.history.contains(&RunState::Retrying));
+        assert_eq!(
+            counter, 2,
+            "incr_counter's side effect ran between the attempts"
+        );
+        assert_eq!(
+            state.history,
+            [
+                RunState::Created,
+                RunState::Running,
+                RunState::Retrying,
+                RunState::Running,
+                RunState::Success
+            ]
+        );
+    }
 }
 
 /// End hooks A4 (spec §4.1, D2): every flowable and the flow itself choose

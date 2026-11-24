@@ -303,6 +303,26 @@ pub(crate) fn current_list<'a>(
     // Kestra's `Pause` passes a `terminalState`, and egret's `Pause` runs no
     // sub-list until #9 (D14).
 
+    // Package 9b: a child of an `AllowFailure` block that is waiting for the
+    // BLOCK's `retry:` counts as failed with no retry of its own, so the block's
+    // `errors:` run now (for their side effect) and the block then keeps
+    // waiting; `retry::reopen_due` holds the timer until they end and throws
+    // them away. See `retry::is_block_retried_child`.
+    if !errors.is_empty()
+        && tasks.iter().any(|&t| {
+            run_of(state, parent, t).is_some_and(|ix| {
+                latest(state, ix) == Some(RunState::Retrying)
+                    && crate::executor::retry::is_block_retried_child(plan, state, ix)
+            })
+        })
+    {
+        return if exhausted(errors) {
+            Current::RetryPending
+        } else {
+            Current::Errors(errors)
+        };
+    }
+
     let errors_started = started(errors);
     let failed: Vec<RunIx> = tasks
         .iter()
