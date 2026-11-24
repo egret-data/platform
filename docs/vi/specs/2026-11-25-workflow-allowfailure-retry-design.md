@@ -97,11 +97,42 @@ và succeeds-late (→SUCCESS, ca corpus) và tương tác `warningOnRetry`; doc
 `RETRY_FAILED_TASK` ngoài những gì policy kế thừa đã phân biệt; mọi thứ của 9a
 (Pause) hay các gói roadmap sau.
 
-## 6. Khác biệt / sự thật đo được
+## 6. Khác biệt / sự thật đo được (Task 0 — đọc từ trace đã vendored)
 
-*(Task 0 điền từ `traces.json` — đặc biệt cơ chế `incr_counter` của §2, và liệu ca
-exhausts-retry ánh xạ sang `WARNING` đúng như ca Sequential. Mọi khác biệt với
-Kestra ghi ở đây TRƯỚC khi gỡ từ chối.)*
+**Trace đã vendored (`traces.json` round 1, image ghim 2026-10-16).** Execution và
+các run đúng như bảng golden §2: chỉ 3 run được surface — `set_kv` (1 attempt,
+SUCCESS), `retry_block` (1 attempt, SUCCESS; block không retry như đơn vị),
+`run_script` (parent = `retry_block`; 2 attempt: attempt 1 `FAILED`, rồi run-level
+`RETRYING`, attempt 2 `SUCCESS`). Execution `CREATED → RUNNING → RETRYING → RUNNING → SUCCESS`.
+
+**Điểm mấu chốt `incr_counter` (load-bearing cho Task 1).** Task `errors:`
+`incr_counter` (KV `retry_counter_1 += 1`) **không** là run được surface trong cả
+golden lẫn trace chi tiết — nhưng `run_script` success ở attempt 2, điều chỉ xảy ra
+khi `retry_counter_1` đạt `2`. **Vậy side effect của `incr_counter` PHẢI chạy giữa
+attempt 1 và attempt 2 mà không được surface thành run top-level.**
+
+Đây là đặc thù ca `RETRY_FAILED_TASK`-trên-flowable: với MỌI corpus flow khác có
+block `errors:` flowable, task error-handler **được** surface thành golden run
+(`valids/errors` → `t2`/`t3`; `valids/sequential-with-local-errors` →
+`error-t1`/`error-t2`; `valids/allow-failure-with-retry` → `error_handler`). Nên
+quy tắc chung là "errors run được surface"; flow này là ngoại lệ vì block `errors:`
+chạy như một phần xử lý **child retry** (bản thân block không fail), và Kestra không
+lưu run error-handling đó thành top-level taskRun của execution cuối.
+
+**Giả thuyết Task 1 phải xác nhận bằng cách drive flow** (không assert là sự thật
+cho tới khi egret tái hiện golden): dưới block `retry: { behavior: RETRY_FAILED_TASK }`,
+một child attempt fail chạy các task `errors:` của flowable bao quanh để lấy side
+effect rồi child được re-attempt; run error-handler của attempt bị thay thế **không**
+mang vào run list cuối. egret phải tái hiện **shape 3-run** của golden — nếu egret
+surface `incr_counter` thành run thứ 4 thì mismatch; nếu egret **không** chạy side
+effect của `incr_counter` thì counter đứng `1`, attempt 2 cũng fail, terminal thành
+`WARNING` thay vì `SUCCESS` — cũng mismatch. Hành vi đúng hẹp là: chạy side effect,
+không surface run.
+
+**Ca cạn-retry (Task 2, không có corpus flow).** Theo luật parity `Sequential` (D1)
+child cạn `maxAttempts` kết `FAILED`, và `allow_failure::block_state` ánh xạ thành
+block `WARNING`. Đây là parity, không đo từ flow vendored; Task 2 ghim từ hành vi
+`block_state` của executor, mọi khác biệt quan sát ghi ở đây.
 
 ## 7. Kiểm thử
 

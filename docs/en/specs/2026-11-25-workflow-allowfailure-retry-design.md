@@ -143,12 +143,48 @@ paths and the `warningOnRetry` interaction; docs.
 `RETRY_FAILED_TASK` beyond what the inherited policy already distinguishes;
 anything in 9a (Pause) or later roadmap packages.
 
-## 6. Divergences / measured facts
+## 6. Divergences / measured facts (Task 0 — read from the vendored trace)
 
-*(Task 0 fills this in from `traces.json` — in particular the `incr_counter`
-mechanism of §2, and whether the exhausts-retry case maps to `WARNING` exactly
-as the Sequential case does. Any divergence from Kestra is recorded here before
-the refusal is lifted.)*
+**The vendored trace (`traces.json` round 1, image pinned 2026-10-16).** The
+execution and its runs are exactly as the golden table in §2: three surfaced runs
+only — `set_kv` (1 attempt, SUCCESS), `retry_block` (1 attempt, SUCCESS; the
+block is never retried as a unit), `run_script` (parent = `retry_block`; 2
+attempts: attempt 1 `FAILED`, then run-level `RETRYING`, attempt 2 `SUCCESS`).
+Execution `CREATED → RUNNING → RETRYING → RUNNING → SUCCESS`.
+
+**The `incr_counter` crux (load-bearing for Task 1).** The flow's `errors:` task
+`incr_counter` (KV `retry_counter_1 += 1`) is **not** a surfaced run in either the
+golden or the detailed trace — yet `run_script` succeeds on attempt 2, which is
+only possible if `retry_counter_1` reached `2` (the message renders the undefined
+`ko` and fails while the counter is `< 2`, and `"It works"` once it is `≥ 2`).
+**Therefore `incr_counter`'s side effect MUST execute between attempt 1 and
+attempt 2, without being surfaced as a top-level run.**
+
+This is special to the `RETRY_FAILED_TASK`-on-a-flowable case: for every *other*
+corpus flow with a flowable `errors:` block, the error-handler tasks **are**
+surfaced as golden runs (`valids/errors` → `t2`/`t3`; `valids/sequential-with-local-errors`
+→ `error-t1`/`error-t2`; `valids/allow-failure-with-retry` → `error_handler`). So
+the general rule is "errors runs are surfaced"; this flow is the exception
+because the block's `errors:` runs as part of handling a **child retry** (the
+block itself never fails), and Kestra does not persist that error-handling run as
+a top-level taskRun of the final execution.
+
+**Hypothesis Task 1 must confirm by driving the flow** (do not assert it as fact
+until egret reproduces the golden): under a block `retry: { behavior: RETRY_FAILED_TASK }`,
+a failed child attempt runs the enclosing flowable's `errors:` tasks for their
+side effect and then the child is re-attempted; the error-handler run from the
+superseded attempt is **not** carried into the final run list. egret must
+reproduce the golden's **3-run shape** — if egret surfaces `incr_counter` as a
+4th run, it mismatches; if egret does **not** run `incr_counter`'s side effect,
+the counter stays `1`, attempt 2 also fails, and the terminal becomes `WARNING`
+instead of `SUCCESS` — also a mismatch. The narrow correct behavior is: run the
+side effect, do not surface the run.
+
+**Exhausts-retry case (Task 2, no corpus flow).** By the `Sequential` parity rule
+(D1) a child that exhausts `maxAttempts` ends `FAILED`, and `allow_failure::block_state`
+maps that to block `WARNING`. This is parity, not measured from a vendored flow;
+Task 2 pins it from the executor's own `block_state` behavior, and any observed
+divergence is recorded here.
 
 ## 7. Testing
 
