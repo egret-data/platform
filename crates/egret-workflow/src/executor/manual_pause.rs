@@ -50,20 +50,30 @@ pub enum PauseRefusal {
 /// -- `KILLING` too, which Kestra's `isRunning()` accepts (spec §5
 /// divergence 1): `PAUSED` after `KILLING` would stop `advance_killing`.
 pub fn pause_by_hand_commands(state: &ExecutionState) -> Result<Vec<Command>, PauseRefusal> {
-    match state.history.last().copied() {
-        Some(RunState::Running | RunState::Restarted) => {
-            if state
-                .runs
-                .iter()
-                .any(|r| r.history.last() == Some(&RunState::Paused))
-            {
-                return Err(PauseRefusal::TaskWaiting);
-            }
-            Ok(vec![Command::SetExecutionState {
-                state: RunState::Paused,
-            }])
-        }
-        other => Err(PauseRefusal::NotRunning(other)),
+    match pause_refusal_of(
+        state.history.last().copied(),
+        state.runs.iter().map(|r| r.history.last().copied()),
+    ) {
+        Some(refusal) => Err(refusal),
+        None => Ok(vec![Command::SetExecutionState {
+            state: RunState::Paused,
+        }]),
+    }
+}
+
+/// [`pause_by_hand_commands`]' refusal over the last states alone, for a
+/// reader that holds rows rather than an `ExecutionState` (the bulk pause's
+/// pre-flight). One rule, two shapes of input, so check and write cannot
+/// drift.
+pub fn pause_refusal_of(
+    execution: Option<RunState>,
+    mut runs: impl Iterator<Item = Option<RunState>>,
+) -> Option<PauseRefusal> {
+    match execution {
+        Some(RunState::Running | RunState::Restarted) => runs
+            .any(|r| r == Some(RunState::Paused))
+            .then_some(PauseRefusal::TaskWaiting),
+        other => Some(PauseRefusal::NotRunning(other)),
     }
 }
 

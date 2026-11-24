@@ -118,20 +118,34 @@ struct Member {
     flow_key: String,
 }
 
-async fn delete_once(
-    pool: &PgPool,
-    fs: Option<&FileStore>,
-    req: DeleteRequest,
-) -> Result<std::result::Result<Deleted, DeleteRefused>> {
-    let ws = req.workspace;
-    let mut tx = pool.begin().await.map_err(db_err)?;
+/// What [`screen`] found: the root's row, its locked family, and how many
+/// Flow-trigger fires it detached (in the still-open transaction).
+struct Screened {
+    namespace: String,
+    flow_key: String,
+    state: String,
+    family: Vec<Member>,
+    ids: Vec<Uuid>,
+    detached: u64,
+}
 
+/// **Every refusal of a delete**, in the write's order, inside `tx`: the
+/// root's row locked, D2 (only a root), the family locked to a fixpoint, Q1
+/// (every member idle), S9 (listeners heard) and Q2 (no dependents), with the
+/// S8 detach before Q2. [`delete_once`] runs it, then deletes;
+/// [`delete_would_refuse`] runs the SAME function and rolls back, so a bulk
+/// pre-flight and the write cannot disagree.
+async fn screen(
+    tx: &mut PgConnection,
+    ws: Uuid,
+    id: Uuid,
+) -> Result<std::result::Result<Screened, DeleteRefused>> {
     // 1. The root's row, locked; scoped by the workspace.
     let row = sqlx::query(
         "SELECT namespace, flow_key, state, parent_execution_id \
            FROM workflow.executions WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
     )
-    .bind(req.id)
+    .bind(id)
     .bind(ws)
     .fetch_optional(&mut *tx)
     .await
@@ -139,11 +153,11 @@ async fn delete_once(
     .ok_or_else(|| Error::NotFound("execution".into()))?;
     // 2. D2: only a root.
     if row.get::<Option<Uuid>, _>("parent_execution_id").is_some() {
-        let root = root_of(&mut tx, ws, req.id).await?;
+        let root = root_of(tx, ws, id).await?;
         return Ok(Err(DeleteRefused::NotARoot { root }));
     }
     // 3. The family, locked in id order.
-    let family = family(&mut tx, ws, req.id).await?;
+    let family = family(tx, ws, id).await?;
     let ids: Vec<Uuid> = family.iter().map(|m| m.id).collect();
     // 4. Q1: every member idle (the root first when it is the busy one).
     let busy: Option<(Uuid, String)> = sqlx::query_as(
@@ -152,7 +166,7 @@ async fn delete_once(
           ORDER BY (id = $2) DESC, id LIMIT 1",
     )
     .bind(&ids)
-    .bind(req.id)
+    .bind(id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -190,10 +204,53 @@ async fn delete_once(
     // 7. Q2: what still points at the family from outside it: `Subflow`
     // children and replays/restarts into a new execution (the fires no
     // longer do, after step 6).
-    let (total, executions) = dependents(&mut tx, ws, &ids).await?;
+    let (total, executions) = dependents(tx, ws, &ids).await?;
     if total > 0 {
         return Ok(Err(DeleteRefused::HasDependents { executions, total }));
     }
+    Ok(Ok(Screened {
+        namespace: row.get("namespace"),
+        flow_key: row.get("flow_key"),
+        state: row.get("state"),
+        family,
+        ids,
+        detached,
+    }))
+}
+
+/// **Would a delete of `id` be refused?** Read-only: runs [`screen`], the
+/// write's own refusal rule, in a transaction that is rolled back (the S8
+/// detach it does on the way is undone). `Err(NotFound)` for a missing or
+/// foreign id.
+pub async fn delete_would_refuse(
+    pool: &PgPool,
+    workspace: Uuid,
+    id: Uuid,
+) -> Result<Option<DeleteRefused>> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let refused = screen(&mut tx, workspace, id).await?.err();
+    tx.rollback().await.map_err(db_err)?;
+    Ok(refused)
+}
+
+async fn delete_once(
+    pool: &PgPool,
+    fs: Option<&FileStore>,
+    req: DeleteRequest,
+) -> Result<std::result::Result<Deleted, DeleteRefused>> {
+    let ws = req.workspace;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let Screened {
+        namespace,
+        flow_key,
+        state,
+        family,
+        ids,
+        detached,
+    } = match screen(&mut tx, ws, req.id).await? {
+        Ok(s) => s,
+        Err(refused) => return Ok(Err(refused)),
+    };
     // 8. D4's counts, before the rows go.
     let files: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM workflow.execution_files \
@@ -242,9 +299,9 @@ async fn delete_once(
         })?;
     tx.commit().await.map_err(db_err)?;
     Ok(Ok(Deleted {
-        namespace: row.get("namespace"),
-        flow_key: row.get("flow_key"),
-        state: row.get("state"),
+        namespace,
+        flow_key,
+        state,
         executions: family.len() as u64,
         files,
         detached,

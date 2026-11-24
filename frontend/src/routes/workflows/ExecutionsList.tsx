@@ -31,6 +31,8 @@ import { ListPageShell } from "@/components/explore/ListPageShell";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
 import { ListToolbarButton } from "@/components/explore/ListToolbarButton";
 import { SummaryStrip, type SummaryStripItem } from "@/components/explore/SummaryStrip";
+import { BulkActionBar } from "@/components/workflows/executions/BulkActionBar";
+import { queryFilterParams } from "@/components/workflows/executions/bulkModel";
 import { StateChip } from "@/components/workflows/StateChip";
 import { WorkerOffNotice } from "@/components/workflows/WorkerOffNotice";
 import { formatDuration, isTerminalState } from "@/components/workflows/executionState";
@@ -177,6 +179,44 @@ export default function ExecutionsList({
   const seenKeys = seen.keys;
   const flowKeys = namespacePinned ? seenKeys : endpointFlowKeys;
   const now = useNow();
+
+  // Row selection (package 7f). The chosen rows are kept whole, so their states still decide the toolbar
+  // when the user pages on; `allMatching` widens the action from the chosen rows to the whole filter.
+  const [selected, setSelected] = useState<Map<string, ExecutionListItemDto>>(new Map());
+  const [allMatching, setAllMatching] = useState(false);
+  const filterKey = JSON.stringify({ ...filters, page: 0 });
+  const [selectionFor, setSelectionFor] = useState(filterKey);
+  if (selectionFor !== filterKey) {
+    // A new filter is a new population: the old choice no longer describes it (adjusted during render).
+    setSelectionFor(filterKey);
+    setSelected(new Map());
+    setAllMatching(false);
+  }
+  const clearSelection = () => {
+    setSelected(new Map());
+    setAllMatching(false);
+  };
+  const toggleRow = (row: ExecutionListItemDto, on: boolean) => {
+    setAllMatching(false);
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (on) next.set(row.id, row);
+      else next.delete(row.id);
+      return next;
+    });
+  };
+  const togglePage = (rows: ExecutionListItemDto[], on: boolean) => {
+    setAllMatching(false);
+    setSelected((prev) => {
+      const next = new Map(prev);
+      for (const r of rows) {
+        if (on) next.set(r.id, r);
+        else next.delete(r.id);
+      }
+      return next;
+    });
+  };
+
   // The CSV carries the list's filters, not its page; a time preset's window ends at the clock's tick.
   const exportParams: WorkflowExportExecutionsCsvParams = toQueryParams(filters, now, { pinnedFlowId, pinnedNamespace });
   // The export takes no paging: a page's `limit` and `offset` are dropped.
@@ -235,7 +275,7 @@ export default function ExecutionsList({
         </Alert>
       );
     }
-    if (!page) return <ListSkeleton cols={flowPinned ? 6 : 7} />;
+    if (!page) return <ListSkeleton cols={flowPinned ? 7 : 8} />;
 
     const refreshError = query.isError ? (
       <Alert variant="destructive" className="mb-3">
@@ -320,10 +360,30 @@ export default function ExecutionsList({
         <div className="mb-3" data-testid="executions-summary">
           <SummaryStrip items={summaryItems(page, filters, setFilters)} />
         </div>
+        {selected.size > 0 ? (
+          <>
+            <SelectAllBanner page={page} selected={selected.size} pageFull={pageChecked(page.rows, selected) === true} allMatching={allMatching} onAll={() => setAllMatching(true)} onClear={clearSelection} />
+            <BulkActionBar
+              ws={ws}
+              rows={[...selected.values()]}
+              count={allMatching ? page.total : selected.size}
+              mode={allMatching ? "query" : "ids"}
+              filter={() => queryFilterParams(filters, Date.now(), { pinnedFlowId, pinnedNamespace })}
+              onDone={clearSelection}
+            />
+          </>
+        ) : null}
         <div aria-busy={query.isPlaceholderData} className={query.isPlaceholderData ? "opacity-60" : undefined}>
           <Table data-testid="executions-table">
             <TableHeader>
               <TableRow>
+                <TableHead className="w-10">
+                  <Checkbox
+                    aria-label="Select all executions on this page"
+                    checked={pageChecked(page.rows, selected)}
+                    onCheckedChange={(c) => togglePage(page.rows, c === true)}
+                  />
+                </TableHead>
                 <TableHead>ID</TableHead>
                 {flowPinned ? null : <TableHead>Flow</TableHead>}
                 <TableHead>Namespace</TableHead>
@@ -335,7 +395,14 @@ export default function ExecutionsList({
             </TableHeader>
             <TableBody>
               {page.rows.map((row) => (
-                <ExecutionRow key={row.id} row={row} base={base} showFlow={!flowPinned} now={now} />
+                <ExecutionRow
+                  key={row.id}
+                  row={row}
+                  base={base}
+                  showFlow={!flowPinned}
+                  now={now}
+                  selection={{ checked: selected.has(row.id), onChange: (on) => toggleRow(row, on) }}
+                />
               ))}
             </TableBody>
           </Table>
@@ -393,11 +460,33 @@ function summaryItems(
  * One row of the list. Exported for the namespace Overview's recent executions
  * (W7d), which show the same columns.
  */
-export function ExecutionRow({ row, base, showFlow, now }: { row: ExecutionListItemDto; base: string; showFlow: boolean; now: number }) {
+export function ExecutionRow({
+  row,
+  base,
+  showFlow,
+  now,
+  selection,
+}: {
+  row: ExecutionListItemDto;
+  base: string;
+  showFlow: boolean;
+  now: number;
+  /** The list's row checkbox; the namespace Overview's recent executions show none. */
+  selection?: { checked: boolean; onChange: (on: boolean) => void };
+}) {
   const start = executionStart(row);
   const duration = executionDuration(row, now);
   return (
-    <TableRow>
+    <TableRow data-state={selection?.checked ? "selected" : undefined}>
+      {selection ? (
+        <TableCell className="w-10">
+          <Checkbox
+            aria-label={`Select execution ${row.id.slice(0, 8)}`}
+            checked={selection.checked}
+            onCheckedChange={(c) => selection.onChange(c === true)}
+          />
+        </TableCell>
+      ) : null}
       <TableCell>
         <Link
           className="font-mono text-xs hover:underline"
@@ -442,6 +531,53 @@ export function ExecutionRow({ row, base, showFlow, now }: { row: ExecutionListI
         <TriggerLabel row={row} />
       </TableCell>
     </TableRow>
+  );
+}
+
+/** The header checkbox: all, some (indeterminate) or none of this page's rows are chosen. */
+function pageChecked(rows: ExecutionListItemDto[], selected: Map<string, ExecutionListItemDto>): boolean | "indeterminate" {
+  const n = rows.filter((r) => selected.has(r.id)).length;
+  return n === 0 ? false : n === rows.length ? true : "indeterminate";
+}
+
+/**
+ * Gmail's "select all matching": with a whole page chosen and more rows behind it, offers to widen the
+ * action to every execution the filter matches (the `by-query` routes), and says so once it has.
+ */
+function SelectAllBanner({
+  page,
+  selected,
+  pageFull,
+  allMatching,
+  onAll,
+  onClear,
+}: {
+  page: ListPage;
+  selected: number;
+  /** Every row of the CURRENT page is chosen (the header checkbox's basis, not the cross-page count). */
+  pageFull: boolean;
+  allMatching: boolean;
+  onAll: () => void;
+  onClear: () => void;
+}) {
+  if (allMatching) {
+    return (
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
+        <span className="tabular-nums">{`All ${page.total} executions matching this filter are selected.`}</span>
+        <Button variant="link" size="sm" className="h-auto p-0" onClick={onClear}>
+          Clear selection
+        </Button>
+      </div>
+    );
+  }
+  if (!pageFull || page.total <= selected) return null;
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
+      <span className="tabular-nums">{`${selected} selected.`}</span>
+      <Button variant="link" size="sm" className="h-auto p-0 tabular-nums" onClick={onAll}>
+        {`Select all ${page.total} matching this filter`}
+      </Button>
+    </div>
   );
 }
 

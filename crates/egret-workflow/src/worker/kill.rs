@@ -199,6 +199,53 @@ pub async fn kill_execution_reporting(
     }
 }
 
+/// Why a kill writes nothing for an execution loaded as `state`: it has
+/// ended (`Some(its last state)`) and no run of its `afterExecution:` is live
+/// (spec D3). A terminal execution with some OTHER live run -- a flowable an
+/// `Exit` left behind -- is refused all the same: only the phase makes an
+/// ended execution killable. [`kill_in`] and the bulk pre-flight
+/// ([`kill_would_refuse`]) BOTH read this, so they cannot drift.
+pub fn kill_refusal(
+    plan: &crate::executor::Plan,
+    state: &crate::executor::ExecutionState,
+) -> Option<RunState> {
+    let last = state.history.last().copied().filter(|s| s.is_terminal())?;
+    (!crate::executor::after_execution_live(plan, state)).then_some(last)
+}
+
+/// [`kill_refusal`] for `execution` in `workspace`, read without locking and
+/// without writing: `Ok(None)` when a kill would proceed, `Ok(Some(state))`
+/// when it would answer `Terminated`. `NotFound` for an execution that is not
+/// in `workspace`. A row whose content cannot be loaded is judged on its
+/// stored state, as the kill's force-close arm does.
+pub async fn kill_would_refuse(
+    conn: &mut PgConnection,
+    workspace: Uuid,
+    execution: Uuid,
+) -> Result<Option<RunState>> {
+    match claim::load_with(conn, execution, claim::Lock::No, Stack::Reader).await {
+        Ok((ctx, state, _)) => {
+            if ctx.workspace_id != workspace {
+                return Err(Error::NotFound("execution".into()));
+            }
+            Ok(kill_refusal(&ctx.plan, &state))
+        }
+        Err(e) if claim::row_content_fault(&e) => {
+            let (ws, state): (Uuid, String) =
+                sqlx::query_as("SELECT workspace_id, state FROM workflow.executions WHERE id = $1")
+                    .bind(execution)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .map_err(db_err)?;
+            if ws != workspace {
+                return Err(Error::NotFound("execution".into()));
+            }
+            Ok(from_wire(&state).filter(|s| s.is_terminal()))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 async fn kill_in(
     at: &mut Txn,
     workspace: Uuid,
@@ -217,6 +264,7 @@ async fn kill_in(
                 return Err(Error::NotFound("execution".into()));
             }
             if let Some(&last) = state.history.last().filter(|s| s.is_terminal()) {
+                // (`kill_refusal`'s rule, spelled out where the phase is built.)
                 // **A kill stops `afterExecution:`** (end hooks #2b, the user's
                 // answer to Q3, 2026-10-27; a security divergence from Kestra,
                 // which answers 409 and force-executes the list): a tenant must
@@ -224,8 +272,8 @@ async fn kill_in(
                 // phase's runs are killed; the execution keeps the state,
                 // history and `ended_at` it ended with. With nothing of the
                 // phase live, the refusal is as before.
-                if !crate::executor::after_execution_live(&ctx.plan, &state) {
-                    return Ok((KillOutcome::Terminated(last), false));
+                if let Some(ended) = kill_refusal(&ctx.plan, &state) {
+                    return Ok((KillOutcome::Terminated(ended), false));
                 }
                 if !phase_kill_applies(&ctx.plan, &state) {
                     return Ok((KillOutcome::NotApplied(last), false));

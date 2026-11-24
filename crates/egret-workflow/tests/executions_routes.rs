@@ -4663,3 +4663,1308 @@ async fn follow_requires_workflow_read() {
         );
     }
 }
+
+// ── Package 7f: bulk labels ────────────────────────────────────────────────
+
+async fn ended_exec(db: &Db, ws: Uuid) -> Uuid {
+    insert_execution_with(
+        db,
+        ws,
+        None,
+        "SUCCESS",
+        &runnable_source("bulk-labels"),
+        serde_json::json!({}),
+    )
+    .await
+}
+
+async fn stored_labels(db: &Db, id: Uuid) -> Option<Value> {
+    sqlx::query_scalar("SELECT labels FROM workflow.executions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("labels")
+}
+
+fn team(v: &str) -> Value {
+    serde_json::json!([{"key": "team", "value": v}])
+}
+
+#[tokio::test]
+async fn labels_by_ids_applies_to_every_listed_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (a, b) = (ended_exec(&db, ws).await, ended_exec(&db, ws).await);
+    let untouched = ended_exec(&db, ws).await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(stored_labels(&db, id).await, Some(team("x")));
+    }
+    assert_ne!(stored_labels(&db, untouched).await, Some(team("x")));
+}
+
+#[tokio::test]
+async fn labels_by_ids_with_one_unknown_id_changes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (a, b) = (ended_exec(&db, ws).await, ended_exec(&db, ws).await);
+    let ghost = Uuid::new_v4();
+    let before = stored_labels(&db, a).await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, ghost, b], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    let body = common::json(res).await;
+    assert_eq!(body["invalids"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["invalids"][0]["id"], ghost.to_string());
+    assert_eq!(body["invalids"][0]["reason"], "not found");
+    for id in [a, b] {
+        assert_eq!(stored_labels(&db, id).await, before, "all-or-nothing");
+    }
+}
+
+#[tokio::test]
+async fn labels_by_query_applies_to_exactly_the_matched_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (a, b) = (ended_exec(&db, ws).await, ended_exec(&db, ws).await);
+    let other: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history) \
+         VALUES ($1, 'zzz.other', 'frozen', $2, 'SUCCESS', $3) RETURNING id",
+    )
+    .bind(ws)
+    .bind(runnable_source("bulk-labels"))
+    .bind(serde_json::json!(["CREATED", "SUCCESS"]))
+    .fetch_one(&db.pool)
+    .await
+    .expect("other");
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-query?namespace=a.write"),
+        user,
+        team("q"),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(stored_labels(&db, id).await, Some(team("q")));
+    }
+    assert_ne!(stored_labels(&db, other).await, Some(team("q")));
+}
+
+#[tokio::test]
+async fn labels_bulk_refuses_more_than_max_bulk_ids_and_serves_an_empty_list() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let app = common::app(&db).await;
+    let path = format!("/api/ws/{ws}/workflows/executions/labels/by-ids");
+    let many: Vec<Uuid> = (0..=egret_workflow::bulk::MAX_BULK)
+        .map(|_| Uuid::new_v4())
+        .collect();
+    let res = common::post(
+        &app,
+        &path,
+        user,
+        serde_json::json!({"ids": many, "labels": []}),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    assert!(common::json(res).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("too_many"));
+    let res = common::post(
+        &app,
+        &path,
+        user,
+        serde_json::json!({"ids": [], "labels": []}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 0);
+}
+
+#[tokio::test]
+async fn labels_bulk_needs_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let id = ended_exec(&db, ws).await;
+    let before = stored_labels(&db, id).await;
+    let app = common::app(&db).await;
+    let by_ids = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-ids"),
+        reader,
+        serde_json::json!({"ids": [id], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(by_ids.status(), 403);
+    let by_query = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-query"),
+        reader,
+        team("x"),
+    )
+    .await;
+    assert_eq!(by_query.status(), 403);
+    assert_eq!(stored_labels(&db, id).await, before);
+}
+
+async fn bulk_labels_400(
+    app: &common::App,
+    ws: Uuid,
+    user: egret_core::UserId,
+    body: Value,
+) -> Value {
+    let res = common::post(
+        app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-ids"),
+        user,
+        body,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    common::json(res).await
+}
+
+#[tokio::test]
+async fn labels_by_ids_with_a_running_execution_changes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (a, b) = (ended_exec(&db, ws).await, ended_exec(&db, ws).await);
+    let running = insert_execution_with(
+        &db,
+        ws,
+        None,
+        "RUNNING",
+        &runnable_source("bulk-labels"),
+        serde_json::json!({}),
+    )
+    .await;
+    let before = (stored_labels(&db, a).await, stored_labels(&db, b).await);
+    let app = common::app(&db).await;
+    let body = bulk_labels_400(
+        &app,
+        ws,
+        user,
+        serde_json::json!({"ids": [a, running, b], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(body["invalids"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["invalids"][0]["id"], running.to_string());
+    assert_eq!(body["invalids"][0]["reason"], "not ended");
+    assert_eq!(
+        (stored_labels(&db, a).await, stored_labels(&db, b).await),
+        before,
+        "nothing may be applied when one id is refused"
+    );
+}
+
+#[tokio::test]
+async fn labels_by_ids_with_a_foreign_workspace_id_is_not_found_not_403() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let (ws2, _other) = common::seed_workspace(&db).await;
+    let a = ended_exec(&db, ws).await;
+    let foreign = ended_exec(&db, ws2).await;
+    let (before_a, before_f) = (
+        stored_labels(&db, a).await,
+        stored_labels(&db, foreign).await,
+    );
+    let app = common::app(&db).await;
+    let body = bulk_labels_400(
+        &app,
+        ws,
+        user,
+        serde_json::json!({"ids": [a, foreign], "labels": team("x")}),
+    )
+    .await;
+    assert_eq!(body["invalids"].as_array().map(Vec::len), Some(1), "{body}");
+    assert_eq!(body["invalids"][0]["id"], foreign.to_string());
+    assert_eq!(body["invalids"][0]["reason"], "not found");
+    assert_eq!(stored_labels(&db, a).await, before_a);
+    assert_eq!(stored_labels(&db, foreign).await, before_f);
+}
+
+#[tokio::test]
+async fn labels_bulk_with_invalid_labels_is_refused_and_applies_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let a = ended_exec(&db, ws).await;
+    let before = stored_labels(&db, a).await;
+    let bad = serde_json::json!([{"key": "Bad Key", "value": "x"}]);
+    let app = common::app(&db).await;
+    let body = bulk_labels_400(
+        &app,
+        ws,
+        user,
+        serde_json::json!({"ids": [a], "labels": bad}),
+    )
+    .await;
+    assert_eq!(body["invalids"][0]["reason"], "invalid labels", "{body}");
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/labels/by-query?namespace=a.write"),
+        user,
+        bad,
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    let body = common::json(res).await;
+    assert_eq!(body["invalids"][0]["reason"], "invalid labels", "{body}");
+    assert_eq!(stored_labels(&db, a).await, before);
+}
+
+// ── Package 7f: bulk change-status, kill, pause, resume ────────────────────
+
+/// An execution with a live flow (pause and resume answer to it), in `state`.
+async fn exec_in(db: &Db, ws: Uuid, user: egret_core::UserId, state: &str) -> Uuid {
+    let source = runnable_source(&format!("bulk-state-{}", Uuid::new_v4().simple()));
+    let flow = common::seed_flow(db, ws, user, &source, "draft").await;
+    insert_execution_with(db, ws, Some(flow), state, &source, serde_json::json!({})).await
+}
+
+async fn bulk_manager(db: &Db) -> (Uuid, egret_core::UserId) {
+    let (ws, user) = common::seed_workspace(db).await;
+    common::grant(db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    (ws, user)
+}
+
+async fn json_delete(
+    app: &common::App,
+    path: &str,
+    user: egret_core::UserId,
+    body: Value,
+) -> axum::response::Response {
+    common::send_raw(
+        app,
+        "DELETE",
+        path,
+        user,
+        "application/json",
+        body.to_string().into_bytes(),
+    )
+    .await
+}
+
+/// Every refused id with its reason, from a bulk 400.
+async fn invalids_of(res: axum::response::Response) -> Vec<(String, String)> {
+    assert_eq!(res.status(), 400);
+    let body = common::json(res).await;
+    body["invalids"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no invalids in {body}"))
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap_or_default().to_string(),
+                i["reason"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+// -- change-status --
+
+#[tokio::test]
+async fn change_status_by_ids_moves_every_listed_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "FAILED").await,
+        exec_in(&db, ws, user, "FAILED").await,
+    );
+    let bystander = exec_in(&db, ws, user, "FAILED").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/change-status/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b], "state": "SUCCESS"}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(state_of(&db, id).await, "SUCCESS");
+    }
+    assert_eq!(state_of(&db, bystander).await, "FAILED");
+}
+
+#[tokio::test]
+async fn change_status_by_ids_with_an_illegal_source_changes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let a = exec_in(&db, ws, user, "FAILED").await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let c = exec_in(&db, ws, user, "FAILED").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/change-status/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, running, c], "state": "SUCCESS"}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(running.to_string(), "illegal transition".to_string())]
+    );
+    // The atomicity proof: the valid first and third are untouched.
+    assert_eq!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, running).await, "RUNNING");
+    assert_eq!(state_of(&db, c).await, "FAILED");
+}
+
+#[tokio::test]
+async fn change_status_by_query_applies_to_exactly_the_matched_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "FAILED").await,
+        exec_in(&db, ws, user, "FAILED").await,
+    );
+    let other: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history) \
+         VALUES ($1, 'zzz.other', 'frozen', $2, 'FAILED', $3) RETURNING id",
+    )
+    .bind(ws)
+    .bind(runnable_source("bulk-state"))
+    .bind(serde_json::json!(["CREATED", "FAILED"]))
+    .fetch_one(&db.pool)
+    .await
+    .expect("other");
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/change-status/by-query?namespace=a.write"),
+        user,
+        serde_json::json!({"state": "WARNING"}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(state_of(&db, id).await, "WARNING");
+    }
+    assert_eq!(state_of(&db, other).await, "FAILED");
+}
+
+// -- kill --
+
+#[tokio::test]
+async fn kill_by_ids_kills_every_listed_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "RUNNING").await,
+        exec_in(&db, ws, user, "RUNNING").await,
+    );
+    let bystander = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let res = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/kill/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert!(
+            ["KILLED", "KILLING"].contains(&state_of(&db, id).await.as_str()),
+            "{id} was killed"
+        );
+    }
+    assert_eq!(state_of(&db, bystander).await, "RUNNING");
+}
+
+#[tokio::test]
+async fn kill_by_ids_with_an_ended_execution_changes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let a = exec_in(&db, ws, user, "RUNNING").await;
+    let ended = exec_in(&db, ws, user, "SUCCESS").await;
+    let c = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let res = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/kill/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, ended, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(ended.to_string(), "already ended".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "RUNNING");
+    assert_eq!(state_of(&db, ended).await, "SUCCESS");
+    assert_eq!(state_of(&db, c).await, "RUNNING");
+}
+
+#[tokio::test]
+async fn kill_by_query_applies_to_exactly_the_matched_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "RUNNING").await,
+        exec_in(&db, ws, user, "RUNNING").await,
+    );
+    let app = common::app(&db).await;
+    // A filter that matches neither is a clean no-op, not an error.
+    let res = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/kill/by-query?namespace=nobody"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 0);
+    assert_eq!(state_of(&db, a).await, "RUNNING");
+    let res = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/kill/by-query?namespace=a.write"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert!(["KILLED", "KILLING"].contains(&state_of(&db, id).await.as_str()));
+    }
+}
+
+// -- pause --
+
+#[tokio::test]
+async fn pause_by_ids_pauses_every_listed_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "RUNNING").await,
+        exec_in(&db, ws, user, "RUNNING").await,
+    );
+    let bystander = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/pause/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(state_of(&db, id).await, "PAUSED");
+    }
+    assert_eq!(state_of(&db, bystander).await, "RUNNING");
+}
+
+#[tokio::test]
+async fn pause_by_ids_with_a_non_running_execution_changes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let a = exec_in(&db, ws, user, "RUNNING").await;
+    let done = exec_in(&db, ws, user, "SUCCESS").await;
+    let c = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/pause/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, done, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(done.to_string(), "not running".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "RUNNING");
+    assert_eq!(state_of(&db, c).await, "RUNNING");
+}
+
+#[tokio::test]
+async fn pause_by_query_applies_to_exactly_the_matched_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "RUNNING").await,
+        exec_in(&db, ws, user, "RUNNING").await,
+    );
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/pause/by-query?namespace=a.write"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_eq!(state_of(&db, id).await, "PAUSED");
+    }
+}
+
+// -- resume --
+
+#[tokio::test]
+async fn resume_by_ids_resumes_every_paused_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "PAUSED").await,
+        exec_in(&db, ws, user, "PAUSED").await,
+    );
+    let bystander = exec_in(&db, ws, user, "PAUSED").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/resume/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_ne!(state_of(&db, id).await, "PAUSED", "{id} left PAUSED");
+    }
+    assert_eq!(state_of(&db, bystander).await, "PAUSED");
+}
+
+#[tokio::test]
+async fn resume_by_ids_with_a_running_execution_changes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let a = exec_in(&db, ws, user, "PAUSED").await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let c = exec_in(&db, ws, user, "PAUSED").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/resume/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, running, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(running.to_string(), "not paused".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "PAUSED");
+    assert_eq!(state_of(&db, c).await, "PAUSED");
+}
+
+#[tokio::test]
+async fn resume_by_ids_refuses_inputs_an_execution_cannot_take_and_applies_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    // Paused by hand: no `onResume` applies, so the same inputs are refused
+    // for every id -- before any of them is resumed.
+    let (a, b) = (
+        exec_in(&db, ws, user, "PAUSED").await,
+        exec_in(&db, ws, user, "PAUSED").await,
+    );
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/resume/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b], "inputs": {"who": "me"}}),
+    )
+    .await;
+    let invalids = invalids_of(res).await;
+    assert_eq!(invalids.len(), 2);
+    assert!(invalids.iter().all(|(_, r)| r == "inputs not accepted"));
+    for id in [a, b] {
+        assert_eq!(state_of(&db, id).await, "PAUSED");
+    }
+}
+
+#[tokio::test]
+async fn resume_by_query_applies_to_exactly_the_matched_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "PAUSED").await,
+        exec_in(&db, ws, user, "PAUSED").await,
+    );
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/resume/by-query?namespace=a.write"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for id in [a, b] {
+        assert_ne!(state_of(&db, id).await, "PAUSED");
+    }
+}
+
+// -- shared --
+
+#[tokio::test]
+async fn state_bulk_routes_need_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let id = exec_in(&db, ws, reader, "RUNNING").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    for (op, ids_body, query_body) in [
+        (
+            "change-status",
+            serde_json::json!({"ids": [id], "state": "SUCCESS"}),
+            serde_json::json!({"state": "SUCCESS"}),
+        ),
+        (
+            "pause",
+            serde_json::json!({"ids": [id]}),
+            serde_json::json!({}),
+        ),
+        (
+            "resume",
+            serde_json::json!({"ids": [id]}),
+            serde_json::json!({}),
+        ),
+    ] {
+        let by_ids = common::post(&app, &format!("{base}/{op}/by-ids"), reader, ids_body).await;
+        assert_eq!(by_ids.status(), 403, "{op} by-ids");
+        let by_query =
+            common::post(&app, &format!("{base}/{op}/by-query"), reader, query_body).await;
+        assert_eq!(by_query.status(), 403, "{op} by-query");
+    }
+    let by_ids = json_delete(
+        &app,
+        &format!("{base}/kill/by-ids"),
+        reader,
+        serde_json::json!({"ids": [id]}),
+    )
+    .await;
+    assert_eq!(by_ids.status(), 403, "kill by-ids");
+    let by_query = common::delete(&app, &format!("{base}/kill/by-query"), reader).await;
+    assert_eq!(by_query.status(), 403, "kill by-query");
+    assert_eq!(state_of(&db, id).await, "RUNNING");
+}
+
+#[tokio::test]
+async fn state_bulk_refuses_a_foreign_workspace_id_and_more_than_max_bulk() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (other_ws, other_user) = bulk_manager(&db).await;
+    let mine = exec_in(&db, ws, user, "RUNNING").await;
+    let foreign = exec_in(&db, other_ws, other_user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/pause/by-ids"),
+        user,
+        serde_json::json!({"ids": [mine, foreign]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(foreign.to_string(), "not found".to_string())]
+    );
+    assert_eq!(state_of(&db, mine).await, "RUNNING");
+    assert_eq!(state_of(&db, foreign).await, "RUNNING");
+
+    let many: Vec<Uuid> = (0..=egret_workflow::bulk::MAX_BULK)
+        .map(|_| Uuid::new_v4())
+        .collect();
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/pause/by-ids"),
+        user,
+        serde_json::json!({"ids": many}),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    assert!(common::json(res).await["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("too_many"));
+}
+
+/// **The hole a kill pre-flight must not have.** An `Exit` leaves a flowable
+/// sibling live for good (`tests/exit_sibling_idle.rs`, shape B): the
+/// execution is `SUCCESS` yet `execution_is_idle` is false. The worker's kill
+/// refuses it (`Terminated`: ended, no `afterExecution:` run live), so the
+/// bulk pre-flight must too -- otherwise ids before it are killed and
+/// committed, then the apply of this one fails: a partial apply.
+#[sqlx::test(migrations = "../../migrations")]
+async fn kill_by_ids_refuses_an_ended_execution_with_a_live_sibling_and_kills_nothing(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let exit_shape = "id: b\nnamespace: t\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: seq\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: b1\n            type: io.kestra.plugin.core.log.Log\n            message: one\n          - id: b2\n            type: io.kestra.plugin.core.log.Log\n            message: two\n      - id: exit\n        type: io.kestra.plugin.core.execution.Exit\n        state: SUCCESS\n"
+    ;
+    let stuck =
+        egret_workflow::worker::start_execution(&pool, ws, None, exit_shape, serde_json::json!({}))
+            .await
+            .expect("start");
+    let reg = common::Answering(true);
+    for _ in 0..40 {
+        egret_workflow::worker::tick(&pool, 64, &reg)
+            .await
+            .expect("tick");
+    }
+    let idle: Option<bool> = sqlx::query_scalar("SELECT workflow.execution_is_idle($1)")
+        .bind(stuck)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state_of(&db, stuck).await, "SUCCESS");
+    assert_eq!(idle, Some(false), "the shape under test: ended, not idle");
+
+    // Started after the ticks, so nothing has moved them.
+    let (a, c) = (
+        exec_in(&db, ws, user, "RUNNING").await,
+        exec_in(&db, ws, user, "RUNNING").await,
+    );
+    let app = common::app(&db).await;
+    let res = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/kill/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, stuck, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(stuck.to_string(), "already ended".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "RUNNING");
+    assert_eq!(state_of(&db, c).await, "RUNNING");
+    assert_eq!(state_of(&db, stuck).await, "SUCCESS");
+}
+
+// -- restart and replay --
+
+/// A flow of its own and an execution of it, finished through the real
+/// worker as `ok` (`SUCCESS`) or not (`FAILED`). `tick` is global, so the
+/// callers finish one execution before they start the next.
+async fn finished_exec(
+    pool: &sqlx::PgPool,
+    ws: Uuid,
+    user: egret_core::UserId,
+    ok: bool,
+) -> (Uuid, Uuid) {
+    let db = Db { pool: pool.clone() };
+    let source = runnable_source(&format!("bulk-rerun-{}", Uuid::new_v4().simple()));
+    let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
+    let id = egret_workflow::worker::start_execution(
+        pool,
+        ws,
+        Some(flow),
+        &source,
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    let want = if ok { "SUCCESS" } else { "FAILED" };
+    common::drive_to(&db, id, want).await;
+    (id, flow)
+}
+
+async fn replays_of(db: &Db, ids: &[Uuid]) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions WHERE replayed_from_execution_id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count replays")
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_ids_restarts_every_listed_execution(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, false).await;
+    let (b, _) = finished_exec(&pool, ws, user, false).await;
+    let attempt_of = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT attempt_number FROM workflow.executions WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = [attempt_of(a).await, attempt_of(b).await];
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    for (id, was) in [a, b].into_iter().zip(before) {
+        assert_ne!(state_of(&db, id).await, "FAILED");
+        assert_eq!(attempt_of(id).await, was + 1, "restarted in place");
+    }
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_ids_with_a_running_execution_changes_nothing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, false).await;
+    let (c, _) = finished_exec(&pool, ws, user, false).await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, running, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(running.to_string(), "not restartable".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, c).await, "FAILED");
+}
+
+/// The in-place restart's worker refusals are screened, not only its state: a
+/// loop-free FAILED execution whose files the pruner deleted is refused by the
+/// worker (D10), so the batch must refuse it up front and restart nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_ids_screens_the_workers_other_refusals_and_restarts_nothing(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, false).await;
+    let (pruned, _) = finished_exec(&pool, ws, user, false).await;
+    let (c, _) = finished_exec(&pool, ws, user, false).await;
+    sqlx::query("UPDATE workflow.executions SET files_pruned_at = now() WHERE id = $1")
+        .bind(pruned)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, pruned, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(pruned.to_string(), "files pruned".to_string())]
+    );
+    assert_eq!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, c).await, "FAILED");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_ids_on_the_current_source_makes_a_new_execution_each(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, false).await;
+    let (b, _) = finished_exec(&pool, ws, user, false).await;
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-ids?source=current"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    assert_eq!(replays_of(&db, &[a, b]).await, 2);
+    // The old executions are untouched.
+    assert_eq!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, b).await, "FAILED");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn restart_by_query_applies_to_exactly_the_matched_set(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, flow_a) = finished_exec(&pool, ws, user, false).await;
+    let (bystander, _) = finished_exec(&pool, ws, user, false).await;
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/restart/by-query?flow_id={flow_a}"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 1);
+    assert_ne!(state_of(&db, a).await, "FAILED");
+    assert_eq!(state_of(&db, bystander).await, "FAILED");
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn replay_by_ids_creates_a_new_execution_for_each(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, true).await;
+    let (b, _) = finished_exec(&pool, ws, user, true).await;
+    let app = common::app(&db).await;
+    let before = common::execution_count(&db, ws).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/replay/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, b]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    assert_eq!(common::execution_count(&db, ws).await, before + 2);
+    assert_eq!(replays_of(&db, &[a, b]).await, 2);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn replay_by_ids_with_a_running_execution_creates_nothing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, _) = finished_exec(&pool, ws, user, true).await;
+    let (c, _) = finished_exec(&pool, ws, user, true).await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let app = common::app(&db).await;
+    let before = common::execution_count(&db, ws).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/replay/by-ids"),
+        user,
+        serde_json::json!({"ids": [a, running, c]}),
+    )
+    .await;
+    assert_eq!(
+        invalids_of(res).await,
+        vec![(running.to_string(), "not finished".to_string())]
+    );
+    assert_eq!(common::execution_count(&db, ws).await, before);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn replay_by_query_applies_to_exactly_the_matched_set(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, flow_a) = finished_exec(&pool, ws, user, true).await;
+    let (bystander, _) = finished_exec(&pool, ws, user, true).await;
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/replay/by-query?flow_id={flow_a}"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 1);
+    assert_eq!(replays_of(&db, &[a]).await, 1);
+    assert_eq!(replays_of(&db, &[bystander]).await, 0);
+}
+
+/// `latestRevision` and `revision` are one source for the whole batch: the
+/// replay runs the flow's current draft, not the execution's frozen copy.
+#[sqlx::test(migrations = "../../migrations")]
+async fn replay_by_ids_honours_latest_revision_and_refuses_a_bad_source(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, flow) = finished_exec(&pool, ws, user, true).await;
+    let frozen: String = sqlx::query_scalar("SELECT source FROM workflow.executions WHERE id = $1")
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let edited = frozen.replace("message: hi", "message: edited");
+    sqlx::query("UPDATE workflow.flows SET source = $2 WHERE id = $1")
+        .bind(flow)
+        .bind(&edited)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions/replay/by-ids");
+    let source_of_replay = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT source FROM workflow.executions WHERE replayed_from_execution_id = $1 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let res = common::post(&app, &base, user, serde_json::json!({"ids": [a]})).await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(source_of_replay().await, frozen, "default: the frozen copy");
+    let res = common::post(
+        &app,
+        &format!("{base}?latestRevision=true"),
+        user,
+        serde_json::json!({"ids": [a]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(
+        source_of_replay().await,
+        edited,
+        "latestRevision: the draft"
+    );
+    let before = common::execution_count(&db, ws).await;
+    let res = common::post(
+        &app,
+        &format!("{base}?revision=0"),
+        user,
+        serde_json::json!({"ids": [a]}),
+    )
+    .await;
+    assert_eq!(res.status(), 400);
+    assert_eq!(common::execution_count(&db, ws).await, before);
+}
+
+#[tokio::test]
+async fn restart_and_replay_bulk_routes_need_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let id = exec_in(&db, ws, reader, "FAILED").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    for op in ["restart", "replay"] {
+        let by_ids = common::post(
+            &app,
+            &format!("{base}/{op}/by-ids"),
+            reader,
+            serde_json::json!({"ids": [id]}),
+        )
+        .await;
+        assert_eq!(by_ids.status(), 403, "{op} by-ids");
+        let by_query = common::post_no_body(&app, &format!("{base}/{op}/by-query"), reader).await;
+        assert_eq!(by_query.status(), 403, "{op} by-query");
+    }
+    assert_eq!(state_of(&db, id).await, "FAILED");
+}
+
+// -- delete --
+
+async fn exists(db: &Db, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM workflow.executions WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("exists")
+}
+
+#[tokio::test]
+async fn delete_by_ids_deletes_every_listed_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "SUCCESS").await,
+        exec_in(&db, ws, user, "FAILED").await,
+    );
+    let bystander = exec_in(&db, ws, user, "SUCCESS").await;
+    let app = common::app(&db).await;
+    let res = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-ids?deleteStorage=false"),
+        user,
+        serde_json::json!({"ids": [a, b, a]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    assert!(!exists(&db, a).await && !exists(&db, b).await);
+    assert!(exists(&db, bystander).await);
+}
+
+#[tokio::test]
+async fn delete_by_ids_refuses_every_bad_id_and_deletes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let ok1 = exec_in(&db, ws, user, "SUCCESS").await;
+    let running = exec_in(&db, ws, user, "RUNNING").await;
+    let root = exec_in(&db, ws, user, "SUCCESS").await;
+    let retry = insert_retry(&db, ws, root, at(2)).await;
+    let parent = exec_in(&db, ws, user, "SUCCESS").await;
+    insert_child(&db, ws, None, Some((parent, 0)), at(2)).await;
+    let ok2 = exec_in(&db, ws, user, "SUCCESS").await;
+    let app = common::app(&db).await;
+    let res = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-ids"),
+        user,
+        serde_json::json!({"ids": [ok1, running, retry, parent, ok2]}),
+    )
+    .await;
+    let mut got = invalids_of(res).await;
+    got.sort();
+    let mut want = vec![
+        (running.to_string(), "not terminated".to_string()),
+        (retry.to_string(), "not a root".to_string()),
+        (parent.to_string(), "has dependents".to_string()),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+    // The atomicity proof: the valid ones still exist, nothing was deleted.
+    for id in [ok1, running, root, retry, parent, ok2] {
+        assert!(exists(&db, id).await, "{id} still exists");
+    }
+}
+
+#[tokio::test]
+async fn delete_by_query_deletes_exactly_the_matched_set() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (a, b) = (
+        exec_in(&db, ws, user, "SUCCESS").await,
+        exec_in(&db, ws, user, "SUCCESS").await,
+    );
+    let other: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history) \
+         VALUES ($1, 'zzz.other', 'frozen', $2, 'SUCCESS', $3) RETURNING id",
+    )
+    .bind(ws)
+    .bind(runnable_source("bulk-del"))
+    .bind(serde_json::json!(["CREATED", "SUCCESS"]))
+    .fetch_one(&db.pool)
+    .await
+    .expect("other");
+    let app = common::app(&db).await;
+    let res = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-query?namespace=a.write"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 2);
+    assert!(!exists(&db, a).await && !exists(&db, b).await);
+    assert!(exists(&db, other).await);
+}
+
+#[tokio::test]
+async fn delete_logs_false_is_refused_once_and_deletes_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let a = exec_in(&db, ws, user, "SUCCESS").await;
+    let app = common::app(&db).await;
+    let by_ids = json_delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-ids?deleteLogs=false"),
+        user,
+        serde_json::json!({"ids": [a]}),
+    )
+    .await;
+    assert_eq!(by_ids.status(), 400);
+    assert_eq!(common::json(by_ids).await["code"], "delete_logs_required");
+    let by_query = common::delete(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/by-query?deleteLogs=false"),
+        user,
+    )
+    .await;
+    assert_eq!(by_query.status(), 400);
+    assert_eq!(common::json(by_query).await["code"], "delete_logs_required");
+    assert!(exists(&db, a).await);
+}
+
+#[tokio::test]
+async fn delete_bulk_needs_workflow_manage() {
+    let Some(db) = common::db().await else { return };
+    let (ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let id = exec_in(&db, ws, reader, "SUCCESS").await;
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    let by_ids = json_delete(
+        &app,
+        &format!("{base}/by-ids"),
+        reader,
+        serde_json::json!({"ids": [id]}),
+    )
+    .await;
+    assert_eq!(by_ids.status(), 403);
+    let by_query = common::delete(&app, &format!("{base}/by-query"), reader).await;
+    assert_eq!(by_query.status(), 403);
+    assert!(exists(&db, id).await);
+}
+
+/// `.../executions/by-ids` is the bulk route and `.../executions/{uuid}` is
+/// still the single delete: a static segment beats the `{id}` capture.
+#[tokio::test]
+async fn delete_bulk_paths_do_not_collide_with_the_single_delete() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = bulk_manager(&db).await;
+    let (single, bulk_one) = (
+        exec_in(&db, ws, user, "SUCCESS").await,
+        exec_in(&db, ws, user, "SUCCESS").await,
+    );
+    let app = common::app(&db).await;
+    let base = format!("/api/ws/{ws}/workflows/executions");
+    let res = common::delete(&app, &format!("{base}/{single}"), user).await;
+    assert_eq!(res.status(), 204);
+    assert!(!exists(&db, single).await && exists(&db, bulk_one).await);
+    let res = json_delete(
+        &app,
+        &format!("{base}/by-ids"),
+        user,
+        serde_json::json!({"ids": [bulk_one]}),
+    )
+    .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(common::json(res).await["count"], 1);
+    assert!(!exists(&db, bulk_one).await);
+}

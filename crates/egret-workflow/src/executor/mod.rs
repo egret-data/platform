@@ -62,8 +62,8 @@ pub use after_execution::{
 };
 pub use command::Command;
 pub use manual_pause::{
-    first_waiting_pause, pause_by_hand_commands, paused_by_hand, paused_by_hand_of,
-    resume_by_hand_commands, resumed_outputs, PauseRefusal,
+    first_waiting_pause, pause_by_hand_commands, pause_refusal_of, paused_by_hand,
+    paused_by_hand_of, resume_by_hand_commands, resumed_outputs, PauseRefusal,
 };
 pub use plan::{
     build_plan, loop_until_gap, pause_gap, plan_stored, DagNode, Plan, PlanError, PlanTask,
