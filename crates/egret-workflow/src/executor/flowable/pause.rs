@@ -194,6 +194,24 @@ pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskI
     Step::Commands(cmds)
 }
 
+/// Whether a `Pause`'s `onPause:` run exists and has not reached a terminal
+/// state. The execution must not terminalize while one is: it is no root, so
+/// `aggregate(roots)` cannot see it, and a `CREATED` leaf under a terminal
+/// execution is never claimed -- the task would be silently dropped. The golden
+/// (`valids/pause_on_pause`) ends the execution only after both runs are done.
+pub(crate) fn on_pause_in_flight(plan: &Plan, state: &ExecutionState) -> bool {
+    state.runs.iter().any(|r| {
+        let TaskKind::Pause {
+            on_pause: Some(on_pause),
+            ..
+        } = &plan.tasks[r.task].kind
+        else {
+            return false;
+        };
+        run_of(state, None, *on_pause).is_some_and(|ix| !super::is_terminal(state, ix))
+    })
+}
+
 /// Drive every `onPause:` run a `Pause` created ([`drive`]): they hang off no
 /// list the walk visits, so `advance` asks here, once per round, and gets the
 /// ordinary walk of the one-task list (`CREATED` is opened, `RUNNING` is

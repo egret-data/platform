@@ -277,6 +277,11 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
 
     // 9a D5: a `Pause`'s `onPause:` run hangs off no list the walk visits.
     work.extend(flowable::pause::drive_on_pause(plan, state, now));
+    // ... and it is no root, so `aggregate(roots)` ignores it: hold the
+    // execution's terminal until it is done (it is driven above meanwhile).
+    if flowable::pause::on_pause_in_flight(plan, state) {
+        work.retain(|c| !matches!(c, Command::SetExecutionState { state } if state.is_terminal()));
+    }
 
     // **An `Exit` that decided `KILLED` is the whole round** (final review C1).
     // `parallel::drive_concurrent` collects every child's commands in one
@@ -8636,6 +8641,49 @@ tasks:
             ["CREATED", "RUNNING", "PAUSED"],
             "one PAUSED, not two"
         );
+    }
+
+    /// The execution does not terminalize while a resumed pause's `onPause:`
+    /// run is still going: the pause is released at once (`release_now`) while
+    /// `onPause` is `RUNNING`, and the terminal waits for it.
+    #[test]
+    fn the_execution_waits_for_an_on_pause_run_the_pause_outlived() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    onPause:\n      \
+                   id: hello\n      type: io.kestra.plugin.core.log.Log\n      \
+                   message: hi\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..10 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SUBMITTED", "RUNNING"]
+        );
+        flowable::pause::release_now(&mut state, T0);
+        for _ in 0..10 {
+            round_at(&plan, &mut state, T0);
+        }
+        assert_eq!(wire(&state.runs[0].history).last(), Some(&"SUCCESS"));
+        assert!(
+            !state.history.last().unwrap().is_terminal(),
+            "terminal while onPause still runs: {:?}",
+            wire(&state.history)
+        );
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 1,
+                state: RunState::Success,
+            },
+        );
+        for _ in 0..10 {
+            round_at(&plan, &mut state, T0);
+        }
+        assert_eq!(state.history.last(), Some(&RunState::Success));
     }
 
     /// A bare pause is unchanged by the `onPause:` driver: no extra run.
