@@ -2061,3 +2061,34 @@ fn every_state_write_stamps_the_timestamps() {
         "the scan did not find package 7b's verbatim copy in worker/copy.rs; it found {found:?}"
     );
 }
+
+/// Package 8a: `QUEUED` needs no CHECK change. The SQL terminal list does not
+/// hold it, `workflow.execution_is_idle` is false for it, and an `ended_at` on
+/// a QUEUED row is refused like one on `RUNNING`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_queued_execution_is_live_and_not_idle(pool: sqlx::PgPool) {
+    let (_db, ws, _) = seed(&pool).await;
+    let ex = start(&pool, ws, &one_log("queued")).await;
+    let terminal: bool = sqlx::query_scalar("SELECT workflow.state_is_terminal('QUEUED')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!terminal);
+    sqlx::query("UPDATE workflow.executions SET state = 'QUEUED', ended_at = NULL WHERE id = $1")
+        .bind(ex)
+        .execute(&pool)
+        .await
+        .expect("a QUEUED row is accepted");
+    let idle: bool = sqlx::query_scalar("SELECT workflow.execution_is_idle($1)")
+        .bind(ex)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!idle, "a QUEUED execution is not idle");
+    let ended = sqlx::query("UPDATE workflow.executions SET ended_at = now() WHERE id = $1")
+        .bind(ex)
+        .execute(&pool)
+        .await
+        .expect_err("a QUEUED row cannot carry an end");
+    assert!(ended.to_string().contains("_ended_only_when_terminal"));
+}

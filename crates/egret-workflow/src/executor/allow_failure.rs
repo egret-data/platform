@@ -321,7 +321,7 @@ mod tests {
     /// unfalsifiable alone**, and a filter that excluded everything would make
     /// the loop above pass by running nothing.
     #[test]
-    fn the_untouched_population_is_twelve_of_the_fourteen() {
+    fn the_untouched_population_is_thirteen_of_the_fifteen() {
         let untouched = RunState::ALL
             .iter()
             .filter(|s| !matches!(s, RunState::Failed | RunState::Warning))
@@ -332,6 +332,7 @@ mod tests {
         // CANCELLED by an `sla:` does NOT turn that into a success.
         // 12 of 14 since `Killing` (the kill package's Task 1), which is not
         // terminal and which `soften` leaves alone for the same reason.
-        assert_eq!((untouched, RunState::ALL.len()), (12, 14));
+        // 13 of 15 since `Queued` (package 8a), a live concurrency hold.
+        assert_eq!((untouched, RunState::ALL.len()), (13, 15));
     }
 }

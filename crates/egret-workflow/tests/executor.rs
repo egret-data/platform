@@ -4204,12 +4204,9 @@ fn the_two_state_vocabularies_agree() {
         .collect();
     assert_eq!(
         missing,
-        BTreeSet::from([
-            "BREAKPOINT".to_string(),
-            "QUEUED".to_string(),
-            "RESUBMITTED".to_string(),
-        ]),
-        "the THREE of Kestra's seventeen (four until the kill package's Task 1 \
+        BTreeSet::from(["BREAKPOINT".to_string(), "RESUBMITTED".to_string(),]),
+        "the TWO (package 8a added `Queued`, which the golden does not hold but \
+         the concurrency gate writes) of Kestra's seventeen (four until the kill package's Task 1 \
          added `Killing`, which the golden does not hold but the kill route \
          writes) that `RunState` does not hold. It was \
          six until W8 Task 5 added `Warning` and five until W8 Task 6 added \
@@ -6483,15 +6480,16 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     let beyond_golden: BTreeSet<String> = held_owned.difference(&all).cloned().collect();
     assert_eq!(
         beyond_golden,
-        BTreeSet::from(["KILLING".to_string()]),
-        "`RunState` holds the golden's vocabulary plus `KILLING` and nothing else"
+        BTreeSet::from(["KILLING".to_string(), "QUEUED".to_string()]),
+        "`RunState` holds the golden's vocabulary plus `KILLING` and `QUEUED` \
+         (package 8a: the concurrency gate writes it) and nothing else"
     );
     let within_golden: BTreeSet<String> = held_owned.intersection(&all).cloned().collect();
     assert_eq!(
         within_golden, all,
         "`RunState` holds the golden's whole vocabulary -- `models::State` \
-         still holds three Kestra states neither of these sets has (QUEUED, \
-         BREAKPOINT, RESUBMITTED); that direction is \
+         still holds two Kestra states neither of these sets has \
+         (BREAKPOINT, RESUBMITTED); that direction is \
          `the_two_state_vocabularies_agree`'s"
     );
 }

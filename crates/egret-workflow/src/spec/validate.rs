@@ -3740,6 +3740,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn concurrency_save_accepts_queue_and_refuses_a_zero_limit() {
+        let src = |c: &str| {
+            parse(&format!(
+                "id: f\nnamespace: a.b\nconcurrency:\n{c}tasks:\n  - id: t\n    type: core.log\n"
+            ))
+            .unwrap()
+        };
+        let codes = |c: &str| -> Vec<&'static str> {
+            validate(&src(c)).errors.iter().map(|e| e.code).collect()
+        };
+        assert!(codes("  limit: 2\n  behavior: QUEUE\n").is_empty());
+        assert!(
+            codes("  limit: 2\n").is_empty(),
+            "omitted behavior is QUEUE"
+        );
+        assert_eq!(
+            codes("  limit: 0\n  behavior: QUEUE\n"),
+            vec!["concurrency_limit_too_low"]
+        );
+    }
+
+    #[test]
+    fn concurrency_parses_into_the_model() {
+        use crate::models::ConcurrencyBehavior::Queue;
+        let f = parse(
+            "id: f\nnamespace: a.b\nconcurrency:\n  limit: 2\n  behavior: QUEUE\ntasks:\n  - id: t\n    type: core.log\n",
+        )
+        .unwrap();
+        let c = f.concurrency.unwrap();
+        assert_eq!((c.limit, c.behavior), (Some(2), Queue));
+        let f = parse("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\n").unwrap();
+        assert!(f.concurrency.is_none());
+    }
+
     /// The single most important behaviour in this task. A feature that parses
     /// but is not enforced must SAY SO: without this, a user writes
     /// `concurrency: {limit: 1}`, sees a green publish, and reasonably concludes
