@@ -611,14 +611,27 @@ pub(super) async fn open(
                 // cleared, emptied ids renewed — so the drain resumes an
                 // identical restart), append `QUEUED`, and STOP before the drive.
                 // The reset runs stay `CREATED`, never claimable (the safety
-                // invariant). The `Loop`-iteration jobs (D8) are dropped here;
-                // queueing a restart that reopens a `Loop` is not re-driven by
-                // the drain (see the report's concerns).
-                claim::Disposition::Queue => {
+                // invariant).
+                //
+                // **Only when the restart reopens no `Loop`** (`cmds.loops`
+                // empty). A loop-reopening restart carries D8 iteration restarts
+                // (the `iterations` jobs computed above) that live in `open`; the
+                // drain resumes via `promote_queued`'s plain `settle`, which never
+                // re-enters `open`, so a queued-then-drained loop restart would
+                // reopen the `Loop` run WITHOUT restarting its last failing
+                // iteration — a silently-wrong result. Such a restart instead
+                // SOFT-OVERSHOOTS the limit (falls through to drive now, running
+                // the iteration restarts correctly), which spec §9 sanctions for
+                // this rare intractable sub-case. CANCEL/FAIL still terminalize
+                // below (a cancelled restart restarts nothing).
+                claim::Disposition::Queue if cmds.loops.is_empty() => {
                     side_writes(conn, id, &cmds, labels.as_ref(), label).await?;
                     claim::queue_restart(conn, &ctx, &before, state, now, row.history).await?;
                     return Ok((None, Vec::new()));
                 }
+                // A loop-reopening restart over a QUEUE limit: soft-overshoot
+                // (drive now), see above.
+                claim::Disposition::Queue => {}
                 // Over a CANCEL/FAIL limit (D5): terminalize THROUGH settle so
                 // the terminal hooks fire, WITHOUT driving. The resets are not
                 // applied (no `side_writes`): the runs are left as they were and

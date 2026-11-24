@@ -1094,3 +1094,87 @@ async fn a_partial_replay_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
     assert_eq!(state(&pool, new).await, "CANCELLED");
     assert_eq!(running_run_count(&pool, new).await, 0);
 }
+
+/// A `concurrency: {limit, behavior: QUEUE}` flow whose single `Loop` iteration
+/// fails.
+fn loop_src(behavior: &str) -> String {
+    format!(
+        "id: lc\nnamespace: t\nconcurrency:\n  limit: 1\n  behavior: {behavior}\n\
+         tasks:\n  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\"]'\n    \
+         tasks:\n      - id: body\n        type: io.kestra.plugin.core.log.Log\n        message: x\n"
+    )
+}
+
+/// The Task-4 review finding: a restart that reopens a `Loop` (D8 iteration
+/// restarts, which live in `restart::open`) must NOT be queued over a QUEUE
+/// limit. The drain resumes via `promote_queued`'s plain settle, which never
+/// re-enters `open`, so a queued-then-drained loop restart would reopen the Loop
+/// run WITHOUT restarting its failing iteration — a silently-wrong result.
+/// Instead it SOFT-OVERSHOOTS (runs now, driving the iteration restart), which
+/// spec §9 sanctions for this rare intractable sub-case.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_reopening_restart_over_the_limit_soft_overshoots(pool: sqlx::PgPool) {
+    let src = loop_src("QUEUE");
+    let (ws, flow) = setup(&pool, &src).await;
+    let failed = start(&pool, ws, Some(flow), &src).await;
+    for _ in 0..30 {
+        if state(&pool, failed).await == "FAILED" {
+            break;
+        }
+        tick_failing(&pool, 8).await;
+    }
+    assert_eq!(state(&pool, failed).await, "FAILED");
+    // The failing iteration row (a Loop sub-execution).
+    let iter: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 \
+           AND loop_index IS NOT NULL ORDER BY loop_index DESC LIMIT 1",
+    )
+    .bind(failed)
+    .fetch_one(&pool)
+    .await
+    .expect("the failing iteration");
+    assert_eq!(state(&pool, iter).await, "FAILED");
+
+    // A live holder occupies the flow's only slot.
+    let _live = start(&pool, ws, Some(flow), &src).await;
+
+    // Act: restart the loop execution while over the limit.
+    egret_workflow::worker::restart_execution(&pool, failed)
+        .await
+        .unwrap();
+
+    // Then: soft-overshoot — it ran now (not left QUEUED) and its failing
+    // iteration was restarted in place (D8), not silently skipped.
+    assert_ne!(
+        state(&pool, failed).await,
+        "QUEUED",
+        "a loop-reopening restart soft-overshoots instead of queueing"
+    );
+    let ih = history(&pool, iter).await;
+    assert!(
+        ih.as_array().unwrap().iter().any(|s| s == "RESTARTED"),
+        "the failing iteration was restarted in place, got {ih}"
+    );
+}
+
+/// A loop-reopening restart over a CANCEL limit still terminalizes (a cancelled
+/// restart restarts nothing, so the D8 concern does not apply).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_reopening_restart_over_a_cancel_limit_is_cancelled(pool: sqlx::PgPool) {
+    let src = loop_src("CANCEL");
+    let (ws, flow) = setup(&pool, &src).await;
+    let failed = start(&pool, ws, Some(flow), &src).await;
+    for _ in 0..30 {
+        if state(&pool, failed).await == "FAILED" {
+            break;
+        }
+        tick_failing(&pool, 8).await;
+    }
+    assert_eq!(state(&pool, failed).await, "FAILED");
+    let _live = start(&pool, ws, Some(flow), &src).await;
+
+    egret_workflow::worker::restart_execution(&pool, failed)
+        .await
+        .unwrap();
+    assert_eq!(state(&pool, failed).await, "CANCELLED");
+}
