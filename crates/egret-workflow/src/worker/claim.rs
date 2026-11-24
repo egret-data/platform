@@ -69,6 +69,7 @@ use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use super::cancel;
+use super::concurrency::{concurrency_admit, Admit};
 use super::render::{self, Pass, Surface};
 use super::replay;
 use super::spawn::{self, Requested};
@@ -82,6 +83,7 @@ use crate::executor::{
     advance, apply, build_plan, plan_stored, Attempt, Command, ExecutionMeta, ExecutionState, Plan,
     Resume, RunIx, RunState, TaskKind, TaskRun, Tick, WorkingDirPhase,
 };
+use crate::models::{Concurrency, ConcurrencyBehavior};
 #[cfg(any(test, feature = "test-util"))]
 use crate::storage::prefetch::Prefetch;
 use crate::storage::StoredFile;
@@ -3722,6 +3724,11 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
                 }
             }
             outbox(conn, ctx, before, state).await?;
+            // Package 8a: a terminal frees a concurrency slot; start the
+            // oldest QUEUED execution of the flow, if one waits.
+            if became_terminal(before, state) {
+                super::concurrency::on_terminal(conn, ctx).await?;
+            }
             // Step 4 is the tail ([`walk`]): if this settle reached a
             // terminal, tell the parent. `was != is` reads `state` -- this
             // settle's in-memory copy, which a nested settle deliberately does
@@ -4338,7 +4345,13 @@ async fn start_execution_in_on(
     new: NewExecution<'_>,
 ) -> Result<Uuid> {
     let born_failed = new.born_failed;
-    let ctx = insert_execution(conn, gate, new).await?;
+    let (ctx, admit) = insert_execution_gated(conn, gate, new, true).await?;
+    // Package 8a: a start over its flow's concurrency limit is parked in
+    // `QUEUED`. It has no task run, so nothing claims it; the drain
+    // (`concurrency::concurrency_drain`) starts it when a slot frees.
+    if admit == Admit::Queue {
+        return Ok(ctx.id);
+    }
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
     // Born FAILED: the caller's own command, applied before the first settle
@@ -4368,6 +4381,30 @@ async fn start_execution_in_on(
 pub(super) async fn settle_new(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<()> {
     let empty = ExecutionState::new(&ctx.plan);
     settle(conn, ctx, &empty, empty.clone(), Tick(0), None).await
+}
+
+/// Start a `QUEUED` execution (package 8a's drain): the row goes back to
+/// `CREATED` and takes the first settle a fresh start takes, so it runs
+/// identically. The one difference is the clock: the settle's tick is the
+/// real time since `created_at` (what `load` reads) rather than `Tick(0)`,
+/// because the execution waited in the queue and every deadline is measured
+/// from `created_at`.
+pub(super) async fn promote_queued(
+    conn: &mut PgConnection,
+    execution: Uuid,
+    stack: Stack,
+) -> Result<()> {
+    sqlx::query(EXECUTION_STATE_UPDATE)
+        .bind("CREATED")
+        .bind(serde_json::json!(["CREATED"]))
+        .bind(execution)
+        .bind(false)
+        .bind(false)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    let (ctx, state, now) = load(conn, execution, stack).await?;
+    settle(conn, &ctx, &state, state.clone(), now, None).await
 }
 
 /// **What every start refuses a source for**, before any row is written: it
@@ -4416,6 +4453,20 @@ pub(super) async fn insert_execution(
     gate: &Gate,
     new: NewExecution<'_>,
 ) -> Result<ExecutionCtx> {
+    Ok(insert_execution_gated(conn, gate, new, false).await?.0)
+}
+
+/// [`insert_execution`] with the flow-concurrency gate (package 8a) when
+/// `gated`: under the flow's advisory lock, in THIS transaction, the row is
+/// born `QUEUED` instead of `CREATED` if the flow is at its limit. Only a
+/// fresh start is gated (`start_execution_in_on`); a copy (replay/restart)
+/// is not, and a born-`FAILED` start never is.
+async fn insert_execution_gated(
+    conn: &mut PgConnection,
+    gate: &Gate,
+    new: NewExecution<'_>,
+    gated: bool,
+) -> Result<(ExecutionCtx, Admit)> {
     let NewExecution {
         workspace_id,
         flow_id,
@@ -4437,6 +4488,26 @@ pub(super) async fn insert_execution(
     } = new;
 
     let (flow, plan) = start_screen(conn, source, flow_id, started_by).await?;
+
+    // The gate comes AFTER the screen (a refused start must not queue) and
+    // BEFORE the INSERT: the advisory lock it takes is held to the end of this
+    // transaction, so the count it reads and the row written below are one
+    // atomic step per flow. A NULL `flow_id` (a deleted flow) never gates.
+    let admit = match (gated && !born_failed, flow_id, flow.concurrency.as_ref()) {
+        (
+            true,
+            Some(fid),
+            Some(Concurrency {
+                limit: Some(limit),
+                behavior: ConcurrencyBehavior::Queue,
+            }),
+        ) => concurrency_admit(conn, fid, *limit).await?,
+        _ => Admit::Run,
+    };
+    let (row_state, row_history) = match admit {
+        Admit::Run => ("CREATED", serde_json::json!(["CREATED"])),
+        Admit::Queue => ("QUEUED", serde_json::json!(["CREATED", "QUEUED"])),
+    };
 
     let inputs = if inputs.is_object() {
         inputs
@@ -4469,11 +4540,12 @@ pub(super) async fn insert_execution(
             flow_trigger_event_id, replayed_from_execution_id, labels, backfill_id, \
             variables, secret_inputs, ",
         stamp_columns!(),
-        ") VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, 'CREATED', \
-                 '[\"CREATED\"]'::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, $16, $17, ",
-        // Both NULL for a row born `CREATED`; spelled through the helper so the
-        // rule has no exception for the reader to remember (`stamps`).
-        stamp_values!("'CREATED'", "'[\"CREATED\"]'"),
+        ") VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, $18, \
+                 $19::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, $16, $17, ",
+        // Both NULL for a row born `CREATED` or `QUEUED`; spelled through the
+        // helper so the rule has no exception for the reader to remember
+        // (`stamps`).
+        stamp_values!("$18", "$19"),
         ") RETURNING id",
     ))
     .bind(workspace_id)
@@ -4493,6 +4565,8 @@ pub(super) async fn insert_execution(
     .bind(backfill_id)
     .bind(variables)
     .bind(secret_inputs)
+    .bind(row_state)
+    .bind(&row_history)
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
@@ -4515,17 +4589,20 @@ pub(super) async fn insert_execution(
     }
     crate::storage::index_input_files(conn, workspace_id, id, &input_files).await?;
 
-    Ok(ExecutionCtx {
-        id,
-        workspace_id,
-        flow_id,
-        source: source.to_string(),
-        plan,
-        seq: 0,
-        // A caller that starts an execution is the bottom of the stack.
-        depth: 0,
-        gate: Some(gate.clone()),
-    })
+    Ok((
+        ExecutionCtx {
+            id,
+            workspace_id,
+            flow_id,
+            source: source.to_string(),
+            plan,
+            seq: 0,
+            // A caller that starts an execution is the bottom of the stack.
+            depth: 0,
+            gate: Some(gate.clone()),
+        },
+        admit,
+    ))
 }
 
 /// Drive an execution forward from whatever the **caller** has just supplied.

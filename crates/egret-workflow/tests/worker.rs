@@ -8120,6 +8120,9 @@ async fn the_waker_names_exactly_the_states_something_will_move(pool: sqlx::PgPo
         // (flowable) or by the worker that holds it (leased) -- never by the
         // waker, which would resume a run that is being stopped.
         ("KILLING", false),
+        // Package 8a: a concurrency hold with no run at all; the drain starts
+        // it, never the waker.
+        ("QUEUED", false),
     ]);
 
     let vocabulary: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();

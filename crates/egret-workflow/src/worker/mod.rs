@@ -80,6 +80,7 @@
 mod cancel;
 mod claim;
 pub mod commands;
+pub mod concurrency;
 mod copy;
 mod delete;
 mod flow_outputs;

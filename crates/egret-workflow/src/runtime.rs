@@ -752,6 +752,15 @@ pub async fn reaper_pass(
         Ok(n) => tracing::info!(reclaimed = n, "workflow leases reclaimed"),
         Err(e) => tracing::warn!(error = %e, "workflow reaper failed"),
     }
+    // Package 8a: the concurrency drain's safety net.
+    match crate::worker::concurrency::concurrency_sweep(pool).await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            started = n,
+            "queued workflow executions started by the sweep"
+        ),
+        Err(e) => tracing::warn!(error = %e, "workflow concurrency sweep failed"),
+    }
     if let Some(sweep) = sweep {
         match sweep.sweep_orphans(pool).await {
             Ok(0) => {}

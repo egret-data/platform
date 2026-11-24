@@ -148,8 +148,9 @@ pub struct GraphRun {
 /// | 11 | SUBMITTED | not listed; live, handed to a worker but not yet running |
 /// | 12 | SUCCESS | Kestra |
 /// | 13 | RESTARTED | Kestra |
-/// | 14 | CREATED | Kestra |
-pub const FOLD_PRIORITY: [RunState; 14] = [
+/// | 14 | QUEUED | egret; a concurrency hold that has no run, so it is the last live state and shows only when nothing else does |
+/// | 15 | CREATED | Kestra |
+pub const FOLD_PRIORITY: [RunState; 15] = [
     RunState::Failed,
     RunState::Killed,
     RunState::Cancelled,
@@ -163,6 +164,7 @@ pub const FOLD_PRIORITY: [RunState; 14] = [
     RunState::Submitted,
     RunState::Success,
     RunState::Restarted,
+    RunState::Queued,
     RunState::Created,
 ];
 
@@ -183,7 +185,8 @@ fn rank(s: RunState) -> u8 {
         RunState::Submitted => 10,
         RunState::Success => 11,
         RunState::Restarted => 12,
-        RunState::Created => 13,
+        RunState::Queued => 13,
+        RunState::Created => 14,
     }
 }
 

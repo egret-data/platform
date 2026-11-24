@@ -3,7 +3,7 @@
     "Flow": {
       "afterExecution": "honoured",
       "checks": "warned",
-      "concurrency": "warned",
+      "concurrency": "honoured",
       "deleted": "ignored",
       "description": "honoured",
       "disabled": "honoured",

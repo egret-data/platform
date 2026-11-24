@@ -1036,9 +1036,11 @@ async fn validate_without_an_id_answers_the_by_id_report_and_writes_nothing() {
     let before = flow_count(&db, ws).await;
 
     // Errors AND warnings, so both halves of the report are compared. The
-    // warning is a flow-level `concurrency:` (`not_yet_enforced`): the typo'd
-    // type that supplied it until no-silent-stall Task 1 is an error now.
-    let source = "id: f\nnamespace: BAD NAMESPACE\nconcurrency:\n  limit: 1\ntasks:\n  - id: t\n    type: egret.sqll\n";
+    // warning is a flow-level `concurrency: behavior: CANCEL` (`not_yet_enforced`):
+    // 8a enforces `QUEUE` (no warning) but CANCEL/FAIL are lifted by 8b, so they
+    // still warn. (The typo'd type that supplied the error was an error since
+    // no-silent-stall Task 1.)
+    let source = "id: f\nnamespace: BAD NAMESPACE\nconcurrency:\n  limit: 1\n  behavior: CANCEL\ntasks:\n  - id: t\n    type: egret.sqll\n";
     let by_id = common::post(
         &app,
         &format!("/api/ws/{ws}/workflows/flows/{id}/validate"),

@@ -636,6 +636,11 @@ pub enum RunState {
     /// `ExecutionUpdatableTask` row — and stayed baselined until kill-and-exit
     /// Task 3 (2026-10-17) implemented `Exit` (`executor::exit`) and banked it.
     Cancelled,
+    /// Package 8a. A **flow-concurrency** hold: the execution was started over
+    /// its flow's `concurrency.limit` and waits, with no task run, for a slot.
+    /// Live and not terminal; not idle (`workflow.execution_is_idle` is true
+    /// only for terminal states). Only an execution row ever carries it.
+    Queued,
 }
 
 impl RunState {
@@ -670,6 +675,7 @@ impl RunState {
         RunState::Warning,
         RunState::Cancelled,
         RunState::Killing,
+        RunState::Queued,
     ];
 
     /// This variant's position in [`RunState::ALL`]. Exhaustive on purpose.
@@ -689,6 +695,7 @@ impl RunState {
             RunState::Warning => 11,
             RunState::Cancelled => 12,
             RunState::Killing => 13,
+            RunState::Queued => 14,
         }
     }
 
@@ -709,6 +716,7 @@ impl RunState {
             RunState::Warning => "WARNING",
             RunState::Cancelled => "CANCELLED",
             RunState::Killing => "KILLING",
+            RunState::Queued => "QUEUED",
         }
     }
 
@@ -1134,6 +1142,15 @@ mod tests {
     /// `KILLING` is a live state: held by `ALL`, not terminal, and its wire
     /// spelling round-trips through the one inverse the crate reads rows with.
     #[test]
+    fn queued_round_trips_and_is_live() {
+        assert!(RunState::ALL.contains(&RunState::Queued));
+        assert!(!RunState::Queued.is_terminal());
+        assert!(!RunState::Queued.is_terminated_no_fail());
+        assert_eq!(RunState::Queued.wire(), "QUEUED");
+        assert_eq!(crate::worker::from_wire("QUEUED"), Some(RunState::Queued));
+    }
+
+    #[test]
     fn killing_is_a_live_state_that_round_trips() {
         assert!(RunState::ALL.contains(&RunState::Killing));
         assert!(!RunState::Killing.is_terminal());
@@ -1204,6 +1221,7 @@ mod tests {
                 RunState::Warning => State::Warning,
                 RunState::Cancelled => State::Cancelled,
                 RunState::Killing => State::Killing,
+                RunState::Queued => State::Queued,
             }
         }
         for r in RunState::ALL {
@@ -1300,7 +1318,7 @@ mod tests {
             RunState::Retried,
             RunState::Skipped,
         ];
-        const NOT_TERMINAL: [RunState; 7] = [
+        const NOT_TERMINAL: [RunState; 8] = [
             RunState::Created,
             RunState::Submitted,
             RunState::Running,
@@ -1309,6 +1327,8 @@ mod tests {
             RunState::Restarted,
             // `isTerminated()` does not list `KILLING`; `isRunning()` does.
             RunState::Killing,
+            // Package 8a: a concurrency hold, live and waiting for a slot.
+            RunState::Queued,
         ];
         for state in TERMINAL {
             assert!(
@@ -1354,11 +1374,11 @@ mod tests {
         assert_eq!(RunState::Restarted.wire(), "RESTARTED");
         assert_eq!(
             RunState::ALL.len(),
-            14,
+            15,
             "the golden's vocabulary is 13 and this enum holds ALL of it \
              (11 until W8 Task 5 added `Warning`, 12 until W8 Task 6 added \
              `Cancelled`), plus `Killing`, which the kill route writes and the \
-             golden never holds; \
+             golden never holds, and `Queued` (package 8a, the same); \
              `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
              is what derives that rather than this line"
         );
