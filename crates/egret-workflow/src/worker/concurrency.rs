@@ -141,6 +141,11 @@ pub(super) async fn concurrency_drain(
 /// [`concurrency_admit`] / [`concurrency_drain`] (held to the end of the
 /// caller's transaction), so it serializes with them and slot accounting
 /// stays consistent: the flow is simply transiently over its limit.
+///
+/// If the force-ran row self-terminalizes in its first settle while the flow
+/// is then under its limit with other `QUEUED` rows, the `DRAINING` guard
+/// suppresses the inline drain and the reaper's `concurrency_sweep` re-drains
+/// them (delayed, not stranded).
 pub(super) async fn concurrency_force_start(
     tx: &mut PgConnection,
     stack: &Stack,

@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::claim::{self, Stack};
 use super::concurrency::{concurrency_force_start, take_flow_lock};
+use super::kill::{is_deadlock, DEADLOCK_RETRIES};
 use super::txn::{transaction, InTxn};
 use crate::executor::{ExecutionState, RunState};
 
@@ -39,35 +40,47 @@ pub fn force_run_refusal(last: Option<RunState>) -> Option<String> {
 /// re-checked under both, so an execution a drain has just promoted is
 /// refused, not started twice.
 pub async fn force_run(pool: &PgPool, workspace: Uuid, id: Uuid) -> Result<ForceRun> {
-    transaction!(pool, |at| {
-        let (conn, gate) = at.parts();
-        let flow_id: Option<Option<Uuid>> =
-            sqlx::query_scalar("SELECT flow_id FROM workflow.executions WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&mut *conn)
-                .await
-                .map_err(|e| Error::Internal(e.into()))?;
-        let Some(flow_id) = flow_id else {
-            return Err(Error::NotFound("execution".into()));
-        };
-        if let Some(flow_id) = flow_id {
-            take_flow_lock(conn, flow_id).await?;
+    // Retried like a kill: the settle-producing mutators lock row-then-flow,
+    // so a rare deadlock victim reruns the whole transaction.
+    let mut retries = 0;
+    loop {
+        let ended = transaction!(pool, |at| {
+            let (conn, gate) = at.parts();
+            let flow_id: Option<Option<Uuid>> =
+                sqlx::query_scalar("SELECT flow_id FROM workflow.executions WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(|e| Error::Internal(e.into()))?;
+            let Some(flow_id) = flow_id else {
+                return Err(Error::NotFound("execution".into()));
+            };
+            if let Some(flow_id) = flow_id {
+                take_flow_lock(conn, flow_id).await?;
+            }
+            let stack = Stack::Fresh(gate.clone());
+            let (ctx, state, _now) = claim::load(conn, id, stack.clone()).await?;
+            if ctx.workspace_id != workspace {
+                return Err(Error::NotFound("execution".into()));
+            }
+            if let Some(s) = force_run_refusal(last_state(&state)) {
+                return Ok(ForceRun::NotQueued(s));
+            }
+            match ctx.flow_id {
+                Some(flow_id) => concurrency_force_start(conn, &stack, flow_id, id).await?,
+                // A queued row always has a flow; start it plainly if not.
+                None => claim::promote_queued(conn, id, stack).await?,
+            }
+            Ok(ForceRun::Started)
+        });
+        match ended {
+            Err(e) if retries < DEADLOCK_RETRIES && is_deadlock(&e) => {
+                retries += 1;
+                tracing::info!(execution = %id, "force-run was a deadlock's victim; running it again");
+            }
+            other => return other,
         }
-        let stack = Stack::Fresh(gate.clone());
-        let (ctx, state, _now) = claim::load(conn, id, stack.clone()).await?;
-        if ctx.workspace_id != workspace {
-            return Err(Error::NotFound("execution".into()));
-        }
-        if let Some(s) = force_run_refusal(last_state(&state)) {
-            return Ok(ForceRun::NotQueued(s));
-        }
-        match ctx.flow_id {
-            Some(flow_id) => concurrency_force_start(conn, &stack, flow_id, id).await?,
-            // A queued row always has a flow; start it plainly if not.
-            None => claim::promote_queued(conn, id, stack).await?,
-        }
-        Ok(ForceRun::Started)
-    })
+    }
 }
 
 fn last_state(state: &ExecutionState) -> Option<RunState> {

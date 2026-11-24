@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use super::claim::{self, Stack};
 use super::concurrency::take_flow_lock;
+use super::kill::{is_deadlock, DEADLOCK_RETRIES};
 use super::txn::{transaction, InTxn};
 use crate::executor::{apply, Command, ExecutionState, RunState};
 
@@ -44,36 +45,48 @@ pub async fn unqueue(
     target: RunState,
 ) -> Result<Unqueued> {
     debug_assert!(target.is_terminal(), "unqueue target must be terminal");
-    transaction!(pool, |at| {
-        let (conn, gate) = at.parts();
-        // Lock order: the flow's advisory lock BEFORE the row lock, as
-        // `force_run`, the drain and the admission gate take them. The settle
-        // below drains the flow (re-taking the same lock, which is re-entrant
-        // in a transaction); row-first here would be an ABBA with `force_run`.
-        let flow_id: Option<Option<Uuid>> =
-            sqlx::query_scalar("SELECT flow_id FROM workflow.executions WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&mut *conn)
-                .await
-                .map_err(|e| Error::Internal(e.into()))?;
-        let Some(flow_id) = flow_id else {
-            return Err(Error::NotFound("execution".into()));
-        };
-        if let Some(flow_id) = flow_id {
-            take_flow_lock(conn, flow_id).await?;
+    // Retried like a kill: the settle-producing mutators lock row-then-flow,
+    // so a rare deadlock victim reruns the whole transaction.
+    let mut retries = 0;
+    loop {
+        let ended = transaction!(pool, |at| {
+            let (conn, gate) = at.parts();
+            // Lock order: the flow's advisory lock BEFORE the row lock, as
+            // `force_run`, the drain and the admission gate take them. The settle
+            // below drains the flow (re-taking the same lock, which is re-entrant
+            // in a transaction); row-first here would be an ABBA with `force_run`.
+            let flow_id: Option<Option<Uuid>> =
+                sqlx::query_scalar("SELECT flow_id FROM workflow.executions WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&mut *conn)
+                    .await
+                    .map_err(|e| Error::Internal(e.into()))?;
+            let Some(flow_id) = flow_id else {
+                return Err(Error::NotFound("execution".into()));
+            };
+            if let Some(flow_id) = flow_id {
+                take_flow_lock(conn, flow_id).await?;
+            }
+            let (ctx, mut state, now) = claim::load(conn, id, Stack::Fresh(gate.clone())).await?;
+            if ctx.workspace_id != workspace {
+                return Err(Error::NotFound("execution".into()));
+            }
+            if let Some(s) = unqueue_refusal(last_state(&state)) {
+                return Ok(Unqueued::NotQueued(s));
+            }
+            let before = state.clone();
+            apply(&mut state, &Command::SetExecutionState { state: target });
+            claim::settle(conn, &ctx, &before, state, now, None).await?;
+            Ok(Unqueued::Done)
+        });
+        match ended {
+            Err(e) if retries < DEADLOCK_RETRIES && is_deadlock(&e) => {
+                retries += 1;
+                tracing::info!(execution = %id, "unqueue was a deadlock's victim; running it again");
+            }
+            other => return other,
         }
-        let (ctx, mut state, now) = claim::load(conn, id, Stack::Fresh(gate.clone())).await?;
-        if ctx.workspace_id != workspace {
-            return Err(Error::NotFound("execution".into()));
-        }
-        if let Some(s) = unqueue_refusal(last_state(&state)) {
-            return Ok(Unqueued::NotQueued(s));
-        }
-        let before = state.clone();
-        apply(&mut state, &Command::SetExecutionState { state: target });
-        claim::settle(conn, &ctx, &before, state, now, None).await?;
-        Ok(Unqueued::Done)
-    })
+    }
 }
 
 fn last_state(state: &ExecutionState) -> Option<RunState> {
