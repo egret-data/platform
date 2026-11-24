@@ -4553,6 +4553,11 @@ async fn insert_execution_gated(
     // KI-112: a SECRET input's value is masked in `inputs`, which every read
     // returns, and sealed into `secret_inputs`, which only the render opens.
     let (inputs, secret_inputs) = crate::secret_inputs::split(&flow, inputs)?;
+    // started_at/ended_at are both NULL for a row born CREATED or QUEUED; a
+    // CANCEL/FAIL start is born CREATED too and stamped by its settle. The
+    // stamp columns/values go through stamp_columns!/stamp_values! so the rule
+    // has no exception -- see the `stamps` census guard. Keep this note OUT of
+    // the concat! below: a comment inside it hides stamp_values! from the scan.
     let id: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
            (id, workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
@@ -4562,10 +4567,6 @@ async fn insert_execution_gated(
         stamp_columns!(),
         ") VALUES (COALESCE($13, gen_random_uuid()), $1, $2, $3, $4, $5, $18, \
                  $19::jsonb, $6, $7, $8, $9, $10, $11, $12, $14, $15, $16, $17, ",
-        // Both NULL for a row born `CREATED` or `QUEUED` (a CANCEL/FAIL start
-        // is born `CREATED` too and stamped by its settle); spelled through the
-        // helper so the rule has no exception for the reader to remember
-        // (`stamps`).
         stamp_values!("$18", "$19"),
         ") RETURNING id",
     ))

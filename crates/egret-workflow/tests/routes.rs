@@ -1036,11 +1036,11 @@ async fn validate_without_an_id_answers_the_by_id_report_and_writes_nothing() {
     let before = flow_count(&db, ws).await;
 
     // Errors AND warnings, so both halves of the report are compared. The
-    // warning is a flow-level `concurrency: behavior: CANCEL` (`not_yet_enforced`):
-    // 8a enforces `QUEUE` (no warning) but CANCEL/FAIL are lifted by 8b, so they
-    // still warn. (The typo'd type that supplied the error was an error since
-    // no-silent-stall Task 1.)
-    let source = "id: f\nnamespace: BAD NAMESPACE\nconcurrency:\n  limit: 1\n  behavior: CANCEL\ntasks:\n  - id: t\n    type: egret.sqll\n";
+    // warning is a flow-level `quotas:` (`not_yet_enforced`): a stable choice
+    // here since quotas is Kestra-Enterprise-only and egret never enforces it
+    // (roadmap §3.3). (Flow `concurrency:` no longer warns: 8b enforces all
+    // three behaviors. The typo'd type supplies the error half.)
+    let source = "id: f\nnamespace: BAD NAMESPACE\nquotas:\n  - {}\ntasks:\n  - id: t\n    type: egret.sqll\n";
     let by_id = common::post(
         &app,
         &format!("/api/ws/{ws}/workflows/flows/{id}/validate"),
