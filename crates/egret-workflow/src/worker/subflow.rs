@@ -558,7 +558,9 @@ pub(super) async fn spawn_one(
         Some(Concurrency {
             limit: Some(limit),
             behavior,
-        }) => super::concurrency::concurrency_admit(conn, child_flow, *limit, *behavior).await?,
+        }) => {
+            super::concurrency::concurrency_admit(conn, child_flow, *limit, *behavior, None).await?
+        }
         _ => Admit::Run,
     };
     let row = claim::admit_row(&[json!("CREATED")], admit);

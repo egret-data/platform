@@ -3439,11 +3439,16 @@ async fn walk_from<'a>(conn: &mut PgConnection, mut steps: Vec<Step<'a>>) -> Res
             Step::Job(Job::Settle(frame)) => steps.push(Step::Frame(frame)),
             Step::Job(Job::Report(settled)) => steps.push(Step::Loop(settled)),
             // The restarts it opens run after its frame and that frame's
-            // whole tail: they are pushed below it.
+            // whole tail: they are pushed below it. Package 8c Task 4: a start
+            // the gate QUEUED has no frame to walk (it persisted the resets and
+            // stopped before the drive), so `open` returns `None` and this pushes
+            // nothing.
             Step::Job(Job::Restart(opening)) => {
                 let (frame, after) = Box::pin(super::restart::open(conn, *opening)).await?;
                 steps.extend(after.into_iter().rev().map(Step::Job));
-                steps.push(Step::Frame(Box::new(frame)));
+                if let Some(frame) = frame {
+                    steps.push(Step::Frame(Box::new(frame)));
+                }
             }
             Step::Job(Job::Complete(completion)) => {
                 if let Some(frame) = Box::pin(subflow::open_completion(conn, completion)).await? {
@@ -4507,6 +4512,59 @@ pub(super) async fn promote_queued(
     settle(conn, &ctx, &state, state.clone(), now, None).await
 }
 
+/// **Package 8c Task 4: a gated restart / partial replay over a QUEUE limit.**
+/// The reset runs and the `RESTARTED` transition are persisted exactly as the
+/// pre-`drive` half of a settle's [`begin`] would write them, then `QUEUED` is
+/// appended to the execution's history and NOTHING drives.
+///
+/// The reset runs stay `CREATED`, which the worker's claim query never takes (it
+/// claims only `RUNNING`/`KILLING`), so the execution sits `QUEUED` with no
+/// claimable run until the drain ([`promote_queued`]) pops the trailing `QUEUED`
+/// — restoring `RESTARTED` — and the resumed settle drives the reset runs
+/// identically to an ungated restart (the drain's `load` reads exactly these
+/// rows).
+///
+/// `before` is the execution's loaded state; `state` is the same with the
+/// restart's reset commands applied, its history ending `RESTARTED`.
+/// `queued_history` is that history with `QUEUED` appended ([`admit_row`]). The
+/// `marks.observe` here is `begin`'s own first observe, at `ctx.seq + 1`, so the
+/// reset runs' `created_seq`/attempt ends match what a non-queued restart writes.
+pub(super) async fn queue_restart(
+    conn: &mut PgConnection,
+    ctx: &ExecutionCtx,
+    before: &ExecutionState,
+    mut state: ExecutionState,
+    now: Tick,
+    queued_history: serde_json::Value,
+) -> Result<()> {
+    let mut marks = Marks::default();
+    let seq = ctx.seq + 1;
+    marks.observe(before, &state, seq);
+    stamps::stamp_attempt_ends(before, &mut state, now);
+    persist(conn, ctx, before, &state, None, &marks, seq).await?;
+    // The `RESTARTED` transition fires its Flow-trigger event now, as Kestra
+    // emits the `RESTARTED` message before the concurrency handler queues it; the
+    // drain's settle then fires `RUNNING`, so a queued restart's listeners see
+    // the same `[RESTARTED, RUNNING]` pair, in order, as an ungated one.
+    outbox(conn, ctx, before, &state).await?;
+    // Append `QUEUED` over the persisted `RESTARTED`. `QUEUED` is a DB-only
+    // execution state (no `RunState`), so it is written directly rather than
+    // through `apply`/`persist`. It is neither terminal nor `RUNNING`, so the
+    // stamp booleans are both false: `stamp_set!` keeps `started_at` (the
+    // history still holds `RUNNING`) and, `QUEUED` being non-terminal, leaves
+    // `ended_at` NULL — correct for an execution waiting to restart.
+    sqlx::query(EXECUTION_STATE_UPDATE)
+        .bind("QUEUED")
+        .bind(&queued_history)
+        .bind(ctx.id)
+        .bind(false)
+        .bind(false)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    Ok(())
+}
+
 /// **What every start refuses a source for**, before any row is written: it
 /// does not parse or plan, a task this deployment cannot serve, and the
 /// `egret.sql` creator door ([`sql_principal::check_start`]).
@@ -4615,7 +4673,7 @@ async fn insert_execution_gated(
                 limit: Some(limit),
                 behavior,
             }),
-        ) => concurrency_admit(conn, fid, *limit, *behavior).await?,
+        ) => concurrency_admit(conn, fid, *limit, *behavior, None).await?,
         _ => Admit::Run,
     };
     let row = admit_row(&[serde_json::json!("CREATED")], admit);

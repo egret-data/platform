@@ -188,7 +188,13 @@ async fn restart_locked(
         Ok(prepared) => {
             claim::run_job(
                 conn,
-                claim::Job::Restart(Box::new(Opening { id, prepared })),
+                claim::Job::Restart(Box::new(Opening {
+                    id,
+                    prepared,
+                    // A restart-in-place a person asked for: the top-level
+                    // start, gated under the flow's concurrency (package 8c).
+                    gate: true,
+                })),
             )
             .await?;
             Ok(Restarted::Done)
@@ -202,6 +208,13 @@ async fn restart_locked(
 pub(super) struct Opening {
     id: Uuid,
     prepared: Prepared,
+    /// Package 8c Task 4: whether [`open`] gates this start under the flow's
+    /// concurrency. `true` for the three top-level walk-based starts a person
+    /// asks for — restart-in-place ([`restart_locked`]) and a copy's
+    /// restart/replay ([`copy_job`]) — and `false` for every nested restart the
+    /// walk opens on its own (a `Loop` iteration, a `Subflow` child) and for a
+    /// task-run/execution state change (`Op::MarkAs`), which are not new starts.
+    gate: bool,
 }
 
 /// **D9: restart a reset `Subflow` run's earlier child in place**, from
@@ -222,6 +235,10 @@ pub(super) async fn restart_subflow_child(
                 claim::Job::Restart(Box::new(Opening {
                     id: child,
                     prepared,
+                    // A nested `Subflow` child restart the walk opens (D9), not a
+                    // new start: never gated here (package 8c Task 5 gates a
+                    // fresh subflow child in `subflow::spawn_one`).
+                    gate: false,
                 }))
             }),
     )
@@ -345,6 +362,11 @@ pub(super) async fn copy_job(
             labels: row.labels,
             op,
         },
+        // A copy's restart/replay (restart-on-source, partial replay): the
+        // top-level start, gated under the flow's concurrency (package 8c).
+        // The new row already exists (`CREATED`), so [`open`] excludes it from
+        // the live count.
+        gate: true,
     })))
 }
 
@@ -471,8 +493,8 @@ pub const NO_RESTARTABLE_ITERATION: &str = "No restartable loop sub-execution fo
 pub(super) async fn open(
     conn: &mut PgConnection,
     opening: Opening,
-) -> Result<(claim::Frame<'static>, Vec<claim::Job>)> {
-    let Opening { id, prepared } = opening;
+) -> Result<(Option<claim::Frame<'static>>, Vec<claim::Job>)> {
+    let Opening { id, prepared, gate } = opening;
     let Prepared {
         ctx,
         mut state,
@@ -539,6 +561,9 @@ pub(super) async fn open(
                 iterations.push(claim::Job::Restart(Box::new(Opening {
                     id: iteration,
                     prepared,
+                    // A `Loop` iteration the walk restarts (D8): part of this
+                    // execution, not a new start — never gated (package 8c).
+                    gate: false,
                 })))
             }
             None => {
@@ -564,6 +589,59 @@ pub(super) async fn open(
         Op::Replay => (REPLAY_LABEL_KEY, REPLAY_LABEL_VALUE),
         Op::Restart | Op::MarkAs => (RESTARTED_LABEL_KEY, RESTARTED_LABEL_VALUE),
     };
+
+    // **Package 8c Task 4: the one gate shared by the three walk-based starts**
+    // (restart-in-place, restart-on-source, partial replay), falling AFTER the
+    // resets are in `state` (its history ending `RESTARTED`) and BEFORE the
+    // drive. A `PAUSED -> RESTARTED` resume is not `failedThenRestarted` and is
+    // never re-gated (spec §2); nested restarts and a task-run state change carry
+    // `gate = false`.
+    if gate && before.history.last() != Some(&RunState::Paused) {
+        if let Some(admit) = gate_admit(conn, &ctx, id).await? {
+            let history: Vec<serde_json::Value> = state
+                .history
+                .iter()
+                .map(|s| serde_json::json!(s.wire()))
+                .collect();
+            let row = claim::admit_row(&history, admit);
+            match row.disposition {
+                // Under the limit: drive as usual (fall through).
+                claim::Disposition::Run => {}
+                // Over a QUEUE limit: persist the resets (their outputs/leases
+                // cleared, emptied ids renewed — so the drain resumes an
+                // identical restart), append `QUEUED`, and STOP before the drive.
+                // The reset runs stay `CREATED`, never claimable (the safety
+                // invariant). The `Loop`-iteration jobs (D8) are dropped here;
+                // queueing a restart that reopens a `Loop` is not re-driven by
+                // the drain (see the report's concerns).
+                claim::Disposition::Queue => {
+                    side_writes(conn, id, &cmds, labels.as_ref(), label).await?;
+                    claim::queue_restart(conn, &ctx, &before, state, now, row.history).await?;
+                    return Ok((None, Vec::new()));
+                }
+                // Over a CANCEL/FAIL limit (D5): terminalize THROUGH settle so
+                // the terminal hooks fire, WITHOUT driving. The resets are not
+                // applied (no `side_writes`): the runs are left as they were and
+                // the history records `RESTARTED` then the terminal, so `drive`
+                // sees a terminal execution and creates nothing.
+                claim::Disposition::Terminal(terminal) => {
+                    let mut term = before.clone();
+                    apply(
+                        &mut term,
+                        &Command::SetExecutionState {
+                            state: RunState::Restarted,
+                        },
+                    );
+                    apply(&mut term, &Command::SetExecutionState { state: terminal });
+                    return Ok((
+                        Some(claim::Frame::loaded(ctx, before, term, now).without_sla()),
+                        Vec::new(),
+                    ));
+                }
+            }
+        }
+    }
+
     side_writes(conn, id, &cmds, labels.as_ref(), label).await?;
     for run in no_iteration {
         let run_id: Uuid = sqlx::query_scalar(
@@ -587,7 +665,7 @@ pub(super) async fn open(
     }
     // Final review I3: the SLA waits for the next settle (`without_sla`).
     Ok((
-        claim::Frame::loaded(ctx, before, state, now).without_sla(),
+        Some(claim::Frame::loaded(ctx, before, state, now).without_sla()),
         iterations,
     ))
 }
@@ -840,6 +918,9 @@ async fn set_task_run_state_locked(
                 labels: row.labels,
                 op: Op::MarkAs,
             },
+            // A manual task-run state change, not a new start: never gated
+            // (package 8c gates only restart-in-place and copy's restart/replay).
+            gate: false,
         })),
     )
     .await?;
@@ -922,6 +1003,40 @@ async fn set_execution_status_locked(
     apply(&mut state, &Command::SetExecutionState { state: target });
     claim::settle(conn, &ctx, &before, state, now, None).await?;
     Ok(Ok(()))
+}
+
+/// **Package 8c Task 4: the flow-concurrency admission for a walk-based start.**
+/// Resolved from the execution's own (chosen) source and gated on its `flow_id`,
+/// with the execution itself **excluded** from the live count: its row already
+/// exists when the walk reaches it — a copy's is `CREATED` (live), a
+/// restart-in-place's is `FAILED` (never counted, so the exclusion is a no-op).
+/// This matches a fresh start, which counts BEFORE its own row is inserted.
+///
+/// `None` (never gated) when the flow has no `flow_id` (a deleted flow) or its
+/// source declares no `concurrency.limit`. The admit takes the flow's advisory
+/// lock in THIS transaction, which both `restart_execution` and
+/// `replay_execution` wrap in a deadlock-retry loop, so the row→advisory lock
+/// order here cannot leave an un-retried ABBA with the advisory→row mutators.
+async fn gate_admit(
+    conn: &mut PgConnection,
+    ctx: &claim::ExecutionCtx,
+    id: Uuid,
+) -> Result<Option<super::concurrency::Admit>> {
+    let Some(flow_id) = ctx.flow_id else {
+        return Ok(None);
+    };
+    let Some(crate::models::Concurrency {
+        limit: Some(limit),
+        behavior,
+    }) = crate::spec::parse(&ctx.source)
+        .ok()
+        .and_then(|f| f.concurrency)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        super::concurrency::concurrency_admit(conn, flow_id, limit, behavior, Some(id)).await?,
+    ))
 }
 
 fn db_err(e: sqlx::Error) -> Error {
