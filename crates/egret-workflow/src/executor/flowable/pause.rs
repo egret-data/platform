@@ -60,11 +60,11 @@
 //! ignored.
 
 use crate::executor::command::Command;
-use crate::executor::plan::{Plan, TaskIx};
+use crate::executor::plan::{Plan, TaskIx, TaskKind};
 use crate::executor::retry::parse_duration;
 use crate::executor::state::{ExecutionState, Resume, RunIx, RunState, Tick};
 
-use super::{plus, Step};
+use super::{plus, run_of, Step};
 
 /// **A manual resume** (W7b Task 3 fix round 1, the user's ruling of
 /// 2026-10-11): move every `PAUSED` `Pause` run's deadline to `now`, with
@@ -167,7 +167,61 @@ pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskI
         Bound::Unbounded => Resume::Never,
         Bound::Until(at, state) => Resume::Terminal { at, state },
     };
-    Step::Commands(vec![Command::PauseRun { run, resume }])
+    // **`onPause:` (package 9a D5): one task, created when the pause begins.**
+    // It is a parentless sibling of the pause, as `valids/pause_on_pause`'s
+    // golden records it (`parent: null`, overlapping the pause), so it is
+    // created here, in the same batch that pauses the run, and driven from
+    // there by [`drive_on_pause`]. Once per pause: a run for it already
+    // existing means it was created, so a re-entry creates nothing. A
+    // `Parallel` of two pauses enters both in one batch; each creates its own
+    // distinct `onPause:` task and `advance`'s `pause_mark` still writes the
+    // execution's `PAUSED` once.
+    let mut cmds = Vec::new();
+    if let TaskKind::Pause {
+        on_pause: Some(on_pause),
+        ..
+    } = &plan.tasks[task].kind
+    {
+        if run_of(state, None, *on_pause).is_none() {
+            cmds.push(Command::CreateRun {
+                task: *on_pause,
+                parent: None,
+                value: None,
+            });
+        }
+    }
+    cmds.push(Command::PauseRun { run, resume });
+    Step::Commands(cmds)
+}
+
+/// Drive every `onPause:` run a `Pause` created ([`drive`]): they hang off no
+/// list the walk visits, so `advance` asks here, once per round, and gets the
+/// ordinary walk of the one-task list (`CREATED` is opened, `RUNNING` is
+/// descended into, a terminal run is left).
+///
+/// A pause whose `onPause:` run does not exist yet is skipped: [`drive`]
+/// creates it in the batch that pauses the run, and creating it here too would
+/// make a second one in that same round.
+pub(crate) fn drive_on_pause(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
+    let mut cmds = Vec::new();
+    for r in &state.runs {
+        let TaskKind::Pause {
+            on_pause: Some(on_pause),
+            ..
+        } = &plan.tasks[r.task].kind
+        else {
+            continue;
+        };
+        if run_of(state, None, *on_pause).is_none() {
+            continue;
+        }
+        if let Some(Step::Commands(c)) =
+            super::sequential::drive_list(plan, state, &[*on_pause], None, now)
+        {
+            cmds.extend(c);
+        }
+    }
+    cmds
 }
 
 // **`resume` used to live here and is now

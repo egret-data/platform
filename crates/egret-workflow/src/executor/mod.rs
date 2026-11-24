@@ -275,6 +275,9 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         Step::Done(state) => vec![Command::SetExecutionState { state }],
     };
 
+    // 9a D5: a `Pause`'s `onPause:` run hangs off no list the walk visits.
+    work.extend(flowable::pause::drive_on_pause(plan, state, now));
+
     // **An `Exit` that decided `KILLED` is the whole round** (final review C1).
     // `parallel::drive_concurrent` collects every child's commands in one
     // batch, so the round an `Exit` kills in can also create a sibling
@@ -8564,6 +8567,91 @@ tasks:
              that one too would be inventing a rule that says an execution can \
              only be restarted once"
         );
+    }
+
+    /// 9a Task 2 (D5): `onPause:` runs ONCE, when the pause begins, as a
+    /// parentless sibling of the pause (`valids/pause_on_pause`'s golden shape),
+    /// and the pause then enters `PAUSED` as before. The plan is built with
+    /// `plan_stored` because `spec::validate` still refuses a `Pause` with a
+    /// body until 9a Task 6.
+    #[test]
+    fn on_pause_runs_once_when_the_pause_begins() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n    onPause:\n      \
+                   id: hello\n      type: io.kestra.plugin.core.log.Log\n      \
+                   message: hi\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..10 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(run_ids(&plan, &state), ["gate", "hello"], "one onPause run");
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"]
+        );
+        assert_eq!(state.runs[1].parent, None, "a sibling, not a child");
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SUBMITTED", "RUNNING"],
+            "the onPause task is started while the pause waits"
+        );
+        assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "PAUSED"]);
+    }
+
+    /// Two pauses entered in ONE batch each run their own `onPause:` once, and
+    /// the execution's `PAUSED` is still written once.
+    #[test]
+    fn two_pauses_in_one_parallel_each_run_their_on_pause_once() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: both\n    \
+                   type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+                   - id: a\n        type: io.kestra.plugin.core.flow.Pause\n        \
+                   onPause:\n          id: oa\n          \
+                   type: io.kestra.plugin.core.log.Log\n          message: a\n      \
+                   - id: b\n        type: io.kestra.plugin.core.flow.Pause\n        \
+                   onPause:\n          id: ob\n          \
+                   type: io.kestra.plugin.core.log.Log\n          message: b\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..12 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        let ids = run_ids(&plan, &state);
+        for id in ["oa", "ob"] {
+            assert_eq!(ids.iter().filter(|i| *i == id).count(), 1, "{id}: {ids:?}");
+        }
+        for id in ["a", "b"] {
+            let ix = ids.iter().position(|i| i == id).unwrap();
+            assert_eq!(
+                wire(&state.runs[ix].history),
+                ["CREATED", "RUNNING", "PAUSED"]
+            );
+        }
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "PAUSED"],
+            "one PAUSED, not two"
+        );
+    }
+
+    /// A bare pause is unchanged by the `onPause:` driver: no extra run.
+    #[test]
+    fn a_bare_pause_has_no_on_pause_run() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+                   type: io.kestra.plugin.core.flow.Pause\n";
+        let plan = plan::plan_stored(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..10 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(run_ids(&plan, &state), ["gate"]);
+        assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "PAUSED"]);
     }
 
     /// **A second pause that begins a round LATER does not repeat the
