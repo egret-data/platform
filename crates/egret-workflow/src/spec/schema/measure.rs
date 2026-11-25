@@ -840,7 +840,7 @@ fn the_field_probe_reads_wire_names_and_unknown_keys_are_dropped() {
     assert!(format!("{spec:?}").contains("error_message"));
 }
 
-/// Stage 2 is wired: the five trigger properties egret parses and then
+/// Stage 2 is wired: the four trigger properties egret parses and then
 /// refuses (fix round 1, I1) come out `refused`, each with its site.
 #[test]
 fn properties_refused_after_parse_are_measured_refused() {
@@ -865,11 +865,6 @@ fn properties_refused_after_parse_are_measured_refused() {
             "io.kestra.plugin.core.trigger.Webhook",
             "responseCode",
             "declared_unsupported",
-        ),
-        (
-            "io.kestra.plugin.core.trigger.Schedule",
-            "lateMaximumDelay",
-            "ScheduleTrigger::resolve",
         ),
     ] {
         assert_eq!(

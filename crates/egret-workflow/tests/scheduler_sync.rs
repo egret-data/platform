@@ -408,8 +408,24 @@ async fn a_schedule_that_never_fires_is_stored_off_queue_with_its_reason() {
     assert_eq!(err, None);
 }
 
+/// `lateMaximumDelay` is honoured: the schedule syncs onto the queue with no
+/// refusal recorded.
+#[tokio::test]
+async fn a_schedule_with_a_late_maximum_delay_is_queued_not_refused() {
+    let Some(fx) = fx().await else { return };
+    let ok = flow_yaml(
+        "",
+        &schedule("s", "0 2 * * *", "    lateMaximumDelay: PT1H\n"),
+        "hi",
+    );
+    let flow = fx.create(&ok).await;
+    let (next, _, err) = row(&fx.db, flow.id, "s").await.expect("a row");
+    assert!(next.is_some(), "on the queue");
+    assert_eq!(err, None);
+}
+
 /// Written before the `IS NOT NULL` term existed in the upsert, and watched
-/// failing against it (see the task report). `lateMaximumDelay` is refused by
+/// failing against it (see the task report). `when` is refused by
 /// `resolve` but is not part of `spec_key`, so without the term the fix would
 /// leave the row off the queue for ever.
 #[tokio::test]
@@ -417,13 +433,13 @@ async fn fixing_a_refused_schedule_puts_it_back_on_the_queue() {
     let Some(fx) = fx().await else { return };
     let refused = flow_yaml(
         "",
-        &schedule("s", "0 2 * * *", "    lateMaximumDelay: PT1H\n"),
+        &schedule("s", "0 2 * * *", "    when: \"{{ false }}\"\n"),
         "hi",
     );
     let flow = fx.create(&refused).await;
     let (next, _, err) = row(&fx.db, flow.id, "s").await.expect("a row");
     assert_eq!(next, None, "control: refused first");
-    assert!(err.expect("reason").contains("lateMaximumDelay"));
+    assert!(err.expect("reason").contains("when"));
 
     fx.update(
         flow.id,
@@ -1292,7 +1308,7 @@ async fn a_re_snap_with_no_tick_keeps_the_stored_date() {
     );
 }
 
-/// Spec §3.7: a schedule that no longer resolves (`lateMaximumDelay`) is off
+/// Spec §3.7: a schedule that no longer resolves (a `when`) is off
 /// the queue as before, and its backfill is kept and frozen; the save that
 /// resolves again re-derives from it.
 #[tokio::test]
@@ -1305,13 +1321,13 @@ async fn a_schedule_that_no_longer_resolves_freezes_its_backfill() {
 
     let refused = flow_yaml(
         "",
-        &schedule("s", "*/2 * * * *", "    lateMaximumDelay: PT1H\n"),
+        &schedule("s", "*/2 * * * *", "    when: \"{{ false }}\"\n"),
         "hi",
     );
     let t = &parses(&refused).triggers[0];
     assert!(
         egret_workflow::trigger::ScheduleTrigger::resolve(t).is_err(),
-        "control: `lateMaximumDelay` is refused"
+        "control: `when` is refused"
     );
     fx.update(flow.id, &refused).await;
     let (next, _, err) = queue(&fx.db, flow.id, "s").await.expect("the row");

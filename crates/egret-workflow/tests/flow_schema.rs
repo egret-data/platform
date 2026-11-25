@@ -458,7 +458,6 @@ fn properties_egret_refuses_after_parsing_are_not_served() {
             "responseContentType",
         ),
         ("io.kestra.plugin.core.trigger.Webhook", "responseCode"),
-        ("io.kestra.plugin.core.trigger.Schedule", "lateMaximumDelay"),
     ] {
         assert!(defs[def]["properties"].is_object(), "{def} is served");
         assert!(

@@ -180,7 +180,6 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
             }
             match (t, key) {
                 (SCHEDULE | WEBHOOK, "labels" | "when") => Some(Package(11)),
-                (SCHEDULE, "lateMaximumDelay") => Some(Package(11)),
                 (WEBHOOK, "wait" | "returnOutputs" | "responseContentType" | "responseCode") => {
                     Some(Package(11))
                 }
@@ -709,7 +708,7 @@ impl Walk<'_> {
     /// own. A key Kestra has and egret does not act on warns with its package
     /// (`lift_of`); any other is `unknown_property`. Three families are said
     /// by the predicate that refuses them, so each key has one finding:
-    /// Schedule `when` and `lateMaximumDelay` by `validate`'s
+    /// Schedule `when` by `validate`'s
     /// `schedule_findings` (`ScheduleTrigger::resolve`), Webhook `wait`,
     /// `returnOutputs`, `responseContentType` and `responseCode` below
     /// (`webhook::declared_unsupported`). Neither predicate renders anything:
@@ -724,7 +723,7 @@ impl Walk<'_> {
         let path = format!("triggers.{id}");
         for (key, value) in t {
             let key = key.as_str();
-            if (row == SCHEDULE && matches!(key, "when" | "lateMaximumDelay"))
+            if (row == SCHEDULE && key == "when")
                 || (row == WEBHOOK && WEBHOOK_REFUSED.contains(&key))
             {
                 continue;
@@ -2107,31 +2106,18 @@ mod tests {
     }
 
     #[test]
-    fn a_late_maximum_delay_warns_at_publish_that_the_schedule_will_not_fire() {
+    fn a_late_maximum_delay_is_honoured_and_says_nothing_at_publish() {
         let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    lateMaximumDelay: PT1H\n"));
         assert!(r.errors.is_empty(), "{r:?}");
-        let w = r
-            .warnings
-            .iter()
-            .find(|w| w.path == "triggers.s.lateMaximumDelay")
-            .unwrap_or_else(|| panic!("{r:?}"));
-        assert!(
-            w.message.contains("will not fire")
-                && w.message.ends_with("Roadmap package #11 lifts it"),
-            "{}",
-            w.message
-        );
-        // One finding for the key: KI-122's `schedule_not_resolvable`, reworded.
-        assert_eq!(w.code, "schedule_not_resolvable");
-        assert_eq!(at(&r, "triggers.s.lateMaximumDelay").len(), 1, "{r:?}");
+        assert!(at(&r, "triggers.s.lateMaximumDelay").is_empty(), "{r:?}");
         assert!(at(&r, "triggers.s").is_empty(), "{r:?}");
     }
 
     #[test]
-    fn a_schedule_when_and_a_late_maximum_delay_are_each_warned_once() {
+    fn a_schedule_when_is_warned_once_and_a_late_maximum_delay_not_at_all() {
         let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    when: \"{{{{ true }}}}\"\n    lateMaximumDelay: PT1H\n"));
         assert_eq!(at(&r, "triggers.s.when").len(), 1, "{r:?}");
-        assert_eq!(at(&r, "triggers.s.lateMaximumDelay").len(), 1, "{r:?}");
+        assert!(at(&r, "triggers.s.lateMaximumDelay").is_empty(), "{r:?}");
         assert!(at(&r, "triggers.s.when")[0]
             .message
             .ends_with("Roadmap package #11 lifts it"));
@@ -2140,9 +2126,16 @@ mod tests {
                 .iter()
                 .filter(|w| w.code == "schedule_not_resolvable")
                 .count(),
-            2,
+            1,
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn a_malformed_late_maximum_delay_is_warned_at_publish() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    lateMaximumDelay: banana\n"));
+        assert_eq!(at(&r, "triggers.s").len(), 1, "{r:?}");
+        assert_eq!(at(&r, "triggers.s")[0].code, "schedule_not_resolvable");
     }
 
     #[test]
@@ -2297,7 +2290,6 @@ mod tests {
         }
         // Trigger rows #11.
         for (t, key) in [
-            (SCHED, "lateMaximumDelay"),
             (SCHED, "when"),
             (SCHED, "labels"),
             (HOOK, "wait"),

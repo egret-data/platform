@@ -1380,7 +1380,7 @@
       "id": "honoured",
       "inputs": "honoured",
       "labels": "ignored",
-      "lateMaximumDelay": "refused",
+      "lateMaximumDelay": "honoured",
       "logLevel": "ignored",
       "logToFile": "ignored",
       "policyRefs": "ignored",
@@ -1954,7 +1954,6 @@
   },
   "refused_downstream": {
     "io.kestra.plugin.core.trigger.Schedule": {
-      "lateMaximumDelay": "trigger::schedule::ScheduleTrigger::resolve: core.schedule `lateMaximumDelay` is not supported; roadmap package #11 lifts it",
       "timezone=\"ACT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"ACT\"",
       "timezone=\"AET\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"AET\"",
       "timezone=\"AGT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"AGT\"",
