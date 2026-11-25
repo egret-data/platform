@@ -4,7 +4,7 @@
 
 **Goal:** When a flow is started by a trigger, bind the trigger's variables into the fired flow's task render context so `{{ trigger.body }}` / `{{ trigger.date }}` / `{{ trigger.outputs.x }}` render.
 
-**Architecture (revised after Task 0):** egret ALREADY persists a trigger record in the existing `workflow.executions.execution_trigger` jsonb column (migration 0140), shaped `{ "id": <trigger id>, "type": <fqcn>, "variables": { ...per-type... } }`. Schedule (`fire.rs schedule_trigger_record` → `variables: {date,next,previous}`) and Flow (`flow_trigger/process.rs flow_trigger_record` → `variables: {state,flowId,namespace,executionId,startDate,endDate?,lastTaskId?,executionLabels,outputs?}`) already populate it; **replay copies it verbatim** (replay.rs, Kestra `Execution.java:422` parity); subflow/manual/webhook leave it NULL. The ONLY gaps are: (1) `build_context` never reads it, so tasks can't see `{{ trigger.* }}`; (2) the Webhook route sets `trigger: None`. So 11a = **bind the existing column in build_context + add Webhook capture**. No migration, no new column, no new `NewExecution` field.
+**Architecture (revised after Task 0):** egret ALREADY persists a trigger record in the existing `workflow.executions.execution_trigger` jsonb column (migration 0140), shaped `{ "id": <trigger id>, "type": <fqcn>, "variables": { ...per-type... } }`. Schedule (`fire.rs schedule_trigger_record` → `variables: {date,next,previous}`) and Flow (`flow_trigger/process.rs flow_trigger_record` → `variables: {state,flowId,namespace,executionId,startDate,endDate?,lastTaskId?,executionLabels,outputs?}`) already populate it; subflow/manual/webhook leave it NULL. (CORRECTION, Task 1: the manual-replay path `worker/copy.rs:219` sets `trigger: None`, so replay does NOT yet carry it — Task 2 adds that, for Kestra `Execution.java:422` parity.) The ONLY gaps are: (1) `build_context` never reads it, so tasks can't see `{{ trigger.* }}`; (2) the Webhook route sets `trigger: None`. So 11a = **bind the existing column in build_context + add Webhook capture**. No new column/field; ONE migration is needed (Task 2) only to narrow two fire-uniqueness indexes so a replay may carry the trigger.
 
 **Tech Stack:** Rust, `crates/egret-workflow`; sqlx/Postgres.
 
@@ -64,7 +64,26 @@ Outcome A — census STABLE under the non-null gate. Discovered the existing `ex
 
 ---
 
-### Task 2: Webhook capture — populate `execution_trigger` for webhook fires
+### Task 2: Replay copies `execution_trigger` (replay-survival parity)
+
+**Files:** `crates/egret-workflow/src/worker/copy.rs` (~219, the replay `NewExecution`, currently `trigger: None`). Un-ignore the replay test in `tests/trigger_binding.rs`.
+
+**Why:** Task 1 found manual replay sets `trigger: None`, so a replayed trigger-fired execution loses `{{ trigger.* }}`. Kestra carries the trigger verbatim on replay (`Execution.java:422`). The `execution_trigger` column is coupled by a CHECK (migrations 0140/0157) to `scheduled_date` and `flow_trigger_event_id`, so they must be copied together.
+
+- [ ] **Step 1: Un-ignore** the `#[ignore]`d replay-survival test (replay of a Schedule-fired execution still renders `{{ trigger.date }}`). Add a Flow-replay case too (`{{ trigger.outputs.x }}` survives).
+- [ ] **Step 2: Run — FAIL** (replay drops the trigger).
+- [ ] **Step 3a: Migration (next-free, ~0243).** Recreate `workflow_executions_one_per_schedule_tick` (current def in migration 0192) and `workflow_executions_one_per_flow_trigger_event` (0157) with an added `AND replayed_from_execution_id IS NULL` in their WHERE, preserving all existing columns/conditions. Rationale: these are one-per-FIRE guarantees; a replay is an intentional re-run (mirrors 0192 excluding backfill_id). Without this, copying the coupled columns collides with these uniques.
+- [ ] **Step 3: Implement.** In the replay `NewExecution` (`copy.rs` `replay_locked` ~219), copy the ORIGINAL execution's `execution_trigger`, `scheduled_date`, and `flow_trigger_event_id` together (read them from the original row the replay already loads, or add them to that load). Set `trigger: <original execution_trigger>`, `scheduled_date: <original>`, `flow_trigger_event_id: <original>`. Verify the CHECK constraint is satisfied (copying all three coupled fields together keeps it valid — if the CHECK requires a specific combination, match what the original row had).
+- [ ] **Step 4: Run — PASS** (+ `--test routes --test execution_timestamps`). Confirm a NON-triggered execution's replay still has NULL trigger (don't fabricate one).
+- [ ] **Step 5: Commit** `feat(workflow): replay carries execution_trigger (trigger.* survives replay)`.
+
+---
+
+### Task 3: Webhook binding — CONFIRMATION TESTS (capture already exists)
+
+> Task-3 correction: the real webhook route is `src/webhook_routes.rs`, which ALREADY builds `Output` -> `ExecutionTrigger{id,type,variables}` -> `start_execution_with_trigger(Some(..))`, so `execution_trigger` is already populated for webhook fires (existing test `a_fired_webhook_stores_the_trigger_record`). `routes.rs:4587` was the multipart start, not the main route. So Task 3 adds CONFIRMATION tests only — no production code — proving the Task-1 binding renders webhook `trigger.*`.
+
+### Task 3 (original, superseded): Webhook capture
 
 **Files:** `crates/egret-workflow/src/trigger/webhook.rs` (add `webhook_trigger_record`); `crates/egret-workflow/src/routes.rs` (the webhook execution creation ~4587, currently `trigger: None`).
 
@@ -78,7 +97,7 @@ Outcome A — census STABLE under the non-null gate. Discovered the existing `ex
 
 ---
 
-### Task 3: Docs (repo egret-data/docs, new branch docs/workflow-trigger-binding)
+### Task 4: Docs (repo egret-data/docs, new branch docs/workflow-trigger-binding)
 
 - [ ] **Step 1:** In `platform/workflows/flows/expressions.md` (or the triggers doc) document `{{ trigger.* }}` availability per type (Schedule `date`/`next`/`previous`; Webhook `body`/`headers`/`parameters`; Flow `outputs`/`executionId`/`state`/…; `_context.id`/`_context.type`), that it is absent for non-triggered executions, and that replay keeps it.
 - [ ] **Step 2:** Build docs (or rely on the docs PR `build` gate).
@@ -87,6 +106,6 @@ Outcome A — census STABLE under the non-null gate. Discovered the existing `ex
 ---
 
 ## Self-Review
-- **Spec coverage:** persist → already exists (execution_trigger, 0140); Schedule/Flow capture → already exist; Webhook capture → Task 2; bind → Task 1; replay-survival → free (replay copies the column; Task 1 tests it); subflow/manual NULL → free (they set None; Task 1 tests it); Leaf NULL → free; no refusal lift → nothing lifts; Task-0 census → done; docs → Task 3. No gap.
+- **Spec coverage:** persist → already exists (execution_trigger, 0140); Schedule/Flow capture → already exist; Webhook capture → Task 2; bind → Task 1; replay-survival → Task 2 (copy.rs copies execution_trigger + coupled fields); subflow/manual NULL → free (they set None; Task 1 tests it); Leaf NULL → free; no refusal lift → nothing lifts; Task-0 census → done; docs → Task 3. No gap.
 - **Placeholder scan:** render-side code exact; the webhook `Output` reuse points at the existing route-built value (grep-located), not "TBD".
 - **Type consistency:** `Surface.trigger: Value`; `trigger_binding(Value)->Value`; `webhook_trigger_record(&str,&Output)->Value`; the record shape `{id,type,variables}` is consistent with the existing schedule/flow records.
