@@ -5,11 +5,15 @@
 //!
 //! The shared [`super::env::environment`] keeps **refusing** `secret` (the
 //! `REFUSED` row in `functions`, with the pod-spec reason): script tasks and
-//! triggers render against it. A `Log`'s `message:` resolves
+//! triggers render against it, except the lifted trigger paths below. A `Log`'s `message:` resolves
 //! it through [`render_with_secrets`] (package 10a Task 1), and a task's
 //! `runIf:` and a flow input's `defaults:` through [`render_once_cached`] over
 //! the settle's prefetch (Tasks 2 and 3: the render is synchronous inside a
-//! transaction; an input's value is then sealed, never stored in clear). Only
+//! transaction; an input's value is then sealed, never stored in clear). A
+//! Webhook or Flow trigger's `inputs:` and a Flow trigger's `when:` resolve the
+//! same way (Task 4); a Webhook's `key:` (a credential compared per request),
+//! a Schedule's `inputs:` and `when:`, and a `dependsOn` dependency's `when:`
+//! stay refused. Only
 //! [`render_with_secrets`] registers a working `secret`, per render, over the
 //! refusal on a copy of the environment ([`super::env::render_once_with`]).
 //!

@@ -90,15 +90,16 @@ fn sealed_ids(flow: &Flow) -> impl Iterator<Item = &str> {
                 || i.defaults
                     .as_ref()
                     .is_some_and(|d| crate::runners::secrets::text_uses_secret(d.source()))
-                || supplied_from_secret(flow, &i.id)
         })
         .map(|i| i.id.as_str())
 }
 
-/// Whether a Webhook or Flow trigger of `flow` supplies input `id` from a
-/// template that calls `secret()` (package 10a Task 4). Like a default, a
-/// property of the declaration, so a replay or a child agrees.
-fn supplied_from_secret(flow: &Flow, id: &str) -> bool {
+/// Every input key a Webhook or Flow trigger of `flow` supplies from a
+/// template that calls `secret()` (package 10a Task 4) -- DECLARED OR NOT. A
+/// Flow-trigger fire skips the start-time input check, so a key the listener
+/// never declared reaches `split` as it was rendered and must be sealed too.
+/// Like a default, a property of the declaration, so a replay or a child agrees.
+fn trigger_secret_keys(flow: &Flow) -> Vec<String> {
     fn uses(v: &Value) -> bool {
         match v {
             Value::String(s) => crate::runners::secrets::text_uses_secret(s),
@@ -109,14 +110,15 @@ fn supplied_from_secret(flow: &Flow, id: &str) -> bool {
             _ => false,
         }
     }
-    flow.triggers.iter().any(|t| {
-        let supplied = match &t.kind {
+    flow.triggers
+        .iter()
+        .filter_map(|t| match &t.kind {
             crate::models::TriggerKind::Webhook(w) => w.inputs.as_ref(),
             crate::models::TriggerKind::Flow(f) => f.inputs.as_ref(),
             _ => None,
-        };
-        supplied.and_then(|m| m.get(id)).is_some_and(uses)
-    })
+        })
+        .flat_map(|m| m.iter().filter(|(_, v)| uses(v)).map(|(k, _)| k.clone()))
+        .collect()
 }
 
 /// `inputs` with every SECRET input's value replaced by [`MASK`], and the
@@ -137,7 +139,11 @@ fn split_with(
         return Ok((inputs, None));
     };
     let mut secret = Map::new();
-    for id in sealed_ids(flow) {
+    let ids: Vec<String> = sealed_ids(flow)
+        .map(str::to_string)
+        .chain(trigger_secret_keys(flow))
+        .collect();
+    for id in ids.iter().map(String::as_str) {
         if let Some(v) = posted.get_mut(id) {
             if !v.is_null() {
                 secret.insert(id.to_string(), std::mem::replace(v, Value::from(MASK)));

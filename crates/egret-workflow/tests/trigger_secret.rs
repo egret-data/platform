@@ -263,3 +263,78 @@ async fn a_flow_trigger_when_and_inputs_resolve_secret_and_no_row_holds_the_valu
     let all: Vec<Uuid> = vec![*fired_ex, failed[0].0, src_ex];
     assert_eq!(leaks(&db.pool, &all).await, 0, "no stored row holds it");
 }
+
+/// Gap A: a Flow-trigger fire skips the start-time input check, so a key the
+/// listener never declared reaches the store as rendered unless it is sealed.
+#[tokio::test]
+async fn an_undeclared_flow_trigger_input_from_secret_is_sealed_too() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = common::db().await else { return };
+    let _ = secrets::install(Arc::new(Token));
+    egret_workflow::secret_inputs::install_for_tests();
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = ns();
+    let listener = format!(
+        "id: undecl\nnamespace: {ns}\ninputs:\n  - id: x\n    type: STRING\n    defaults: ok\n\
+         tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+         triggers:\n  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    \
+         states: [SUCCESS]\n    when: \"{{{{ flow.id == 'producer-u' }}}}\"\n    inputs:\n      \
+         y: \"{{{{ secret('TOKEN') }}}}\"\n"
+    );
+    let producer = format!(
+        "id: producer-u\nnamespace: {ns}\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    let lid = common::seed_flow(&db, ws, user, &listener, "draft").await;
+    let pid = common::seed_flow(&db, ws, user, &producer, "draft").await;
+    let src_ex = egret_workflow::worker::start_execution(
+        &db.pool,
+        ws,
+        Some(pid),
+        &producer,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    settle_all(&db.pool).await;
+    let report = process_events(&db.pool).await.expect("a pass");
+    assert_eq!(report.fired, 1, "{report:?}");
+    settle_all(&db.pool).await;
+    let (ex, inputs): (Uuid, serde_json::Value) =
+        sqlx::query_as("SELECT id, inputs FROM workflow.executions WHERE flow_id = $1")
+            .bind(lid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(inputs["y"], egret_workflow::secret_inputs::MASK, "{inputs}");
+    assert_eq!(leaks(&db.pool, &[ex, src_ex]).await, 0);
+}
+
+/// A render error on a webhook input names the secret's use but never a value.
+#[tokio::test]
+async fn a_webhook_input_render_error_does_not_echo_the_value() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = common::db().await else { return };
+    let _ = secrets::install(Arc::new(Token));
+    egret_workflow::secret_inputs::install_for_tests();
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = ns();
+    let src = format!(
+        "id: hook\nnamespace: {ns}\ninputs:\n  - id: x\n    type: STRING\n\
+         tasks:\n  - id: real\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+         triggers:\n  - id: w\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: fx-key\n    \
+         inputs:\n      x: \"{{{{ secret('TOKEN') | number }}}}\"\n"
+    );
+    common::seed_flow(&db, ws, user, &src, "draft").await;
+    let app = common::webhook_app(&db).await;
+    let url = format!("/workflows/v1/{ws}/executions/webhook/{ns}/hook/fx-key");
+    let res = common::anon(&app, "POST", &url, Some("application/json"), b"{}").await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&body).contains(SENTINEL),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+}

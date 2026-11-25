@@ -1828,4 +1828,47 @@ mod tests {
         let none = flow_trigger_record(&fired("t"), &record, None);
         assert!(none["variables"].get("outputs").is_none());
     }
+
+    struct Sentinel;
+
+    #[async_trait::async_trait]
+    impl crate::runners::secrets::SecretSource for Sentinel {
+        async fn get(
+            &self,
+            _workspace: Uuid,
+            _name: &str,
+        ) -> std::result::Result<
+            std::collections::BTreeMap<String, String>,
+            crate::runners::secrets::SecretError,
+        > {
+            Ok(std::collections::BTreeMap::from([(
+                "value".to_string(),
+                "when-SENTINEL-5e".to_string(),
+            )]))
+        }
+    }
+
+    /// A `when` that resolved a secret is kept as its VERDICT, never as the
+    /// text it rendered to (which the refusal and the logs may echo).
+    #[tokio::test]
+    async fn a_when_that_resolves_a_secret_keeps_only_its_verdict() {
+        let ws = Uuid::from_u128(0x5e);
+        let pf = Prefetch::new();
+        let cx = RenderContext::new();
+        let when = "{{ secret('S') }}";
+        // The miss renders "" (falsy) and leaves the read pending.
+        assert_eq!(
+            render_trigger_when(Some(when), &cx, ws, &pf),
+            WhenVerdict::Rendered("false".into())
+        );
+        assert!(pf.has_pending());
+        pf.fetch_pending_from(Some(std::sync::Arc::new(Sentinel)))
+            .await
+            .unwrap();
+        // The hit renders the secret's value, which is truthy: the verdict.
+        assert_eq!(
+            render_trigger_when(Some(when), &cx, ws, &pf),
+            WhenVerdict::Rendered("true".into())
+        );
+    }
 }
