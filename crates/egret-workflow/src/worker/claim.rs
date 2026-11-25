@@ -84,7 +84,6 @@ use crate::executor::{
     Resume, RunIx, RunState, TaskKind, TaskRun, Tick, WorkingDirPhase,
 };
 use crate::models::Concurrency;
-#[cfg(any(test, feature = "test-util"))]
 use crate::storage::prefetch::Prefetch;
 use crate::storage::StoredFile;
 
