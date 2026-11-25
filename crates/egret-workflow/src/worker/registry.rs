@@ -128,7 +128,7 @@ impl Handlers {
         // `add_publishable`, not `add`: each of these must be a type publish
         // accepts, and each of publish's alias spellings must dispatch here.
         // Before W10 Task 6 fix round 1 that was true of none of them.
-        r.add_publishable(Arc::new(handlers::log::Log));
+        r.add_publishable(Arc::new(handlers::log::Log::new()));
         r.add_publishable(Arc::new(handlers::ret::Return));
         r.add_publishable(Arc::new(handlers::fail::Fail));
         r.add_publishable(Arc::new(handlers::sleep::Sleep::new()));

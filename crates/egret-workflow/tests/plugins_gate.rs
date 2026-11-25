@@ -1066,13 +1066,13 @@ fn secret_outside_a_plugin_tasks_properties_is_refused_by_name() {
             "inputs.i.defaults",
         ),
         (
-            "a Log under a flowable's errors",
+            "a Log's level under a flowable's errors (its message resolves since 10a)",
             format!(
                 "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    \
                  tasks:\n      - id: l\n        type: io.kestra.plugin.core.log.Log\n        message: x\n    \
-                 errors:\n      - id: e\n        type: io.kestra.plugin.core.log.Log\n        message: {SECRET}\n"
+                 errors:\n      - id: e\n        type: io.kestra.plugin.core.log.Log\n        message: x\n        level: {SECRET}\n"
             ),
-            "tasks.s.errors.e.message",
+            "tasks.s.errors.e.level",
         ),
         (
             "a trigger",

@@ -606,6 +606,9 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
 
     struct Walk<'a> {
         plugin: HashSet<(&'a str, &'a str)>,
+        /// The (`id`, `type`) of every `Log` task: its `message:` resolves
+        /// `secret()` (package 10a Task 1), so it is not walked as "outside".
+        log: HashSet<(&'a str, &'a str)>,
         report: &'a mut ValidationReport,
     }
 
@@ -670,6 +673,8 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                     let ty = map.get("type").and_then(serde_json::Value::as_str);
                     let is_plugin =
                         matches!((id, ty), (Some(i), Some(t)) if self.plugin.contains(&(i, t)));
+                    let is_log =
+                        matches!((id, ty), (Some(i), Some(t)) if self.log.contains(&(i, t)));
                     // W9c spec §7: a `Set` or `Put` task's `value`.
                     let kv_value_of = match (id, ty) {
                         (Some(i), Some(t)) if t == kv::SET || t == kv::PUT => Some(i),
@@ -680,6 +685,14 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                         self.outside(path.clone(), k);
                         if let (Some(task), "value") = (kv_value_of, k.as_str()) {
                             self.kv_value(task, v, here);
+                        } else if is_log && k == "message" {
+                            // Resolves, but a `namespace=` / `full=` written
+                            // in the call is still refused, as on a plugin task.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
                         } else if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
@@ -708,10 +721,19 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
             t.r#type.starts_with(crate::plugins::PREFIX)
                 || crate::worker::handlers::http::resolves_secrets(&t.r#type)
         });
+    let log = crate::plugins::leaves(flow)
+        .into_iter()
+        .filter(|(_, t, _)| {
+            crate::spec::registry::known_type(&t.r#type)
+                .is_some_and(|row| row.r#type == crate::worker::handlers::log::TYPE_ID)
+        })
+        .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
+        .collect();
     let mut walk = Walk {
         plugin: tasks
             .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
             .collect(),
+        log,
         report,
     };
     walk.value(&doc, String::new());
@@ -5994,8 +6016,7 @@ mod tests {
 
     /// Package #4 Task C3 (spec D5): `secret()` resolves on the http tasks, so
     /// their properties are exempt under every spelling -- while their `runIf`
-    /// (which egret's task model reads, not the handler) and a `Log` beside
-    /// them are still refused. A `namespace=` written in the call is refused
+    /// (which egret's task model reads, not the handler) is still refused. A `namespace=` written in the call is refused
     /// there as on a plugin task.
     #[test]
     fn a_secret_in_an_http_tasks_properties_is_allowed_under_every_spelling() {
@@ -6016,8 +6037,8 @@ mod tests {
             );
             assert_eq!(
                 paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
-                vec!["tasks.r.runIf".to_string(), "tasks.l.message".to_string()],
-                "{ty}"
+                vec!["tasks.r.runIf".to_string()],
+                "{ty}: runIf stays refused; a Log's message resolves since 10a Task 1"
             );
             let src = format!(
                 "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
@@ -6026,6 +6047,41 @@ mod tests {
             assert_eq!(
                 paths_of(&src, CODE_SECRET_ARGUMENT_REFUSED),
                 vec!["tasks.r.uri".to_string()],
+                "{ty}"
+            );
+            assert!(paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
+        }
+    }
+
+    /// Package 10a Task 1: `secret()` resolves in a `Log` task's `message:`
+    /// (a string or a list, either spelling, at any depth) and ONLY there: its
+    /// `level:` and a `Return`'s `format:` stay refused, and a `namespace=`
+    /// written in the call is refused as on a plugin task.
+    #[test]
+    fn a_secret_in_a_log_tasks_message_is_allowed_and_nowhere_else_on_it() {
+        use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        for ty in ["io.kestra.plugin.core.log.Log", "core.log"] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: {ty}\n    \
+                 message: \"{{{{ secret('X') }}}}\"\n  \
+                 - id: m\n    type: {ty}\n    message:\n      - \"{{{{ secret('X') }}}}\"\n  \
+                 - id: n\n    type: {ty}\n    message: hi\n    \
+                 level: \"{{{{ secret('X') }}}}\"\n  \
+                 - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+                 format: \"{{{{ secret('X') }}}}\"\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+                vec!["tasks.n.level".to_string(), "tasks.r.format".to_string()],
+                "{ty}"
+            );
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: {ty}\n    \
+                 message: \"{{{{ secret('K', namespace='x') }}}}\"\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_ARGUMENT_REFUSED),
+                vec!["tasks.l.message".to_string()],
                 "{ty}"
             );
             assert!(paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());

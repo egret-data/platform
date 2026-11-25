@@ -818,6 +818,12 @@ pub async fn handlers_for(
     cfg.validate_plugin_host()
         .map_err(egret_core::Error::InvalidInput)?;
     let mut handlers = Handlers::with_core_tasks(crate::storage::current());
+    // Package 10a Task 1: `secret()` resolves in a `Log`'s `message:`, so the
+    // deployment's `Log` holds the secret source. `with_core_tasks` keeps the
+    // source-less one (the oracle's registry); this replaces it.
+    handlers.add_publishable(Arc::new(crate::worker::handlers::log::Log::with_secrets(
+        secrets.clone(),
+    )));
     // W9a Task 11: `Delete` and `PurgeCurrentExecutionFiles` need the pool,
     // so they are registered here, for every deployment, with or without a
     // container runner.

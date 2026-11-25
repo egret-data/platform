@@ -1,11 +1,14 @@
 //! `core.log.Log` — writes messages and produces nothing.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 use super::super::{Outcome, TaskHandler, TaskInput};
 use crate::logs::LogLevel;
 use crate::models::Property;
 use crate::runners::render_str;
+use crate::runners::secrets::{render_with_secrets, SecretSource};
 
 /// `io.kestra.plugin.core.log.Log`.
 pub const TYPE_ID: &str = "io.kestra.plugin.core.log.Log";
@@ -25,12 +28,29 @@ pub(crate) struct Spec {
 
 /// Render every message and write it to the attempt's
 /// [`RunLog`](crate::logs::RunLog) — `task.log`.
-#[derive(Debug, Default)]
-pub struct Log;
+#[derive(Default)]
+pub struct Log {
+    /// Where `secret()` reads, in the execution's workspace. `None` (the
+    /// oracle's registry, a test): `secret()` stays refused in `message:`.
+    secrets: Option<Arc<dyn SecretSource>>,
+}
+
+impl std::fmt::Debug for Log {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Log").finish_non_exhaustive()
+    }
+}
 
 impl Log {
     pub fn new() -> Self {
-        Self
+        Self { secrets: None }
+    }
+
+    /// A `Log` whose `message:` resolves `secret()` through `secrets`.
+    pub fn with_secrets(secrets: Arc<dyn SecretSource>) -> Self {
+        Self {
+            secrets: Some(secrets),
+        }
     }
 }
 
@@ -81,6 +101,8 @@ impl TaskHandler for Log {
             Some(one) => vec![one],
         };
 
+        // Each element's secrets mask the elements after it as well.
+        let mut log = task.log.clone();
         for m in messages {
             let Some(text) = m.as_str() else {
                 return Ok(Outcome::failed_with(format!(
@@ -88,9 +110,39 @@ impl TaskHandler for Log {
                     json_type_name(m)
                 )));
             };
-            match render_str(text, &task.render) {
-                Ok(rendered) => task.log.line(level, &rendered).await,
-                Err(e) => return Ok(Outcome::failed_with(e.to_string())),
+            match &self.secrets {
+                // No source (the oracle's registry): `secret()` stays refused
+                // by the shared environment.
+                None => match render_str(text, &task.render) {
+                    Ok(rendered) => task.log.line(level, &rendered).await,
+                    Err(e) => return Ok(Outcome::failed_with(e.to_string())),
+                },
+                // Package 10a: `secret()` resolves here, and the line is
+                // written through a log that masks every value the render
+                // handed out. Masking is this attempt's (the log handle is
+                // the attempt's), exactly as the kestra and http handlers do.
+                Some(source) => {
+                    let mut props = serde_json::Map::new();
+                    props.insert("message".into(), serde_json::Value::String(text.into()));
+                    // The error is already masked.
+                    let (rendered, resolved) = match render_with_secrets(
+                        &props,
+                        &task.render,
+                        task.workspace_id,
+                        source.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(message) => return Ok(Outcome::failed_with(message)),
+                    };
+                    log = log.masked(&resolved.values);
+                    let line = rendered
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    log.line(level, line).await;
+                }
             }
         }
 
@@ -135,7 +187,7 @@ mod tests {
     #[tokio::test]
     async fn a_log_writes_its_message_and_produces_no_output() {
         let (task, sink) = recorded(TYPE_ID, serde_json::json!({"message": "hi"}));
-        let out = Log.run(&task).await.unwrap();
+        let out = Log::new().run(&task).await.unwrap();
         assert_eq!(out.state, RunState::Success);
         assert_eq!(
             out.outputs, None,
@@ -159,7 +211,7 @@ mod tests {
             TYPE_ID,
             serde_json::json!({"message": ["one", "two"], "level": "WARN"}),
         );
-        let out = Log.run(&task).await.unwrap();
+        let out = Log::new().run(&task).await.unwrap();
         assert_eq!(out.state, RunState::Success);
         assert_eq!(
             sink.texts(),
@@ -189,7 +241,7 @@ mod tests {
                 );
             }
             let (task, sink) = recorded(TYPE_ID, spec);
-            let out = Log.run(&task).await.unwrap();
+            let out = Log::new().run(&task).await.unwrap();
             assert_eq!(out.state, RunState::Success, "{case}");
             let want: Vec<(LogLevel, String)> = case["stored"]
                 .as_array()
@@ -207,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn a_message_that_is_not_a_string_fails_the_run() {
         let (task, sink) = recorded(TYPE_ID, serde_json::json!({"message": 42}));
-        let out = Log.run(&task).await.unwrap();
+        let out = Log::new().run(&task).await.unwrap();
         assert_eq!(out.state, RunState::Failed);
         assert!(
             out.message.as_deref().unwrap_or("").contains("number"),
@@ -225,7 +277,7 @@ mod tests {
             TYPE_ID,
             serde_json::json!({"message": "hi", "level": "SHOUT"}),
         );
-        let out = Log.run(&task).await.unwrap();
+        let out = Log::new().run(&task).await.unwrap();
         assert_eq!(out.state, RunState::Failed);
         assert!(sink.lines().is_empty());
     }

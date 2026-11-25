@@ -5,7 +5,8 @@
 //!
 //! The shared [`super::env::environment`] keeps **refusing** `secret` (the
 //! `REFUSED` row in `functions`, with the pod-spec reason): script tasks,
-//! inputs, `runIf`, `Log` and triggers all render against it. Only
+//! inputs, `runIf` and triggers all render against it. A `Log`'s `message:`
+//! resolves it through [`render_with_secrets`] (package 10a Task 1). Only
 //! [`render_with_secrets`] registers a working `secret`, per render, over the
 //! refusal on a copy of the environment ([`super::env::render_once_with`]).
 //!
