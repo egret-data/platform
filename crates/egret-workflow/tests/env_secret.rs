@@ -95,13 +95,18 @@ const FLOW: &str = "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    \
      containerImage: alpine:3.20\n    commands: [\"echo $TOK\"]\n    \
      env:\n      TOK: \"{{ secret('API') }}\"\n      PLAIN: hi\n";
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_script_env_resolves_secret_into_the_secure_channel_and_masks_it() {
-    let Some(db) = common::db().await else { return };
+/// Run `flow` through the real worker; the one script task's commands and the
+/// stored log lines. `None` when there is no database.
+async fn run_flow(flow: &str) -> Option<(TaskCommands, Vec<String>)> {
+    // Both tests tick the same database: one at a time, so neither claims
+    // the other's run with its own runner.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _turn = SERIAL.lock().await;
+    let db = common::db().await?;
     let pool = db.pool.clone();
     let (ws, _user) = common::seed_workspace(&db).await;
     let _ = secrets::install(Arc::new(OneSecret));
-    let ex = start_execution(&pool, ws, None, FLOW, serde_json::json!({}))
+    let ex = start_execution(&pool, ws, None, flow, serde_json::json!({}))
         .await
         .expect("start");
 
@@ -151,14 +156,7 @@ async fn a_script_env_resolves_secret_into_the_secure_channel_and_masks_it() {
 
     let seen = runner.seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "the runner ran once");
-    let cmds = &seen[0];
-    assert_eq!(
-        cmds.secret_env.get("TOK").map(String::as_str),
-        Some(SENTINEL)
-    );
-    assert!(!cmds.env.contains_key("TOK"), "the secret is never inline");
-    assert_eq!(cmds.env.get("PLAIN").map(String::as_str), Some("hi"));
-    assert_eq!(cmds.secret_masks, vec![SENTINEL.to_string()]);
+    let cmds = seen[0].clone();
 
     let lines: Vec<String> = sqlx::query_scalar(
         "SELECT message FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id",
@@ -167,6 +165,21 @@ async fn a_script_env_resolves_secret_into_the_secure_channel_and_masks_it() {
     .fetch_all(&pool)
     .await
     .unwrap();
+    Some((cmds, lines))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_script_env_resolves_secret_into_the_secure_channel_and_masks_it() {
+    let Some((cmds, lines)) = run_flow(FLOW).await else {
+        return;
+    };
+    assert_eq!(
+        cmds.secret_env.get("TOK").map(String::as_str),
+        Some(SENTINEL)
+    );
+    assert!(!cmds.env.contains_key("TOK"), "the secret is never inline");
+    assert_eq!(cmds.env.get("PLAIN").map(String::as_str), Some("hi"));
+    assert_eq!(cmds.secret_masks, vec![SENTINEL.to_string()]);
     assert!(
         lines.iter().any(|l| l == "tok=******"),
         "the masked form is stored: {lines:?}"
@@ -175,4 +188,27 @@ async fn a_script_env_resolves_secret_into_the_secure_channel_and_masks_it() {
         lines.iter().all(|l| !l.contains(SENTINEL)),
         "no stored line holds the value"
     );
+}
+
+/// A secret env key that shadows a seeded python default lives ONLY in
+/// `secret_env`: the two maps are disjoint, the secret wins.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_secret_env_key_shadowing_a_python_default_is_only_in_secret_env() {
+    let flow = "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    \
+         type: io.kestra.plugin.scripts.python.Commands\n    \
+         containerImage: python:3.12\n    commands: [\"echo hi\"]\n    \
+         env:\n      PYTHONUNBUFFERED: \"{{ secret('API') }}\"\n";
+    let Some((cmds, _)) = run_flow(flow).await else {
+        return;
+    };
+    assert_eq!(
+        cmds.secret_env.get("PYTHONUNBUFFERED").map(String::as_str),
+        Some(SENTINEL)
+    );
+    assert!(
+        !cmds.env.contains_key("PYTHONUNBUFFERED"),
+        "neither the default nor the secret stays inline: {:?}",
+        cmds.env
+    );
+    assert!(cmds.env.keys().all(|k| !cmds.secret_env.contains_key(k)));
 }

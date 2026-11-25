@@ -712,6 +712,11 @@ impl TaskHandler for Script {
             Ok((plain, secret_env, masks)) => {
                 cmds.env.extend(plain);
                 cmds.secret_env = secret_env;
+                // Disjoint, secret wins: a secret key shadowing a seeded
+                // python default must not stay inline (duplicate EnvVar).
+                for k in cmds.secret_env.keys() {
+                    cmds.env.remove(k);
+                }
                 cmds.secret_masks = masks;
             }
             Err(why) => return Ok(Outcome::failed_with(why)),
