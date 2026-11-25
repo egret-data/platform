@@ -4332,9 +4332,11 @@ mod tests {
             format!("id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n")
         };
         let mut probes: Vec<(&str, String)> = Vec::new();
-        // A block-level `retry:` on an AllowFailure is refused (spec §2). Every
-        // spelling of the type gets the refusal, and the flow without the retry
-        // is planned (see `every_static_refusal_...` and the plan test).
+        // A block-level `retry:` on an AllowFailure used to be refused here as
+        // `unsupported_allow_failure_retry`. Package 9b (2026-11-25) lifted that
+        // refusal: the block validates and plans CLEAN as a flowable now, under
+        // every spelling. The positive assertion is below the refusal loop, so a
+        // regression that re-introduced the refusal would fail there.
         for ty in [
             "io.kestra.plugin.core.flow.AllowFailure",
             "core.allowfailure",
@@ -4343,7 +4345,14 @@ mod tests {
             let with_retry = format!(
                 "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
             );
-            probes.push(("unsupported_allow_failure_retry", with_retry));
+            let plan = build_plan(&with_retry).unwrap_or_else(|e| {
+                panic!("{ty}: an AllowFailure block retry must plan clean: {e}")
+            });
+            assert!(
+                matches!(plan.tasks[0].kind, TaskKind::AllowFailure { .. }),
+                "{ty}: it plans as the AllowFailure flowable, got {:?}",
+                plan.tasks[0].kind
+            );
         }
         for ty in [
             "io.kestra.plugin.core.flow.LoopUntil",
@@ -4609,11 +4618,11 @@ mod tests {
         // were `io.kestra.plugin.core.execution.SetVariables`, `UnsetVariables`
         // or `Labels` are gone -- all three are registered and executor-level
         // (`spec::registry::EXECUTOR_LEVEL`, planned `TaskKind::ExecutionUpdate`).)
-        PublishedButRefused {
-            id: "valids/retry-with-flowable-errors",
-            cause: "an `AllowFailure` flowable with `retry:` on the block itself. Kestra retries the failing child; egret refuses the block-level `retry:` on purpose (spec §2, a non-goal for the AllowFailure flowable package), so the flow is refused where Kestra ran it.",
-            codes: &["unsupported_allow_failure_retry"],
-        },
+        //
+        // (2026-11-25, 9b Task 3: the `valids/retry-with-flowable-errors` row is
+        // gone -- an `AllowFailure` block `retry:` is no longer refused
+        // (`unsupported_allow_failure_retry` lifted), so the flow plans, publishes
+        // and runs the golden. The sweep below would name it if any row were left.)
     ];
 
     /// **Every flow this Kestra published with 200 must plan, except two
@@ -5684,9 +5693,12 @@ mod tests {
         );
         assert_eq!(
             (flows, declared, planned),
-            (24, 25, 25),
-            "24 corpus flows declare a `retry:` on a task `build_plan` plans (or \
-             on the flow), 25 policies between them -- one more than before \
+            (25, 26, 26),
+            "25 corpus flows declare a `retry:` on a task `build_plan` plans (or \
+             on the flow), 26 policies between them. 9b Task 3 (2026-11-25) added \
+             `valids/retry-with-flowable-errors`: its block `retry:` on `retry_block` \
+             plans now that the AllowFailure block `retry:` is no longer refused \
+             (24, 25, 25 before). One more than before \
              `valids/allow-failure-with-retry`, whose child retry plans now that \
              AllowFailure is planned (spec §5.2). Before that it was 23, 24, 24; \
              25 and 26 until no-silent-stall Task 1, whose static refusals made \
@@ -11119,6 +11131,340 @@ mod allow_failure_drive_tests {
         assert_eq!(last_of(&plan, &state, "fin"), Some(RunState::Success));
         assert_eq!(last_of(&plan, &state, "handler"), None);
         assert_eq!(flow, RunState::Success);
+    }
+
+    /// **Package 9b: a `retry:` on an `AllowFailure` block.** Pinned by Task 1
+    /// behind the (now lifted) validate refusal; 9b Task 3 lifted
+    /// `unsupported_allow_failure_retry`, so this drives the flow through
+    /// `build_plan` directly. This is `valids/retry-with-flowable-errors`
+    /// with the KV counter simulated: `run_script` fails while the counter is
+    /// below 2 and succeeds once `incr_counter` has bumped it.
+    ///
+    /// Kestra's golden has THREE surfaced runs: `set_kv` (1 attempt), the
+    /// block (1 attempt, SUCCESS: a flowable is never retried as a unit) and
+    /// `run_script` (2 attempts, FAILED then SUCCESS). The execution goes
+    /// CREATED, RUNNING, RETRYING, RUNNING, SUCCESS. The block's `errors:` task
+    /// `incr_counter` is not among them in the golden, yet its side effect must
+    /// have run for attempt 2 to succeed. egret runs it while the child waits
+    /// for its retry (`retry::is_block_retried_child`) and throws the run away
+    /// when the child is reopened, so it is not surfaced.
+    #[test]
+    fn a_block_retry_retries_the_child_and_the_block_succeeds() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"
+        ))
+        .expect("the corpus flow");
+        let plan = super::build_plan(&src)
+            .expect("the AllowFailure block retry validates and plans now (9b Task 3)");
+        let block = plan.tasks.iter().find(|t| t.id == "retry_block").unwrap();
+        assert!(
+            matches!(block.kind, TaskKind::AllowFailure { .. }),
+            "the planner keeps an AllowFailure with a retry a flowable"
+        );
+
+        let mut state = ExecutionState::new(&plan);
+        let mut counter = 0_i64;
+        let mut now = T0;
+        let mut exec_states = vec![];
+        for _ in 0..400 {
+            let cmds = advance(&plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    if let Command::SetExecutionState { state } = cmd {
+                        exec_states.push(*state);
+                    }
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => {
+                    let id = plan.tasks[state.runs[ix].task].id.as_str();
+                    let raw = match id {
+                        "set_kv" => {
+                            counter = 1;
+                            RunState::Success
+                        }
+                        "incr_counter" => {
+                            counter += 1;
+                            RunState::Success
+                        }
+                        "run_script" if counter < 2 => RunState::Failed,
+                        _ => RunState::Success,
+                    };
+                    let outcome = super::allow_failure::for_runnable(&plan, &state, ix, raw, now);
+                    apply(
+                        &mut state,
+                        &Command::SetRunState {
+                            run: ix,
+                            state: outcome,
+                        },
+                    );
+                }
+                None => match state
+                    .runs
+                    .iter()
+                    .filter_map(|r| r.not_before)
+                    .filter(|t| *t > now)
+                    .min()
+                {
+                    Some(t) => now = t,
+                    None => break,
+                },
+            }
+        }
+        // A run with no history was thrown away (Kestra deletes it): it is not
+        // surfaced, so the golden does not list it.
+        let surfaced: Vec<(String, usize, Option<RunState>)> = state
+            .runs
+            .iter()
+            .filter(|r| !r.history.is_empty())
+            .map(|r| {
+                (
+                    plan.tasks[r.task].id.clone(),
+                    r.attempts.len(),
+                    r.history.last().copied(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            surfaced,
+            [
+                ("set_kv".to_string(), 1, Some(RunState::Success)),
+                ("retry_block".to_string(), 1, Some(RunState::Success)),
+                ("run_script".to_string(), 2, Some(RunState::Success)),
+            ],
+            "the golden's three surfaced runs"
+        );
+        let run_script = state
+            .runs
+            .iter()
+            .find(|r| plan.tasks[r.task].id == "run_script")
+            .unwrap();
+        assert_eq!(
+            run_script
+                .attempts
+                .iter()
+                .map(|a| a.history.last().copied())
+                .collect::<Vec<_>>(),
+            [Some(RunState::Failed), Some(RunState::Success)]
+        );
+        assert!(run_script.history.contains(&RunState::Retrying));
+        assert_eq!(
+            counter, 2,
+            "incr_counter's side effect ran between the attempts"
+        );
+        assert_eq!(
+            state.history,
+            [
+                RunState::Created,
+                RunState::Running,
+                RunState::Retrying,
+                RunState::Running,
+                RunState::Success
+            ]
+        );
+    }
+
+    /// `isErrorOrFinallyHandlingPending`: a retry owned by the block is NOT
+    /// reopened while the block's `errors:` run is still in flight, however far
+    /// `now` is past its `not_before`; it is reopened (and the error run thrown
+    /// away) once the run terminates. Fails if `reopen_due`'s hold is deleted.
+    #[test]
+    fn a_block_retry_waits_for_the_blocks_errors_to_terminate() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"
+        ))
+        .expect("the corpus flow");
+        let plan = super::build_plan(&src)
+            .expect("the AllowFailure block retry validates and plans now (9b Task 3)");
+        let mut state = ExecutionState::new(&plan);
+        let ix_of = |state: &ExecutionState, id: &str| {
+            (0..state.runs.len()).find(|&i| plan.tasks[state.runs[i].task].id == id)
+        };
+        let mut guard = 0;
+        // Fail run_script once, stopping with incr_counter RUNNING.
+        loop {
+            guard += 1;
+            assert!(guard < 200, "never reached the held state");
+            let cmds = advance(&plan, &state, T0);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            if let Some(e) = ix_of(&state, "incr_counter") {
+                if state.runs[e].history.last() == Some(&RunState::Running) {
+                    break;
+                }
+            }
+            let in_flight = (0..state.runs.len()).find(|&i| {
+                matches!(
+                    plan.tasks[state.runs[i].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[i].history.last() == Some(&RunState::Running)
+            });
+            let i = in_flight.expect("something is in flight");
+            let raw = if plan.tasks[state.runs[i].task].id == "run_script" {
+                RunState::Failed
+            } else {
+                RunState::Success
+            };
+            apply(&mut state, &Command::SetRunState { run: i, state: raw });
+        }
+        let child = ix_of(&state, "run_script").unwrap();
+        let errors = ix_of(&state, "incr_counter").unwrap();
+        let not_before = state.runs[child].not_before.expect("a retry is scheduled");
+        let late = Tick(not_before.0 + 1_000_000);
+        assert_eq!(state.runs[child].history.last(), Some(&RunState::Retrying));
+        let held = advance(&plan, &state, late);
+        assert!(
+            !held.iter().any(|c| matches!(
+                c,
+                Command::SetRunState { run, state: RunState::Created } if *run == child
+            )),
+            "the retry was reopened while the block's errors were running: {held:?}"
+        );
+        assert_eq!(state.runs[child].history.last(), Some(&RunState::Retrying));
+        // The errors run ends: the retry now reopens and the error run is emptied.
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: errors,
+                state: RunState::Success,
+            },
+        );
+        let cmds = advance(&plan, &state, late);
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, Command::EmptyRun { run } if *run == errors)));
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            Command::SetRunState { run, state: RunState::Created } if *run == child
+        )));
+    }
+
+    const RETRY_BLOCK: &str = "id: afr\nnamespace: io.kestra.tests\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      - id: ko\n        type: io.kestra.plugin.core.execution.Fail\n    errors:\n      - id: handler\n        type: io.kestra.plugin.core.debug.Return\n        format: h\n    retry:\n      type: constant\n      interval: PT0.5S\n      maxAttempts: 3\n{WARN}  - id: after\n    type: io.kestra.plugin.core.debug.Return\n    format: after\n";
+
+    /// Drives `RETRY_BLOCK` (child `ko` ALWAYS fails) through `build_plan` (the
+    /// 9b-lifted validator accepts the block `retry:`), advancing the clock to
+    /// each `not_before`. Returns the surfaced runs
+    /// `(task id, attempts, last state)`, the flow's state history.
+    #[allow(clippy::type_complexity)]
+    fn run_retry_block(
+        warning_on_retry: bool,
+    ) -> (Vec<(String, usize, Option<RunState>)>, Vec<RunState>) {
+        let src = RETRY_BLOCK.replace(
+            "{WARN}",
+            if warning_on_retry {
+                "      warningOnRetry: true\n"
+            } else {
+                ""
+            },
+        );
+        let plan = super::build_plan(&src)
+            .expect("the AllowFailure block retry validates and plans now (9b Task 3)");
+        let mut state = ExecutionState::new(&plan);
+        let mut now = T0;
+        for _ in 0..400 {
+            let cmds = advance(&plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => {
+                    let raw = if plan.tasks[state.runs[ix].task].id == "ko" {
+                        RunState::Failed
+                    } else {
+                        RunState::Success
+                    };
+                    let outcome = super::allow_failure::for_runnable(&plan, &state, ix, raw, now);
+                    apply(
+                        &mut state,
+                        &Command::SetRunState {
+                            run: ix,
+                            state: outcome,
+                        },
+                    );
+                }
+                None => match state
+                    .runs
+                    .iter()
+                    .filter_map(|r| r.not_before)
+                    .filter(|t| *t > now)
+                    .min()
+                {
+                    Some(t) => now = t,
+                    None => break,
+                },
+            }
+        }
+        let surfaced = state
+            .runs
+            .iter()
+            .filter(|r| !r.history.is_empty())
+            .map(|r| {
+                (
+                    plan.tasks[r.task].id.clone(),
+                    r.attempts.len(),
+                    r.history.last().copied(),
+                )
+            })
+            .collect();
+        (surfaced, state.history.clone())
+    }
+
+    /// **Package 9b Task 2: the retry exhausts.** `ko` always fails, so all 3
+    /// attempts run and the last one (no retry left) leaves it FAILED;
+    /// `block_state` maps that to a block WARNING and the flow continues to
+    /// `after`, ending WARNING (the D1 Sequential-parity rule, with retries in
+    /// between). The block's `errors:` run IS surfaced here: the two superseded
+    /// middle attempts emptied their error run, but the final FAILED attempt is
+    /// not reopened, so its `handler` run stays (1 attempt, SUCCESS).
+    #[test]
+    fn a_block_retry_that_exhausts_makes_the_block_a_warning() {
+        let (surfaced, history) = run_retry_block(false);
+        assert_eq!(
+            surfaced,
+            [
+                ("block".to_string(), 1, Some(RunState::Warning)),
+                ("ko".to_string(), 3, Some(RunState::Failed)),
+                ("handler".to_string(), 1, Some(RunState::Success)),
+                ("after".to_string(), 1, Some(RunState::Success)),
+            ]
+        );
+        assert_eq!(history.last(), Some(&RunState::Warning));
+    }
+
+    /// `warningOnRetry: true` is accepted but egret does not act on it (see the
+    /// `spec::keys` warning, roadmap #13): the surfaced runs and terminal are
+    /// exactly those of the same flow without it. (On the succeeds-late corpus
+    /// flow `retry-with-flowable-errors`, which sets it, Kestra's golden is also
+    /// SUCCESS, so an unchanged terminal is the parity-safe pin.)
+    #[test]
+    fn warning_on_retry_on_a_block_retry_does_not_change_the_terminal() {
+        let without = run_retry_block(false);
+        let with = run_retry_block(true);
+        assert_eq!(with, without);
+        assert_eq!(with.1.last(), Some(&RunState::Warning));
     }
 }
 

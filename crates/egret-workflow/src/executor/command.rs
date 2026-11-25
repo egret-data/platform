@@ -232,9 +232,11 @@ pub enum Command {
     /// `taskRunList`": the walk rebuilds it with [`Command::RecreateRun`] when
     /// its turn comes, and `flowable::current_list` reads an empty run as "not
     /// started". The clearing is exactly `RestartLoop`'s on a descendant (one
-    /// function in `apply` does both). Emitted only by
-    /// [`restart`](super::restart::restart) and
-    /// [`mark_as`](super::restart::mark_as).
+    /// function in `apply` does both). Emitted by
+    /// [`restart`](super::restart::restart),
+    /// [`mark_as`](super::restart::mark_as) and
+    /// [`retry::reopen_due`](super::retry::reopen_due) (the `errors:` runs of
+    /// an `AllowFailure` block's superseded retry attempt, package 9b).
     EmptyRun {
         run: RunIx,
     },

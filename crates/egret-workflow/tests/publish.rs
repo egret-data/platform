@@ -957,11 +957,12 @@ async fn a_secret_in_a_kv_value_is_refused_at_publish_by_its_own_message() {
 
 /// W9c Task 4: the corpus's `valids/kv` (two `kv()` calls in `Return`
 /// tasks) publishes. `valids/retry-with-flowable-errors` carries no
-/// `secret()` either. Its `AllowFailure` block is planned now (spec §5.2 of the
-/// AllowFailure flowable), but a `retry:` on the block itself is a non-goal, so
-/// it is refused for that retry and for nothing else.
+/// `secret()` either, and since package 9b (2026-11-25) lifted
+/// `unsupported_allow_failure_retry` its `AllowFailure` block `retry:` is a
+/// golden-matching run, so it too publishes clean (it was refused only for that
+/// retry until 9b).
 #[tokio::test]
-async fn valids_kv_publishes_and_retry_with_flowable_errors_is_refused_only_for_its_block_retry() {
+async fn valids_kv_and_retry_with_flowable_errors_both_publish() {
     let Some(db) = db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let repo = egret_workflow::FlowRepo::new(db.clone());
@@ -973,16 +974,9 @@ async fn valids_kv_publishes_and_retry_with_flowable_errors_is_refused_only_for_
 
     let af = include_str!("../oracle-exec/corpus/valids/retry-with-flowable-errors.yaml");
     let draft = common::draft(&repo, ws, user, af).await;
-    match egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "").await {
-        Err(egret_core::Error::InvalidInput(m)) => {
-            assert!(
-                m.contains("put `retry:` on the child task")
-                    && m.contains("(tasks.retry_block.retry)"),
-                "{m}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
+    egret_workflow::publish(&repo, &FakeRefs::default(), ws, user, draft.id, "")
+        .await
+        .unwrap_or_else(|e| panic!("the AllowFailure block retry publishes now: {e}: {af}"));
 }
 
 // -- Task 2.5 fix round 1 (review I1): a nested flowable's `errors:` list.

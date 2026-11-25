@@ -604,8 +604,10 @@ pub enum TaskKind {
     /// `unsupported_working_directory`). **Corrected 2026-10-17 (kill Task 2
     /// fix round 1):** neither is refused any more -- #680 and #683 plan them
     /// as the flowables [`TaskKind::AllowFailure`] and
-    /// [`TaskKind::WorkingDirectory`]; only an `AllowFailure` block `retry:`
-    /// is refused (`unsupported_allow_failure_retry`).
+    /// [`TaskKind::WorkingDirectory`]. An `AllowFailure` block `retry:` was
+    /// refused (`unsupported_allow_failure_retry`) from #680 until package 9b
+    /// (2026-11-25) lifted it: the failing child inherits the block's `retry:`
+    /// and the block maps the child's post-retry terminal, a golden-matching run.
     ///
     /// # Package 9a: the body (`tasks:`, `onPause:`, `behavior:`)
     ///

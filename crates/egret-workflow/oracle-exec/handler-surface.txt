@@ -321,17 +321,17 @@ Two rules, and they are deliberately different:
   high costs nothing at all, which is why it would not be a ceiling.
 
     279  reproduced today, and by nothing the driver removes
-      0  reproduced today ONLY because the feed supplies a terminal
+      1  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
      14  not reproduced today, and nothing found here blocks it
-      8  not reproduced today, and blocked -- by cause below
+      7  not reproduced today, and blocked -- by cause below
   -----
     301  TOTAL, the comparable entries
 
   CEILING, feed removed  = 279 + 14 = **293**
-  CEILING, feed retained = 279 + 0 + 14 = 293
+  CEILING, feed retained = 279 + 1 + 14 = 294
 
-  Today the ratchet matches 279. The two ceilings are the same
+  Today the ratchet matches 280. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
@@ -340,9 +340,10 @@ Two rules, and they are deliberately different:
   **293 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  293 -- reported as a decision, not as progress.
+  294 -- reported as a decision, not as progress.
 
-  The 0 at risk, with the type whose terminal is fed:
+  The 1 at risk, with the type whose terminal is fed:
+    valids/retry-with-flowable-errors                    Set
 
   The 14 nothing here blocks:
     valids/dag
@@ -367,14 +368,13 @@ Two rules, and they are deliberately different:
         2  clock      checkFrequency.maxDuration; the golden's iteration count carries the artifact's delay-poller latency
         1  construct  allowFailure:
         1  construct  flow concurrency:
-        1  handler    io.kestra.plugin.core.kv.Set
         1  refusal    egret over-accepts it -- W1's validation, not a handler
     -----
-        8  DISTINCT entries blocked (the rows above overlap)
+        7  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
-        1  a missing handler
+        0  a missing handler
         5  a construct no W3b task owns
         0  a state RunState cannot hold
         1  an over-acceptance -- W1's validation

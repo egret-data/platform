@@ -353,13 +353,15 @@ async fn update_replaces_the_draft() {
     assert_eq!(updated["namespace"], "a.after");
 }
 
-/// **Drafts still save** (no-silent-stall §3): a `PUT` of a flow holding an
-/// `AllowFailure` with a `retry:` on the block -- which egret refuses (spec §2,
-/// a non-goal), so publish and every start path refuse it -- answers 200 and
-/// stores the draft, and the report it carries holds the ERROR
-/// `unsupported_allow_failure_retry` at the block's `retry` path.
+/// **An `AllowFailure` block `retry:` validates CLEAN** (package 9b, 2026-11-25
+/// lifted `unsupported_allow_failure_retry`): a `PUT` of a flow holding an
+/// `AllowFailure` with a `retry:` on the block answers 200, stores the draft, and
+/// its report carries NO `unsupported_allow_failure_retry` finding. The control
+/// in the same test -- an `AllowFailure` with no tasks -- is still refused
+/// (`allow_failure_tasks_required`), so this proves the validator still rejects
+/// something, not that it stopped validating.
 #[tokio::test]
-async fn a_draft_with_an_allow_failure_saves_and_its_report_carries_the_error() {
+async fn a_draft_with_an_allow_failure_block_retry_now_validates_clean() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
@@ -396,13 +398,39 @@ async fn a_draft_with_an_allow_failure_saves_and_its_report_carries_the_error() 
     let updated = common::json(res).await;
     let errors = updated["validation"]["errors"].as_array().unwrap();
     assert!(
-        errors
+        !errors
             .iter()
-            .any(|e| e["code"] == "unsupported_allow_failure_retry"
-                && e["path"] == "tasks.risky.retry"),
-        "{errors:?}"
+            .any(|e| e["code"] == "unsupported_allow_failure_retry"),
+        "the block `retry:` is accepted now; no refusal may remain: {errors:?}"
     );
     assert_eq!(updated["source"], source, "and the draft is the one sent");
+
+    // Control: a genuinely-invalid flow is still refused, so this test proves the
+    // validator rejects something. An `AllowFailure` with no tasks draws
+    // `allow_failure_tasks_required` at the block's `tasks` path.
+    let bad = "id: f\nnamespace: a.allowfailure\ntasks:\n  - id: empty\n    \
+               type: io.kestra.plugin.core.flow.AllowFailure\n    retry:\n      \
+               type: constant\n      interval: PT1S\n      maxAttempts: 3\n";
+    let res = common::put(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{id}"),
+        user,
+        serde_json::json!({ "source": bad, "folder_id": null }),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "a draft saves whatever its report says"
+    );
+    let updated = common::json(res).await;
+    let errors = updated["validation"]["errors"].as_array().unwrap();
+    assert!(
+        errors.iter().any(
+            |e| e["code"] == "allow_failure_tasks_required" && e["path"] == "tasks.empty.tasks"
+        ),
+        "the control must still be refused: {errors:?}"
+    );
 }
 
 /// Delete soft-deletes: `FlowRepo::get` (and therefore `GET /flows/{id}`)
