@@ -72,6 +72,27 @@ fn secret_ids(flow: &Flow) -> impl Iterator<Item = &str> {
         .map(|i| i.id.as_str())
 }
 
+/// The ids [`split`] seals: every input declared `type: SECRET`, and (package
+/// 10a Task 3, decision D3) every input whose `defaults:` calls `secret()`.
+///
+/// Kestra stores the plaintext of a `secret()` rendered into a non-SECRET
+/// input; egret seals it as a SECRET one, a stricter divergence. The set is a
+/// property of the DECLARATION, so every writer that splits (a start, a
+/// replay of the stored values, a `Subflow` child) agrees without carrying an
+/// id-set beside the value. The cost is that a value posted for such an input
+/// is sealed too, which hides more, never less.
+fn sealed_ids(flow: &Flow) -> impl Iterator<Item = &str> {
+    flow.inputs
+        .iter()
+        .filter(|i| {
+            i.r#type == InputType::Secret
+                || i.defaults
+                    .as_ref()
+                    .is_some_and(|d| crate::runners::secrets::text_uses_secret(d.source()))
+        })
+        .map(|i| i.id.as_str())
+}
+
 /// `inputs` with every SECRET input's value replaced by [`MASK`], and the
 /// values themselves sealed for `workflow.executions.secret_inputs`.
 ///
@@ -90,7 +111,7 @@ fn split_with(
         return Ok((inputs, None));
     };
     let mut secret = Map::new();
-    for id in secret_ids(flow) {
+    for id in sealed_ids(flow) {
         if let Some(v) = posted.get_mut(id) {
             if !v.is_null() {
                 secret.insert(id.to_string(), std::mem::replace(v, Value::from(MASK)));

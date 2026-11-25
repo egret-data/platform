@@ -705,6 +705,24 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                             for (p, text) in found {
                                 self.property(p, text);
                             }
+                        } else if k == "defaults"
+                            && id.is_some()
+                            && ty.is_some()
+                            && path
+                                .strip_prefix("inputs.")
+                                .is_some_and(|rest| !rest.contains('.'))
+                        {
+                            // A flow input's `defaults:` resolves `secret()`
+                            // (package 10a Task 3): rendered at start, the
+                            // value sealed like a SECRET input's. Only the
+                            // flow's own `inputs:` (path `inputs.<id>`), not
+                            // a `Pause`'s `onResume`; a `namespace=` / `full=`
+                            // written in the call is still refused.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
                         } else if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
@@ -6122,6 +6140,29 @@ mod tests {
         assert_eq!(
             paths_of(src, CODE_SECRET_ARGUMENT_REFUSED),
             vec!["tasks.l.runIf".to_string()]
+        );
+        assert!(paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
+    }
+
+    /// Package 10a Task 3: `secret()` resolves in a flow input's `defaults:`
+    /// and in no sibling property of it; a `namespace=` written in the call is
+    /// refused as on a plugin task.
+    #[test]
+    fn a_secret_in_a_flow_inputs_defaults_is_allowed_and_not_beside_it() {
+        use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        let src = "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: STRING\n    \
+             defaults: \"{{ secret('X') }}\"\n    description: \"{{ secret('X') }}\"\n\
+             tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+            vec!["inputs.i.description".to_string()]
+        );
+        let src = "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: STRING\n    \
+             defaults: \"{{ secret('K', namespace='x') }}\"\n\
+             tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_ARGUMENT_REFUSED),
+            vec!["inputs.i.defaults".to_string()]
         );
         assert!(paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
     }

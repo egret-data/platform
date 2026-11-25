@@ -4283,6 +4283,71 @@ pub(crate) fn checked_inputs(
     checked_inputs_for(flow, &flow.inputs, posted)
 }
 
+/// Package 10a Task 3 (decision D3): a declared input whose `defaults:` calls
+/// `secret()` is rendered HERE, at start, with the value read through the
+/// attempt's prefetch (a miss records the read, the owner rolls the attempt
+/// back, fetches with no transaction open, and runs it again). The value joins
+/// the checked inputs, and [`crate::secret_inputs::split`] seals it, so it is
+/// never stored in clear -- Kestra renders it at start and stores the
+/// plaintext; egret seals it. Every other templated default is left as the
+/// checker gave it (absent), for the render to fill as before.
+fn resolve_secret_defaults(
+    flow: &crate::models::Flow,
+    checked: serde_json::Value,
+    prefetch: &Prefetch,
+    workspace: Uuid,
+) -> Result<serde_json::Value> {
+    use crate::models::InputType;
+    use crate::runners::env::RenderContext;
+    let serde_json::Value::Object(mut inputs) = checked else {
+        return Ok(checked);
+    };
+    for input in &flow.inputs {
+        let Some(default) = &input.defaults else {
+            continue;
+        };
+        let source = default.source();
+        if !crate::runners::secrets::text_uses_secret(source)
+            || inputs.get(&input.id).is_some_and(|v| !v.is_null())
+        {
+            continue;
+        }
+        let mut cx = RenderContext::new();
+        cx.insert(
+            "flow",
+            serde_json::json!({"id": flow.id, "namespace": flow.namespace}),
+        );
+        cx.insert(
+            "vars",
+            serde_json::to_value(&flow.variables).unwrap_or(serde_json::Value::Null),
+        );
+        cx.insert("inputs", serde_json::Value::Object(inputs.clone()));
+        let rendered = prefetch
+            .render_secret_once(workspace, source, &cx)
+            .map_err(|e| {
+                Error::InvalidInput(format!(
+                    "Invalid value for input `{}`. Cause: {e}",
+                    input.id
+                ))
+            })?;
+        let structured = matches!(
+            input.r#type,
+            InputType::Int
+                | InputType::Float
+                | InputType::Boolean
+                | InputType::Json
+                | InputType::Array
+                | InputType::Multiselect
+        );
+        let value = structured
+            .then(|| serde_json::from_str(&rendered.text).ok())
+            .flatten()
+            .unwrap_or(serde_json::Value::String(rendered.text));
+        inputs.insert(input.id.clone(), value);
+    }
+    Ok(serde_json::Value::Object(inputs))
+}
+
 /// [`checked_inputs`] against another declared list -- a `Pause`'s
 /// `onResume` (package 7c D5), rendered as a start's are.
 pub(crate) fn checked_inputs_for(
@@ -4699,7 +4764,8 @@ async fn insert_execution_gated(
     let check =
         replayed_from_execution_id.is_none() && flow_trigger_event_id.is_none() && !born_failed;
     let inputs = if check {
-        checked_inputs(&flow, &inputs).map_err(|e| Error::InvalidInput(e.message))?
+        let checked = checked_inputs(&flow, &inputs).map_err(|e| Error::InvalidInput(e.message))?;
+        resolve_secret_defaults(&flow, checked, gate.prefetch(), workspace_id)?
     } else {
         inputs
     };
