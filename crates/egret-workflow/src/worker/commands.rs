@@ -3001,6 +3001,7 @@ fn parse_docker_ps(stdout: &str) -> Vec<ListedContainer> {
 /// over xfs with `pquota` -- so a task on this runner can fill the daemon's
 /// disk. The Kubernetes runner bounds it (`ephemeral-storage` and
 /// `emptyDir.sizeLimit`); this runner is for local development and tests.
+#[cfg(test)]
 pub(crate) fn create_args(
     task: &TaskInput,
     commands: &TaskCommands,
