@@ -3096,6 +3096,19 @@ impl SecretEnvFile {
         if secret_env.is_empty() {
             return Ok(None);
         }
+        // `--env-file` is line-oriented with no escaping: refuse what it
+        // cannot carry rather than inject or truncate. Never echo the value.
+        for (k, v) in secret_env {
+            let bad = |c: char| matches!(c, '\n' | '\r' | '\0');
+            if k.contains(|c| bad(c) || c == '=') || v.contains(bad) {
+                return Err(Error::InvalidInput(format!(
+                    "a secret() value for env var `{}` contains a newline (or \
+                     carriage-return/NUL), which the Docker runner's --env-file cannot \
+                     carry safely; use the Kubernetes runner for multi-line secrets",
+                    k.escape_debug()
+                )));
+            }
+        }
         let path = std::env::temp_dir().join(format!("egret-env-{name}-{}", uuid::Uuid::new_v4()));
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -3566,6 +3579,26 @@ mod tests {
             "n",
         );
         assert!(!plain.iter().any(|x| x == "--env-file"));
+    }
+
+    #[test]
+    fn a_secret_value_with_a_newline_is_refused_without_a_file() {
+        let env = BTreeMap::from([("PEM".to_string(), "a\nEVIL=1-zz9".to_string())]);
+        let err = match SecretEnvFile::write("nl-test", &env) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a newline value must be refused"),
+        };
+        assert!(err.contains("PEM"), "{err}");
+        assert!(!err.contains("EVIL") && !err.contains("zz9"), "{err}");
+        let left = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("egret-env-nl-test")
+            });
+        assert!(!left, "no env-file may be left");
     }
 
     /// **`docker create` carries the `taskRunner:` properties the Docker runner
