@@ -856,7 +856,11 @@ const CREATE_REFUSED: usize = 4;
 /// `valids/pause-behavior`, `valids/pause-errors-finally-after-execution` and
 /// `valids/pause_on_pause` publish and run (they leave [`VALIDATE_REFUSED`],
 /// 25 -> 22).
-const LIVE: usize = 298;
+///
+/// **298 -> 299 at 9b Task 3 (2026-11-25)**: the AllowFailure block `retry:`
+/// refusal is lifted, so `valids/retry-with-flowable-errors` publishes and runs
+/// the golden (it leaves [`VALIDATE_REFUSED`], 22 -> 21).
+const LIVE: usize = 299;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
@@ -962,8 +966,9 @@ const UNKNOWN_TYPE_REFUSED: usize = 21;
 /// **33 → 30 with the AllowFailure flowable package**: `valids/allow-failure`,
 /// `valids/allow-failure-with-retry` and `valids/finally-allowfailure` no longer
 /// draw `unsupported_allow_failure`, so they publish live (their [`LIVE`] row
-/// moved 237 → 240 with them). `valids/retry-with-flowable-errors` stays refused,
-/// now by `unsupported_allow_failure_retry`, the block-level retry non-goal.
+/// moved 237 → 240 with them). `valids/retry-with-flowable-errors` stayed refused
+/// then, by `unsupported_allow_failure_retry`, the block-level retry non-goal --
+/// lifted at 9b Task 3 (see below).
 ///
 /// **30 -> 26 at WorkingDirectory Task 3**: the four WorkingDirectory valids
 /// named in [`LIVE`] stop being refused by `unsupported_working_directory`.
@@ -992,7 +997,12 @@ const UNKNOWN_TYPE_REFUSED: usize = 21;
 /// `valids/pause-errors-finally-after-execution`, `valids/pause_on_pause`) are
 /// a full flowable now, so `unsupported_pause_property` refuses none of them;
 /// they publish live (their [`LIVE`] row moved 295 -> 298 with them).
-const VALIDATE_REFUSED: usize = 22;
+///
+/// **22 -> 21 at 9b Task 3 (2026-11-25)**: `valids/retry-with-flowable-errors`,
+/// the one flow `unsupported_allow_failure_retry` refused, is a golden-matching
+/// run now that the block `retry:` refusal is lifted; it publishes live (its
+/// [`LIVE`] row moved 298 -> 299 with it).
+const VALIDATE_REFUSED: usize = 21;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.
@@ -1436,14 +1446,46 @@ async fn read_trace_inner(
         ended.push(r.get::<Option<i64>, _>("ended_seq").map(|v| v as usize));
     }
 
+    // A run whose history is empty is a DISCARDED run, not a surfaced one, and
+    // the golden does not carry it. Package 9b (2026-11-25): an `AllowFailure`
+    // block's `retry:` runs the block's `errors:` for their side effect while the
+    // failing child waits, then throws that error-handling run away when the child
+    // is reopened (`executor::retry::reopen_due` emits `Command::EmptyRun`).
+    // Kestra DELETES the superseded taskRun; egret keeps the row because
+    // `worker::load` forbids a gap in `run_ix`, so the discarded run persists with
+    // an empty history. It is not part of the execution's record, so the
+    // comparable trace drops it and remaps the indices `order` and sub-execution
+    // parents reference. (A discarded run is always a leaf error handler with no
+    // children and no sub-execution, so no kept run and no `spawned` child ever
+    // references one; `restart`/`RestartLoop` empty a run and rebuild it in the
+    // same settle, so those are non-empty here and are kept.)
+    let keep: Vec<bool> = runs.iter().map(|r| !r.state.is_empty()).collect();
+    let mut old_to_new = vec![None; runs.len()];
+    let mut next = 0usize;
+    for (ix, kept) in keep.iter().enumerate() {
+        if *kept {
+            old_to_new[ix] = Some(next);
+            next += 1;
+        }
+    }
+
     let mut order = Vec::new();
     for i in 0..runs.len() {
         for j in (i + 1)..runs.len() {
+            let (Some(ni), Some(nj)) = (old_to_new[i], old_to_new[j]) else {
+                continue;
+            };
             if let Some(rel) = step_relation(created[i], ended[i], created[j], ended[j]) {
-                order.push((i, j, rel.to_string()));
+                order.push((ni, nj, rel.to_string()));
             }
         }
     }
+
+    let runs: Vec<Run> = runs
+        .into_iter()
+        .zip(&keep)
+        .filter_map(|(r, kept)| kept.then_some(r))
+        .collect();
 
     // **This query is why `Subflow` gets a column of its own** (W6 Task 2). It
     // keys on `parent_execution_id`, and all 41 golden `spawned`-carrying
@@ -1486,15 +1528,16 @@ async fn read_trace_inner(
     .await?;
     let mut spawned = Vec::with_capacity(children.len());
     for (child, run_ix, loop_value) in children {
-        spawned.push(
-            Box::pin(read_trace_inner(
-                pool,
-                child,
-                run_ix.map(|ix| ix.max(0) as usize),
-                loop_value,
-            ))
-            .await?,
-        );
+        // Remap the parent run_ix the same way `order` was: a sub-execution's
+        // parent is always a surfaced (kept) run (a discarded run has no child),
+        // so the mapping is identity for it under a trailing discard. Fall back to
+        // the raw index when the parent execution surfaced no run at that position
+        // (an execution with no task_runs at all, e.g. the subflow-link control).
+        let parent = run_ix.map(|ix| {
+            let ix = ix.max(0) as usize;
+            old_to_new.get(ix).copied().flatten().unwrap_or(ix)
+        });
+        spawned.push(Box::pin(read_trace_inner(pool, child, parent, loop_value)).await?);
     }
 
     Ok(Trace {

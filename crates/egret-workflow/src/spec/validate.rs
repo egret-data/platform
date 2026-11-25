@@ -55,8 +55,10 @@
 //!    it stalled in `RUNNING` for ever. So each is an ERROR, in
 //!    `validate_for_run`, which publish and every start path ask:
 //!    `unsupported_allow_failure` (until #680, which made `AllowFailure` a
-//!    flowable; since then only `unsupported_allow_failure_retry`, a block
-//!    `retry:`; `unsupported_working_directory` likewise went with #683 --
+//!    flowable; a block `retry:` was then refused as
+//!    `unsupported_allow_failure_retry` until package 9b lifted it --
+//!    2026-11-25, it is a measured, golden-matching run now;
+//!    `unsupported_working_directory` likewise went with #683 --
 //!    noted 2026-10-17, kill Task 2 fix round 1),
 //!    `unsupported_loop_until_property` (a bound `executor::loop_until_gap`
 //!    names), `unsupported_pause_property` (`executor::pause_gap`, W7b),
@@ -2298,22 +2300,14 @@ fn walk_task(
                     path: format!("{path}.tasks"),
                 });
             }
-            // Block-level `retry:` is a non-goal (spec §2): the image retries the
-            // failing child, and egret has no measured retry for the block. It is
-            // refused, not run without its retry, so the flow cannot stall or
-            // silently lose the property.
-            if task.retry.is_some() {
-                report.errors.push(Finding {
-                    code: "unsupported_allow_failure_retry",
-                    message: format!(
-                        "task '{}' has type '{}': a retry on an AllowFailure block is not \
-                         supported; put `retry:` on the child task that should be retried. Roadmap \
-                         package #9 lifts it",
-                        task.id, task.r#type
-                    ),
-                    path: format!("{path}.retry"),
-                });
-            }
+            // A block-level `retry:` on an `AllowFailure` validates as any other
+            // flowable's does (package 9b, 2026-11-25). The block is never retried
+            // as a unit; the failing child inherits the block's `retry:`
+            // (`executor::retry::inherited_retry`) and the block maps the child's
+            // post-retry terminal (`executor::allow_failure::block_state`). This is
+            // `valids/retry-with-flowable-errors`, which matches Kestra's golden.
+            // It was refused as `unsupported_allow_failure_retry` from #680 until
+            // 9b measured the interaction.
         }
         // 9a Task 6. A `Pause` is a full flowable now: `tasks:`, `errors:`,
         // `finally:`, `onPause:` and a valid `behavior:` all plan and run
@@ -6190,21 +6184,6 @@ mod tests {
         hints: &'static [&'static str],
     }
 
-    fn allow_failure_retry_body(ty: &str) -> Vec<String> {
-        vec![
-            "id: c".into(),
-            format!("type: {ty}"),
-            "retry:".into(),
-            "  type: constant".into(),
-            "  interval: PT1S".into(),
-            "  maxAttempts: 3".into(),
-            "tasks:".into(),
-            "  - id: inner".into(),
-            "    type: core.log".into(),
-            "    message: hi".into(),
-        ]
-    }
-
     fn loop_until_gap_body(ty: &str) -> Vec<String> {
         vec![
             "id: c".into(),
@@ -6223,19 +6202,11 @@ mod tests {
         vec!["id: c".into(), format!("type: {ty}")]
     }
 
+    // `unsupported_allow_failure_retry` was the first row here until package 9b
+    // (2026-11-25) lifted the refusal: an `AllowFailure` block `retry:` validates
+    // as a normal flowable now (`valids/retry-with-flowable-errors` matches the
+    // golden), so no construct draws that code any more.
     const REFUSED: &[Refused] = &[
-        Refused {
-            code: "unsupported_allow_failure_retry",
-            spellings: &[
-                "io.kestra.plugin.core.flow.AllowFailure",
-                "core.allowfailure",
-                "io.kestra.plugin.core.flow.allowFAILURE",
-                "core.AllowFailure",
-            ],
-            body: allow_failure_retry_body,
-            suffix: ".retry",
-            hints: &["put `retry:` on the child task that should be retried. Roadmap package #9 lifts it"],
-        },
         Refused {
             code: "unsupported_loop_until_property",
             spellings: &[
@@ -6248,7 +6219,10 @@ mod tests {
             ],
             body: loop_until_gap_body,
             suffix: ".checkFrequency.maxIterations",
-            hints: &["'checkFrequency.maxIterations'", "must be a literal value. Roadmap package #9 lifts it"],
+            hints: &[
+                "'checkFrequency.maxIterations'",
+                "must be a literal value. Roadmap package #9 lifts it",
+            ],
         },
         Refused {
             code: "unsupported_flow_task",

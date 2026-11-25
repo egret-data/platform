@@ -1056,8 +1056,10 @@ def check_inputs(flows, kinds, golden, baseline):
     # 22 since 9a Task 6 banked the three `Pause`-body flows
     # (`valids/pause-behavior`, `valids/pause-errors-finally-after-execution`,
     # `valids/pause_on_pause`), which are a full flowable now and match the golden.
-    if len(baseline) != 22:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 22; the split "
+    # 21 since 9b Task 3 (2026-11-25) banked `valids/retry-with-flowable-errors`
+    # (an `AllowFailure` block `retry:` is a golden-matching run now).
+    if len(baseline) != 21:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 21; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1707,8 +1709,8 @@ def self_test():
          "not 273",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 22",
-         "not 22",
+    case("baseline.txt is no longer 21",
+         "not 21",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

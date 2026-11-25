@@ -4332,9 +4332,11 @@ mod tests {
             format!("id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n")
         };
         let mut probes: Vec<(&str, String)> = Vec::new();
-        // A block-level `retry:` on an AllowFailure is refused (spec §2). Every
-        // spelling of the type gets the refusal, and the flow without the retry
-        // is planned (see `every_static_refusal_...` and the plan test).
+        // A block-level `retry:` on an AllowFailure used to be refused here as
+        // `unsupported_allow_failure_retry`. Package 9b (2026-11-25) lifted that
+        // refusal: the block validates and plans CLEAN as a flowable now, under
+        // every spelling. The positive assertion is below the refusal loop, so a
+        // regression that re-introduced the refusal would fail there.
         for ty in [
             "io.kestra.plugin.core.flow.AllowFailure",
             "core.allowfailure",
@@ -4343,7 +4345,14 @@ mod tests {
             let with_retry = format!(
                 "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
             );
-            probes.push(("unsupported_allow_failure_retry", with_retry));
+            let plan = build_plan(&with_retry).unwrap_or_else(|e| {
+                panic!("{ty}: an AllowFailure block retry must plan clean: {e}")
+            });
+            assert!(
+                matches!(plan.tasks[0].kind, TaskKind::AllowFailure { .. }),
+                "{ty}: it plans as the AllowFailure flowable, got {:?}",
+                plan.tasks[0].kind
+            );
         }
         for ty in [
             "io.kestra.plugin.core.flow.LoopUntil",
@@ -4609,11 +4618,11 @@ mod tests {
         // were `io.kestra.plugin.core.execution.SetVariables`, `UnsetVariables`
         // or `Labels` are gone -- all three are registered and executor-level
         // (`spec::registry::EXECUTOR_LEVEL`, planned `TaskKind::ExecutionUpdate`).)
-        PublishedButRefused {
-            id: "valids/retry-with-flowable-errors",
-            cause: "an `AllowFailure` flowable with `retry:` on the block itself. Kestra retries the failing child; egret refuses the block-level `retry:` on purpose (spec §2, a non-goal for the AllowFailure flowable package), so the flow is refused where Kestra ran it.",
-            codes: &["unsupported_allow_failure_retry"],
-        },
+        //
+        // (2026-11-25, 9b Task 3: the `valids/retry-with-flowable-errors` row is
+        // gone -- an `AllowFailure` block `retry:` is no longer refused
+        // (`unsupported_allow_failure_retry` lifted), so the flow plans, publishes
+        // and runs the golden. The sweep below would name it if any row were left.)
     ];
 
     /// **Every flow this Kestra published with 200 must plan, except two
@@ -5684,9 +5693,12 @@ mod tests {
         );
         assert_eq!(
             (flows, declared, planned),
-            (24, 25, 25),
-            "24 corpus flows declare a `retry:` on a task `build_plan` plans (or \
-             on the flow), 25 policies between them -- one more than before \
+            (25, 26, 26),
+            "25 corpus flows declare a `retry:` on a task `build_plan` plans (or \
+             on the flow), 26 policies between them. 9b Task 3 (2026-11-25) added \
+             `valids/retry-with-flowable-errors`: its block `retry:` on `retry_block` \
+             plans now that the AllowFailure block `retry:` is no longer refused \
+             (24, 25, 25 before). One more than before \
              `valids/allow-failure-with-retry`, whose child retry plans now that \
              AllowFailure is planned (spec §5.2). Before that it was 23, 24, 24; \
              25 and 26 until no-silent-stall Task 1, whose static refusals made \
@@ -11121,9 +11133,10 @@ mod allow_failure_drive_tests {
         assert_eq!(flow, RunState::Success);
     }
 
-    /// **Package 9b Task 1: a `retry:` on an `AllowFailure` block**, driven
-    /// through the stored-plan seam because `spec::validate` still refuses it
-    /// (`unsupported_allow_failure_retry`). This is `valids/retry-with-flowable-errors`
+    /// **Package 9b: a `retry:` on an `AllowFailure` block.** Pinned by Task 1
+    /// behind the (now lifted) validate refusal; 9b Task 3 lifted
+    /// `unsupported_allow_failure_retry`, so this drives the flow through
+    /// `build_plan` directly. This is `valids/retry-with-flowable-errors`
     /// with the KV counter simulated: `run_script` fails while the counter is
     /// below 2 and succeeds once `incr_counter` has bumped it.
     ///
@@ -11142,11 +11155,8 @@ mod allow_failure_drive_tests {
             "/oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"
         ))
         .expect("the corpus flow");
-        assert!(
-            super::build_plan(&src).is_err(),
-            "the refusal is still active, so this must go through plan_stored"
-        );
-        let plan = super::plan_stored(&src).expect("a stored source plans");
+        let plan = super::build_plan(&src)
+            .expect("the AllowFailure block retry validates and plans now (9b Task 3)");
         let block = plan.tasks.iter().find(|t| t.id == "retry_block").unwrap();
         assert!(
             matches!(block.kind, TaskKind::AllowFailure { .. }),
@@ -11274,7 +11284,8 @@ mod allow_failure_drive_tests {
             "/oracle-exec/corpus/valids/retry-with-flowable-errors.yaml"
         ))
         .expect("the corpus flow");
-        let plan = super::plan_stored(&src).expect("a stored source plans");
+        let plan = super::build_plan(&src)
+            .expect("the AllowFailure block retry validates and plans now (9b Task 3)");
         let mut state = ExecutionState::new(&plan);
         let ix_of = |state: &ExecutionState, id: &str| {
             (0..state.runs.len()).find(|&i| plan.tasks[state.runs[i].task].id == id)
@@ -11344,8 +11355,9 @@ mod allow_failure_drive_tests {
 
     const RETRY_BLOCK: &str = "id: afr\nnamespace: io.kestra.tests\ntasks:\n  - id: block\n    type: io.kestra.plugin.core.flow.AllowFailure\n    tasks:\n      - id: ko\n        type: io.kestra.plugin.core.execution.Fail\n    errors:\n      - id: handler\n        type: io.kestra.plugin.core.debug.Return\n        format: h\n    retry:\n      type: constant\n      interval: PT0.5S\n      maxAttempts: 3\n{WARN}  - id: after\n    type: io.kestra.plugin.core.debug.Return\n    format: after\n";
 
-    /// Drives `RETRY_BLOCK` (child `ko` ALWAYS fails) through `plan_stored`,
-    /// advancing the clock to each `not_before`. Returns the surfaced runs
+    /// Drives `RETRY_BLOCK` (child `ko` ALWAYS fails) through `build_plan` (the
+    /// 9b-lifted validator accepts the block `retry:`), advancing the clock to
+    /// each `not_before`. Returns the surfaced runs
     /// `(task id, attempts, last state)`, the flow's state history.
     #[allow(clippy::type_complexity)]
     fn run_retry_block(
@@ -11359,11 +11371,8 @@ mod allow_failure_drive_tests {
                 ""
             },
         );
-        assert!(
-            super::build_plan(&src).is_err(),
-            "the refusal is still active, so this must go through plan_stored"
-        );
-        let plan = super::plan_stored(&src).expect("a stored source plans");
+        let plan = super::build_plan(&src)
+            .expect("the AllowFailure block retry validates and plans now (9b Task 3)");
         let mut state = ExecutionState::new(&plan);
         let mut now = T0;
         for _ in 0..400 {

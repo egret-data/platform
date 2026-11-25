@@ -186,6 +186,42 @@ maps that to block `WARNING`. This is parity, not measured from a vendored flow;
 Task 2 pins it from the executor's own `block_state` behavior, and any observed
 divergence is recorded here.
 
+**Three divergence carries (Task 3 analysis — reasoned, not vendored).** The one
+corpus flow exercises only a single-task `errors:` handler that SUCCEEDS and whose
+output nothing downstream reads. The `EmptyRun`-the-superseded-errors mechanism
+(`retry::reopen_due` + `block_error_runs`, holding the retry timer on
+`isErrorOrFinallyHandlingPending` until the block's `errors:` runs are terminal)
+was examined for three unmeasured sub-shapes. **None is a correctness hole; none
+gets a new refusal.**
+
+1. **An `errors:` handler that itself FAILS.** `reopen_due` holds the retry timer
+   until every `block_error_runs` entry `is_terminal`, and `RunState::Failed` IS
+   terminal (`state.rs:728`), so a failed handler releases the hold (no hang) and
+   the superseded run is still `EmptyRun`'d. The handler's side effect did not
+   happen, so the child's next attempt sees the same precondition and fails again;
+   the block retries until `maxAttempts`, then `block_state` maps the child's
+   `FAILED` to block `WARNING`. Sound terminal, and the same outcome Kestra
+   produces when the increment never runs.
+2. **A multi-task `errors:` list.** `block_error_runs` collects every `errors:`
+   root AND its descendants, `current_list` starts the whole list as any flowable
+   `errors:` does, the hold waits for ALL of them to terminate, and `EmptyRun`
+   deletes all of them. Not special-cased to one task; behaves like the ordinary
+   flowable `errors:` path. Sound.
+3. **An `errors:` output a later task reads.** `EmptyRun` deletes the superseded
+   error run and its outputs, scoped (via `is_descendant_of`) to the block's own
+   `errors:` subtree — a task OUTSIDE the block is never emptied. A downstream
+   reference to that deleted output renders as a missing value and FAILS the
+   reader through the normal render path (no panic, no silent-wrong-result), which
+   matches Kestra deleting the superseded error runs: the output is not part of
+   the final record there either. The successful final attempt runs no `errors:`,
+   so there is never a surviving errors output to read. Sound.
+
+All three yield a sound terminal rather than a panic, a hang, or a silently-wrong
+result, so Task 3 ships the lifted behavior as-is and does not add a narrowing
+refusal. They remain reasoned (from the executor's own code and Kestra's
+`ExecutorService`) rather than measured, because no vendored corpus flow drives
+them.
+
 ## 7. Testing
 
 - **Lift-the-refusal:** an `AllowFailure` with a block `retry:` validates clean

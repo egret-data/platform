@@ -9,8 +9,10 @@
 //! `flowable::allow_failure`) -- **corrected 2026-10-17 (kill Task 2 fix round
 //! 1):** this said it was still planned opaque and refused at validate as
 //! `unsupported_allow_failure`; that was true from no-silent-stall Task 1 until
-//! #680 (`a0e232b3`) made it a flowable, and validate now refuses only a block
-//! `retry:` (`unsupported_allow_failure_retry`) --
+//! #680 (`a0e232b3`) made it a flowable. A block `retry:` was then refused as
+//! `unsupported_allow_failure_retry` until package 9b (2026-11-25) lifted it: the
+//! failing child inherits the block's `retry:` and runs the attempts, a
+//! golden-matching run (`valids/retry-with-flowable-errors`) --
 //! while
 //! `allowFailure:` is a `Task.java` property every task in the language may
 //! write. Four of `oracle-exec/baseline.txt`'s twelve entries for this row hold
