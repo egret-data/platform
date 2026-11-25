@@ -64,13 +64,16 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
 use futures_util::io::AsyncBufReadExt as _;
-use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
-use kube::api::{Api, AttachParams, DeleteParams, ListParams, LogParams, PostParams};
+use k8s_openapi::api::core::v1::{ContainerStatus, Pod, Secret};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kube::api::{
+    Api, AttachParams, DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::pod_spec::{
-    self, attempt_of, pod_name, PodConfig, DELETE_ANNOTATION, ENDED_MARKER, FILES_IN, FILES_OUT,
-    MAIN, MARKERS_DIR, READY_MARKER, STDERR_FILE,
+    self, attempt_of, pod_name, secret_name, PodConfig, DELETE_ANNOTATION, ENDED_MARKER, FILES_IN,
+    FILES_OUT, MAIN, MARKERS_DIR, READY_MARKER, STDERR_FILE,
 };
 use crate::logs::{LogLevel, LogRepo, RunIdentity};
 use crate::scripts::RunnerSpec;
@@ -195,7 +198,17 @@ impl KubernetesRunner {
 
     /// The pod by name; `Ok(false)` when it already existed (re-attach),
     /// `Ok(true)` when this call created it.
-    async fn get_or_create(&self, name: &str, pod: &Pod) -> Result<bool> {
+    ///
+    /// `secret_env` non-empty: on a create, the per-attempt Secret is created
+    /// FIRST (the pod references it), then the pod, then the Secret gets the
+    /// pod as its owner so k8s GC deletes it with the pod. A re-attach never
+    /// touches the Secret: it already exists under the deterministic name.
+    async fn get_or_create(
+        &self,
+        name: &str,
+        pod: &Pod,
+        secret: Option<(&str, &BTreeMap<String, String>)>,
+    ) -> Result<bool> {
         if let Some(existing) = self
             .pods()
             .get_opt(name)
@@ -209,8 +222,53 @@ impl KubernetesRunner {
             }
             return Ok(false);
         }
+        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), &self.cfg.namespace);
+        if let Some((secret_name, values)) = secret {
+            let body = Secret {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(secret_name.to_string()),
+                    namespace: Some(self.cfg.namespace.clone()),
+                    ..Default::default()
+                },
+                string_data: Some(values.clone()),
+                ..Default::default()
+            };
+            match secrets.create(&PostParams::default(), &body).await {
+                Ok(_) => {}
+                // Left by an earlier create of this same attempt whose pod
+                // create then failed: same deterministic content.
+                Err(kube::Error::Api(ae)) if ae.code == 409 => {}
+                Err(e) => {
+                    return Err(Error::InvalidInput(format!(
+                        "cannot create the Secret for secret() env in namespace {}: {e} \
+                         (the engine service account needs `create` on Secrets there)",
+                        self.cfg.namespace
+                    )))
+                }
+            }
+        }
         match self.pods().create(&PostParams::default(), pod).await {
-            Ok(_) => Ok(true),
+            Ok(created) => {
+                if let Some((secret_name, _)) = secret {
+                    let uid = created.metadata.uid.clone().ok_or_else(|| {
+                        internal("reading the created pod's uid", "the API returned none")
+                    })?;
+                    let owner = OwnerReference {
+                        api_version: "v1".into(),
+                        kind: "Pod".into(),
+                        name: name.to_string(),
+                        uid,
+                        controller: Some(false),
+                        block_owner_deletion: Some(false),
+                    };
+                    let patch = serde_json::json!({"metadata": {"ownerReferences": [owner]}});
+                    secrets
+                        .patch(secret_name, &PatchParams::default(), &Patch::Merge(&patch))
+                        .await
+                        .map_err(|e| internal("setting the Secret's owner to the task pod", e))?;
+                }
+                Ok(true)
+            }
             // Another holder created it between the read and the create.
             Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(false),
             // The API refused the pod as written: an author's value (an env
@@ -1361,7 +1419,10 @@ impl TaskRunner for KubernetesRunner {
         let pod = pod_spec::build(task, commands, spec, &self.cfg).map_err(Error::InvalidInput)?;
         let name = pod_name(task.run_id, attempt_of(task));
 
-        let created = self.get_or_create(&name, &pod).await?;
+        let secret_name = secret_name(task.run_id, attempt_of(task));
+        let secret = (!commands.secret_env.is_empty())
+            .then_some((secret_name.as_str(), &commands.secret_env));
+        let created = self.get_or_create(&name, &pod, secret).await?;
         if !created {
             tracing::info!(run = %task.run_id, pod = %name, "re-attaching to the task's existing pod");
         }

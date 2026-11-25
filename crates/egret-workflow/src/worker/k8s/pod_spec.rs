@@ -45,9 +45,9 @@
 use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, LocalObjectReference, Pod,
-    PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile, SecurityContext, Volume,
-    VolumeMount,
+    Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, LocalObjectReference, Pod,
+    PodSecurityContext, PodSpec, ResourceRequirements, SeccompProfile, SecretKeySelector,
+    SecurityContext, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -271,6 +271,13 @@ pub fn pod_name(run_id: uuid::Uuid, attempt: i32) -> String {
     format!("{RUN_NAME_PREFIX}{}-{attempt}", run_id.simple())
 }
 
+/// The per-attempt Secret holding `cmds.secret_env`: the pod's name plus
+/// `-secrets`, so it is deterministic per (run, attempt) and a re-attach finds
+/// the Secret it already created.
+pub fn secret_name(run_id: uuid::Uuid, attempt: i32) -> String {
+    format!("{}-secrets", pod_name(run_id, attempt))
+}
+
 /// The attempt number a pod is named and labelled with.
 pub fn attempt_of(task: &TaskInput) -> i32 {
     i32::try_from(task.attempt).unwrap_or(i32::MAX)
@@ -330,6 +337,22 @@ pub fn build(
         name: k.clone(),
         value: Some(v.clone()),
         value_from: None,
+    }));
+    // `cmds.env` and `cmds.secret_env` are disjoint (the handler removes the
+    // secret keys from `env`). A secret's value never enters the pod spec: it
+    // is read from the per-attempt Secret by reference.
+    let secret = secret_name(task.run_id, attempt_of(task));
+    env.extend(cmds.secret_env.keys().map(|k| EnvVar {
+        name: k.clone(),
+        value: None,
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: secret.clone(),
+                key: k.clone(),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        }),
     }));
 
     let main = Container {
@@ -734,6 +757,31 @@ mod tests {
             secret_env: BTreeMap::new(),
             secret_masks: vec![],
         }
+    }
+
+    #[test]
+    fn secret_env_emits_secret_key_ref_not_inline() {
+        let mut c = cmds();
+        c.env.insert("PLAIN".into(), "hi".into());
+        c.secret_env.insert("TOK".into(), "shh".into());
+        let p = built(&c, &k8s());
+        let env = container(&p, MAIN).env.clone().expect("env");
+        let plain = env.iter().find(|e| e.name == "PLAIN").unwrap();
+        assert_eq!(plain.value.as_deref(), Some("hi"));
+        assert!(plain.value_from.is_none());
+        let tok = env.iter().find(|e| e.name == "TOK").unwrap();
+        assert!(tok.value.is_none());
+        let sel = tok
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
+        assert_eq!(sel.key, "TOK");
+        assert_eq!(sel.optional, Some(false));
+        assert_eq!(sel.name, secret_name(task().run_id, attempt_of(&task())));
+        assert!(!format!("{p:?}").contains("shh"));
     }
 
     fn k8s() -> RunnerSpec {
