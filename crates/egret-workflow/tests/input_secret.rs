@@ -17,6 +17,9 @@ use uuid::Uuid;
 
 const SENTINEL: &str = "tok-SENTINEL-9a";
 
+/// The tests tick the shared queue with different handlers, so one runs at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Token;
 
 #[async_trait::async_trait]
@@ -52,6 +55,7 @@ tasks:
 
 #[tokio::test]
 async fn a_secret_default_is_resolved_at_start_sealed_and_never_stored_in_clear() {
+    let _serial = SERIAL.lock().await;
     let Some(db) = common::db().await else { return };
     let _ = secrets::install(Arc::new(Token));
     egret_workflow::secret_inputs::install_for_tests();
@@ -130,4 +134,111 @@ async fn a_secret_default_is_resolved_at_start_sealed_and_never_stored_in_clear(
             .any(|m| m.contains("got ") && m.contains("******")),
         "the Log ran, masked: {logs:?}"
     );
+}
+
+async fn settle_all(pool: &sqlx::PgPool) {
+    let reg = Handlers::with_core_tasks(None);
+    for _ in 0..64 {
+        if tick(pool, 16, &reg).await.expect("tick") == 0 {
+            break;
+        }
+    }
+}
+
+async fn leaks(pool: &sqlx::PgPool, ex: Uuid, needle: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM workflow.task_logs t \
+                  WHERE t.execution_id = $1 AND t::text LIKE '%' || $2 || '%') \
+              + (SELECT count(*) FROM workflow.task_runs t \
+                  WHERE t.execution_id = $1 AND t::text LIKE '%' || $2 || '%') \
+              + (SELECT count(*) FROM workflow.executions e \
+                  WHERE e.id = $1 AND (to_jsonb(e) - 'source')::text LIKE '%' || $2 || '%')",
+    )
+    .bind(ex)
+    .bind(needle)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The property that justifies sealing from the DECLARATION: a replay that
+/// reuses the stored inputs (revealed in clear, then split again) seals the
+/// value again instead of writing it into the new row.
+#[tokio::test]
+async fn a_replay_with_reused_inputs_seals_the_secret_default_again() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = common::db().await else { return };
+    let _ = secrets::install(Arc::new(Token));
+    egret_workflow::secret_inputs::install_for_tests();
+    let pool = db.pool.clone();
+    let (ws, user) = common::seed_workspace(&db).await;
+    let original = start_execution(&pool, ws, None, FLOW, serde_json::json!({}))
+        .await
+        .expect("start");
+    settle_all(&pool).await;
+
+    let replay = egret_workflow::worker::replay_execution(
+        &pool,
+        &egret_workflow::worker::ReplayRequest {
+            workspace_id: ws,
+            from: original,
+            source: FLOW,
+            kind: egret_workflow::worker::ReplayKind::Whole,
+            inputs: egret_workflow::worker::ReplayInputs::Reuse,
+            started_by: user.0,
+            id: Uuid::new_v4(),
+            input_files: Vec::new(),
+        },
+    )
+    .await
+    .expect("replay")
+    .expect("not refused");
+    settle_all(&pool).await;
+    assert_ne!(replay, original);
+
+    let inputs: serde_json::Value =
+        sqlx::query_scalar("SELECT inputs FROM workflow.executions WHERE id = $1")
+            .bind(replay)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(inputs["x"], egret_workflow::secret_inputs::MASK);
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'real'",
+    )
+    .bind(replay)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "SUCCESS", "the replay still renders the real value");
+    assert_eq!(
+        leaks(&pool, replay, SENTINEL).await,
+        0,
+        "replayed row clean"
+    );
+}
+
+/// A value POSTED for an input whose default calls `secret()` is sealed too
+/// (the set is the declaration's): over-sealing, never under-sealing.
+#[tokio::test]
+async fn a_posted_value_for_such_an_input_is_sealed_too() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = common::db().await else { return };
+    let _ = secrets::install(Arc::new(Token));
+    egret_workflow::secret_inputs::install_for_tests();
+    let pool = db.pool.clone();
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let posted = "posted-SENTINEL-4c";
+    let ex = start_execution(&pool, ws, None, FLOW, serde_json::json!({"x": posted}))
+        .await
+        .expect("start");
+    settle_all(&pool).await;
+    let inputs: serde_json::Value =
+        sqlx::query_scalar("SELECT inputs FROM workflow.executions WHERE id = $1")
+            .bind(ex)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(inputs["x"], egret_workflow::secret_inputs::MASK);
+    assert_eq!(leaks(&pool, ex, posted).await, 0);
 }
