@@ -18,6 +18,8 @@
 - **Adding a column to `workflow.executions` means updating EVERY SELECT that loads it into an `Execution`/render context** — Task 0 enumerates them (exhaustiveness: a missed SELECT silently drops the value). A chart/golden change must `cargo test -p egret-config` (the 10b lesson: the exact-RBAC golden).
 - Migration next-free = **0243** (latest shipped 0242). Reconfirm at build time and renumber above main + open PRs if taken (migration numbers are a shared namespace).
 - `secret()` interaction: NONE — egret trigger outputs are not secret-typed; do not touch 10a machinery.
+- **BINDING GUARD 1 (gate on fire):** bind `trigger` ONLY when the execution's `trigger` column is non-null (a genuinely trigger-fired execution). NEVER bind an unconditional/empty `trigger` root. Proof obligation: a STANDALONE (API POST, no firing trigger) run of a `{{ trigger.* }}`-reading flow MUST still fail-render (the oracle driver runs every corpus flow standalone and never fires a trigger; its golden FAILS these tasks — an empty-root bind would regress 5 flows FAILED→SUCCESS vs golden). Task 0 measured: under the non-null gate, zero ratchet entries and zero census constants (LIVE 299 / VALIDATE_REFUSED 21 / executor_matches_golden) move.
+- **BINDING GUARD 2 (context b only):** bind `trigger` ONLY in the fired flow's TASK render (`build_context` via `load_with`). Do NOT bind `trigger` in the Flow-trigger's OWN `inputs:`/`when:` render context (render.rs ~1086-1097) — that stays unbound, which is GENUINE Kestra parity (w13: `Flow.evaluate` throws "Unable to find trigger"). Leave that code path unchanged.
 
 ## File Structure
 - `migrations/0243_execution_trigger.sql` (new) — `ALTER TABLE workflow.executions ADD COLUMN trigger jsonb`.
