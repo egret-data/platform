@@ -268,7 +268,6 @@ impl Script {
             None => Vec::new(),
         };
         let before = render_all(type_id, "beforeCommands", &p.before_commands, &cx)?;
-        let author_env = render_values(type_id, "env", &p.env, &cx)?;
         let rendered_inputs = render_values(type_id, "inputFiles", &p.input_files, &cx)?;
         let (mut input_files, stored_inputs, ns_inputs) =
             self.stage_inputs(type_id, task, rendered_inputs)?;
@@ -323,7 +322,7 @@ impl Script {
             p.kind,
             ScriptKind::PythonCommands | ScriptKind::PythonScript
         );
-        let mut env: BTreeMap<String, String> = if python {
+        let env: BTreeMap<String, String> = if python {
             ENV_DEFAULTS
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
@@ -331,7 +330,6 @@ impl Script {
         } else {
             BTreeMap::new()
         };
-        env.extend(author_env);
 
         let cmds = TaskCommands {
             container_image: image,
@@ -353,6 +351,7 @@ impl Script {
             cmds,
             ns_inputs,
             namespace_files,
+            cx,
         })
     }
 
@@ -588,6 +587,9 @@ struct Rendered {
     ns_inputs: BTreeMap<String, String>,
     /// The rendered `namespaceFiles` block, if the task has one.
     namespace_files: Option<RenderedNamespaceFiles>,
+    /// The exact render context `render` built, reused by `run` to resolve the
+    /// author `env` (which may call `secret()`; `render` is synchronous).
+    cx: crate::runners::RenderContext,
 }
 
 /// What makes an `inputFiles` value a file in internal storage rather than
@@ -612,6 +614,62 @@ fn prefix(fail_fast: bool, before: Vec<String>) -> Vec<String> {
         out.push(format!("echo '{LOG_INFO_MARKER}'"));
     }
     out
+}
+
+/// Resolve the author `env` against `cx`: `(inline, secret, masks)`.
+async fn resolve_env(
+    task: &TaskInput,
+    author_env: &BTreeMap<String, String>,
+    cx: &crate::runners::RenderContext,
+) -> std::result::Result<
+    (
+        BTreeMap<String, String>,
+        BTreeMap<String, String>,
+        Vec<String>,
+    ),
+    String,
+> {
+    if author_env.is_empty() {
+        return Ok((BTreeMap::new(), BTreeMap::new(), Vec::new()));
+    }
+    match crate::runners::secrets::current() {
+        // use_secrets on: render with `secret()` support.
+        Some(source) => {
+            let props: serde_json::Map<String, serde_json::Value> = author_env
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+            let (rendered, resolved) = crate::runners::secrets::render_with_secrets(
+                &props,
+                cx,
+                task.workspace_id,
+                source.as_ref(),
+            )
+            .await
+            .map_err(|e| format!("{}: `env` did not render: {e}", task.type_id))?;
+            let mut plain = BTreeMap::new();
+            let mut secret_env = BTreeMap::new();
+            for (k, raw) in author_env {
+                let value = rendered
+                    .get(k)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if crate::runners::secrets::text_uses_secret(raw) {
+                    secret_env.insert(k.clone(), value);
+                } else {
+                    plain.insert(k.clone(), value);
+                }
+            }
+            Ok((plain, secret_env, resolved.values))
+        }
+        // use_secrets off: the confined render, as before.
+        None => Ok((
+            render_values(&task.type_id, "env", author_env, cx)?,
+            BTreeMap::new(),
+            Vec::new(),
+        )),
+    }
 }
 
 #[async_trait::async_trait]
@@ -642,10 +700,22 @@ impl TaskHandler for Script {
             mut cmds,
             ns_inputs,
             namespace_files,
+            cx,
         } = match self.render(type_id, task, &parsed) {
             Ok(r) => r,
             Err(why) => return Ok(Outcome::failed_with(why)),
         };
+        // 2a. the author `env`, with `secret()` support (package 10b): the
+        // secret-bearing entries go to the secure channel, and every resolved
+        // value is collected for masking.
+        match resolve_env(task, &parsed.env, &cx).await {
+            Ok((plain, secret_env, masks)) => {
+                cmds.env.extend(plain);
+                cmds.secret_env = secret_env;
+                cmds.secret_masks = masks;
+            }
+            Err(why) => return Ok(Outcome::failed_with(why)),
+        }
         // 2b. namespace files (W9b Task 5): staged before anything uses the
         // inputs, and before the gate, so a refusal calls no runner.
         if let Err(why) = self
