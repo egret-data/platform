@@ -22,6 +22,10 @@ const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
 const FLOW: &str = "io.kestra.plugin.core.trigger.Flow";
 const SRC: &str = "id: f\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
 
+fn src_reading(tpl: &str) -> String {
+    format!("id: f\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.debug.Return\n    format: \"{tpl}\"\n")
+}
+
 fn schedule_record() -> Value {
     json!({
         "id": "daily", "type": SCHEDULE,
@@ -48,6 +52,7 @@ async fn setup(pool: &sqlx::PgPool) -> Uuid {
 async fn born(
     pool: &sqlx::PgPool,
     ws: Uuid,
+    source: &str,
     trigger: Option<Value>,
     scheduled: bool,
     event: Option<i64>,
@@ -58,7 +63,7 @@ async fn born(
         NewExecution {
             workspace_id: ws,
             flow_id: None,
-            source: SRC,
+            source,
             inputs: json!({}),
             trigger,
             scheduled_date: scheduled.then(chrono::Utc::now),
@@ -88,55 +93,94 @@ async fn render(pool: &sqlx::PgPool, ex: Uuid, tpl: &str) -> Result<String, Stri
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_schedule_fire_binds_date_and_context(pool: sqlx::PgPool) {
+async fn a_schedule_fired_task_renders_date_and_context(pool: sqlx::PgPool) {
     let ws = setup(&pool).await;
-    let ex = born(&pool, ws, Some(schedule_record()), true, None).await;
-    assert_eq!(
-        render(&pool, ex, "{{ trigger.date }}").await.unwrap(),
-        "2026-11-25T07:00:00.000000+07:00"
-    );
-    assert_eq!(
-        render(&pool, ex, "{{ trigger._context.type }}")
-            .await
-            .unwrap(),
-        SCHEDULE
-    );
-    assert_eq!(
-        render(&pool, ex, "{{ trigger._context.id }}")
-            .await
-            .unwrap(),
-        "daily"
-    );
+    for (tpl, want) in [
+        ("{{ trigger.date }}", "2026-11-25T07:00:00.000000+07:00"),
+        ("{{ trigger._context.type }}", SCHEDULE),
+        ("{{ trigger._context.id }}", "daily"),
+    ] {
+        let ex = born(
+            &pool,
+            ws,
+            &src_reading(tpl),
+            Some(schedule_record()),
+            true,
+            None,
+        )
+        .await;
+        let (msg, state) = task_message(&pool, ex, tpl).await;
+        assert_eq!(msg.as_deref(), Some(want), "{tpl} (state {state})");
+    }
 }
 
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_flow_fire_binds_the_source_values(pool: sqlx::PgPool) {
+async fn a_flow_fired_task_renders_the_source_values(pool: sqlx::PgPool) {
     let ws = setup(&pool).await;
-    let ex = born(&pool, ws, Some(flow_record()), false, Some(1)).await;
-    assert_eq!(
-        render(&pool, ex, "{{ trigger.outputs.x }}").await.unwrap(),
-        "ten"
-    );
-    assert_eq!(
-        render(&pool, ex, "{{ trigger.executionId }}")
-            .await
-            .unwrap(),
-        "exec-123"
-    );
+    for (i, (tpl, want)) in [
+        ("{{ trigger.outputs.x }}", "ten"),
+        ("{{ trigger.executionId }}", "exec-123"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ex = born(
+            &pool,
+            ws,
+            &src_reading(tpl),
+            Some(flow_record()),
+            false,
+            Some(i as i64 + 1),
+        )
+        .await;
+        let (msg, state) = task_message(&pool, ex, tpl).await;
+        assert_eq!(msg.as_deref(), Some(want), "{tpl} (state {state})");
+    }
 }
 
+/// Guard 2: the Flow trigger's OWN `when`/`inputs` context
+/// (`execution_render_context`) has no `trigger`, even when the SOURCE was
+/// itself trigger-fired.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_flow_triggers_own_context_has_no_trigger_even_for_a_fired_source(pool: sqlx::PgPool) {
+    let ws = setup(&pool).await;
+    let ex = born(&pool, ws, SRC, Some(schedule_record()), true, None).await;
+    let err = render(&pool, ex, "{{ trigger.executionId }}")
+        .await
+        .expect_err("the Flow trigger's when/inputs context must not bind `trigger`");
+    assert!(err.contains("undefined"), "{err}");
+    assert!(render(&pool, ex, "{{ flow.id }}").await.is_ok(), "control");
+}
+
+/// Guard 1: a standalone execution's task cannot read `trigger.*`.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_standalone_execution_has_no_trigger_binding(pool: sqlx::PgPool) {
     let ws = setup(&pool).await;
-    let ex = start_execution(&pool, ws, None, SRC, json!({}))
+    let src = src_reading("{{ trigger.x }}");
+    let ex = start_execution(&pool, ws, None, &src, json!({}))
         .await
         .unwrap();
-    let err = render(&pool, ex, "{{ trigger.x }}")
-        .await
-        .expect_err("no fire, no `trigger`");
-    assert!(err.contains("undefined"), "{err}");
-    // control: the same loader still renders what is bound.
-    assert!(render(&pool, ex, "{{ flow.id }}").await.is_ok());
+    let (msg, state) = task_message(&pool, ex, "").await;
+    assert_eq!(msg, None, "the task must not render");
+    assert_eq!(state, "FAILED");
+}
+
+/// Born with a trigger, the task `a` is driven by the real core handlers;
+/// returns what it rendered (`Return.outputs.value`) and the task's state.
+async fn task_message(pool: &sqlx::PgPool, ex: Uuid, _tpl: &str) -> (Option<String>, String) {
+    let reg = egret_workflow::worker::Handlers::with_core_tasks(None);
+    for _ in 0..30 {
+        egret_workflow::worker::tick(pool, 64, &reg).await.unwrap();
+    }
+    let (state, outputs): (String, Option<Value>) = sqlx::query_as(
+        "SELECT state, outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let msg = outputs.and_then(|o| o["value"].as_str().map(String::from));
+    (msg, state)
 }
 
 struct Ok_;
@@ -158,7 +202,7 @@ impl Registry for Ok_ {
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_replay_of_a_schedule_fire_keeps_the_binding(pool: sqlx::PgPool) {
     let ws = setup(&pool).await;
-    let old = born(&pool, ws, Some(schedule_record()), true, None).await;
+    let old = born(&pool, ws, SRC, Some(schedule_record()), true, None).await;
     for _ in 0..30 {
         egret_workflow::worker::tick(&pool, 64, &Ok_).await.unwrap();
     }

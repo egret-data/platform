@@ -821,11 +821,18 @@ impl Surface {
     /// is a render with no run of its own — nothing in W3b takes it, and it is
     /// here so that a future caller has to say so rather than pass a run it
     /// invented.
+    ///
+    /// `bind_trigger` is `true` for a render of the fired flow's own tasks and
+    /// `false` for a Flow trigger's `when`/`inputs` ([`execution_render_context`]),
+    /// which Kestra evaluates with no `trigger` in scope even when the source
+    /// was itself trigger-fired. Even when `true`, a standalone execution gets
+    /// no `trigger` key.
     pub(super) fn context(
         &self,
         plan: &Plan,
         state: &ExecutionState,
         run: Option<RunIx>,
+        bind_trigger: bool,
     ) -> RenderContext {
         let mut cx = RenderContext::new();
         cx.insert("inputs", self.inputs.clone());
@@ -834,7 +841,7 @@ impl Surface {
         cx.insert("flow", self.flow.clone());
         cx.insert("labels", self.labels.clone());
         cx.insert("execution", self.execution.clone());
-        if !self.trigger.is_null() {
+        if bind_trigger && !self.trigger.is_null() {
             cx.insert("trigger", self.trigger.clone());
         }
         if let Some(item) = &self.item {
@@ -1117,7 +1124,9 @@ fn with_declared_defaults(posted: Value, flow: Option<&Flow>) -> Value {
 /// It is the context this worker renders the source's own tasks against, built
 /// by the same [`Surface::load`] and [`Surface::context`], with `run = None`.
 /// So it carries `inputs`, `vars`, `flow`, `labels`, `execution`, `outputs`
-/// and `tasks`, and it does **not** carry `trigger`: an expression reading
+/// and `tasks`, and it does **not** carry `trigger` (it calls
+/// [`Surface::context`] with `bind_trigger: false`, even when the source was
+/// itself trigger-fired): an expression reading
 /// `{{ trigger.executionId }}` fails to render against it, exactly as W13a
 /// Task 1 measured on the pinned artifact ("Unable to find `trigger`"). In a
 /// `when` that failure refuses the fire; in `inputs` the processor (W13a Task
@@ -1143,7 +1152,7 @@ pub async fn execution_render_context(
     )
     .await?;
     let surface = Surface::load_with(conn, &ctx, SecretOutputs::Masked).await?;
-    Ok(surface.context(&ctx.plan, &state, None))
+    Ok(surface.context(&ctx.plan, &state, None, false))
 }
 
 #[cfg(test)]
@@ -1263,7 +1272,7 @@ mod tests {
             ids: std::collections::BTreeMap::new(),
             files: None,
         };
-        let cx = surface.context(&plan, &state, None);
+        let cx = surface.context(&plan, &state, None, true);
         let read = |name: &str| {
             cx.bindings()
                 .iter()
@@ -1395,7 +1404,7 @@ mod tests {
 
         for (ix, task) in plan.tasks.iter().enumerate() {
             // Act
-            let cx = surface.context(&plan, &state, Some(ix));
+            let cx = surface.context(&plan, &state, Some(ix), true);
             let got = crate::render_str("{{ task.type }}", &cx);
 
             // Assert
@@ -1445,7 +1454,7 @@ mod tests {
         let parent_id = Uuid::new_v4();
         surface.ids.insert(0, parent_id);
         let render = |surface: &Surface, state: &ExecutionState, run: usize, text: &str| {
-            crate::render_str(text, &surface.context(&plan, state, Some(run)))
+            crate::render_str(text, &surface.context(&plan, state, Some(run), true))
         };
 
         // Act / Assert: a top-level run has none of the three.
@@ -1496,7 +1505,7 @@ mod tests {
         let render = |state: &ExecutionState, run: usize| {
             crate::render_str(
                 "{{ taskrun.iteration }}",
-                &surface.context(&plan, state, Some(run)),
+                &surface.context(&plan, state, Some(run), true),
             )
         };
 
@@ -1828,7 +1837,7 @@ pub(super) fn render_run_if(
             .run_if
             .clone()
             .expect("filtered on Some above");
-        let mut cx = surface.context(plan, state, Some(ix));
+        let mut cx = surface.context(plan, state, Some(ix), true);
         // Package 10a Task 2: a `runIf:` that calls `secret()` renders once,
         // with the value read through the attempt's prefetch (a miss rolls the
         // attempt back and is fetched with no transaction open). The verdict
@@ -2002,7 +2011,7 @@ pub(super) fn render_updates(
             if fresh {
                 side.run_ids.push((ix, id));
             }
-            (ix, surface.context(plan, state, Some(ix)))
+            (ix, surface.context(plan, state, Some(ix), true))
         })
         .collect();
     for (ix, cx) in contexts {
@@ -2128,7 +2137,7 @@ pub(super) fn render_expressions(
     }
     for ix in pending {
         let expression = expression_of(plan, state.runs[ix].task).expect("filtered on Some above");
-        let cx = surface.context(plan, state, Some(ix));
+        let cx = surface.context(plan, state, Some(ix), true);
         let rendered = crate::render_str(&expression, &cx);
         let limit = surface.take_limit_failure();
         match rendered {

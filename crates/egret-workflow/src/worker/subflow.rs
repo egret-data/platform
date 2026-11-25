@@ -318,7 +318,7 @@ pub(super) async fn spawn_one(
         return Ok(jobs);
     }
 
-    let cx = surface.context(&ctx.plan, state, Some(r.run));
+    let cx = surface.context(&ctx.plan, state, Some(r.run), true);
 
     // Rendered, because Kestra renders them:
     // `runContext.render(currentTask.subflowId().namespace())` and the same for

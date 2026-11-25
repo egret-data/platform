@@ -110,7 +110,7 @@ pub(super) async fn at_terminal(
         return Ok(FlowEnd::NoOutputs);
     }
 
-    let cx = surface.context(&ctx.plan, state, None);
+    let cx = surface.context(&ctx.plan, state, None, true);
     let mut redactions: Vec<String> = cx.redactions().to_vec();
     let typed = match crate::outputs::evaluate(&cx, &flow.outputs) {
         Ok(typed) => typed,
