@@ -200,7 +200,7 @@ impl KubernetesRunner {
     /// `secret_env` non-empty: on a create, the pod is created first, then
     /// the per-attempt Secret with the pod as owner (create-only RBAC; the
     /// kubelet holds the container until the Secret appears). A re-attach
-    /// never touches the Secret: it already exists.
+    /// also ensures the Secret (idempotent), repairing a crash between the two.
     async fn get_or_create(
         &self,
         name: &str,
@@ -218,13 +218,19 @@ impl KubernetesRunner {
                     "the task's pod {name} is being deleted (the run was cancelled)"
                 )));
             }
+            // A crash between the pod and its Secret leaves the pod waiting
+            // on a Secret that never comes: provision it now (409 = present).
+            if let Some((secret_name, values)) = secret {
+                self.ensure_secret(secret_name, values, name, &existing)
+                    .await?;
+            }
             return Ok(false);
         }
         match self.pods().create(&PostParams::default(), pod).await {
             Ok(created) => {
                 if let Some((secret_name, values)) = secret {
                     if let Err(e) = self
-                        .create_owned_secret(secret_name, values, name, &created)
+                        .ensure_secret(secret_name, values, name, &created)
                         .await
                     {
                         // The pod would wait forever on a Secret that is not
@@ -248,17 +254,21 @@ impl KubernetesRunner {
 
     /// Create the per-attempt Secret already owned by the just-created pod,
     /// so k8s GC removes it with the pod and no `patch` right is needed.
-    async fn create_owned_secret(
+    async fn ensure_secret(
         &self,
         secret_name: &str,
         values: &BTreeMap<String, String>,
         pod_name: &str,
         pod: &Pod,
     ) -> Result<()> {
-        let fail = |e: &dyn std::fmt::Display| {
+        let fail = |e: &dyn std::fmt::Display, forbidden: bool| {
+            let hint = if forbidden {
+                " (the engine service account needs `create` on Secrets there)"
+            } else {
+                ""
+            };
             Error::InvalidInput(format!(
-                "cannot create the Secret for secret() env in namespace {}: {e} \
-                 (the engine service account needs `create` on Secrets there)",
+                "cannot create the Secret for secret() env in namespace {}: {e}{hint}",
                 self.cfg.namespace
             ))
         };
@@ -266,7 +276,7 @@ impl KubernetesRunner {
             .metadata
             .uid
             .clone()
-            .ok_or_else(|| fail(&"the API returned no uid for the task pod"))?;
+            .ok_or_else(|| fail(&"the API returned no uid for the task pod", false))?;
         let body = Secret {
             metadata: kube::api::ObjectMeta {
                 name: Some(secret_name.to_string()),
@@ -285,11 +295,13 @@ impl KubernetesRunner {
             ..Default::default()
         };
         let secrets: Api<Secret> = Api::namespaced(self.client.clone(), &self.cfg.namespace);
-        secrets
-            .create(&PostParams::default(), &body)
-            .await
-            .map(|_| ())
-            .map_err(|e| fail(&e))
+        match secrets.create(&PostParams::default(), &body).await {
+            Ok(_) => Ok(()),
+            // Already there from the original creation (owner set then).
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 403 => Err(fail(&ae.message, true)),
+            Err(e) => Err(fail(&e, false)),
+        }
     }
 
     async fn get(&self, name: &str) -> Result<Pod> {
