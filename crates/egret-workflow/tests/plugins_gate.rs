@@ -1053,9 +1053,9 @@ fn secret_outside_a_plugin_tasks_properties_is_refused_by_name() {
             "tasks.s.commands[0]",
         ),
         (
-            "a plugin task's runIf",
-            format!("id: f\nnamespace: a.b\ntasks:\n  - id: q\n    {pg}\n    runIf: {SECRET}\n"),
-            "tasks.q.runIf",
+            "a plugin task's description (its runIf resolves since 10a Task 2)",
+            format!("id: f\nnamespace: a.b\ntasks:\n  - id: q\n    {pg}\n    description: {SECRET}\n"),
+            "tasks.q.description",
         ),
         (
             "an input's defaults",

@@ -314,18 +314,18 @@ pub(crate) const HTTP_REFUSAL: &str = "The 'http' function is not supported: an 
 /// `secret()`'s refusal on the shared environment (W5b Task 4, spec §6).
 ///
 /// **`secret()` is implemented, but only where a render resolves it**: the
-/// `kestra.*` plugin tasks, the http tasks and a `Log` task's `message:`
-/// (package 10a Task 1), where `runners::secrets::render_with_secrets`
+/// `kestra.*` plugin tasks, the http tasks, a `Log` task's `message:`
+/// (package 10a Task 1) and a task's `runIf:` (Task 2), where `runners::secrets::render_with_secrets`
 /// registers a resolving `secret` over this one on a copy of the environment.
-/// Every other render -- script tasks, inputs, `runIf`, triggers -- goes
+/// Every other render -- script tasks, inputs, triggers -- goes
 /// through this environment and meets this sentence. The script task is the
 /// one an author will try, so the reason is written for it: its rendered
 /// commands and env are fields of the pod spec, readable by anyone with
 /// `get pods` in the task namespace.
 pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on `kestra.*` \
-     plugin tasks, the http tasks and a Log task's `message:`. It is refused here: on a script \
-     task the rendered commands and env are fields of the pod spec, readable by anyone with \
-     `get pods` in the task namespace, and no other render (inputs, runIf, triggers) \
+     plugin tasks, the http tasks, a Log task's `message:` and a task's `runIf:`. It is refused \
+     here: on a script task the rendered commands and env are fields of the pod spec, readable \
+     by anyone with `get pods` in the task namespace, and no other render (inputs, triggers) \
      resolves secrets.";
 
 /// The names egret registers only to refuse (three since package #5b Task

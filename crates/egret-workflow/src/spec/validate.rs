@@ -693,6 +693,18 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                             for (p, text) in found {
                                 self.property(p, text);
                             }
+                        } else if k == "runIf" && id.is_some() && ty.is_some() {
+                            // A task's `runIf:` resolves `secret()` (package
+                            // 10a Task 2, through the settle's prefetch), on
+                            // every kind of task. An `id` and a `type` make
+                            // the map a task (or trigger or input, which
+                            // have no `runIf`); a `namespace=` / `full=`
+                            // written in the call is still refused.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
                         } else if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
@@ -6015,9 +6027,9 @@ mod tests {
     }
 
     /// Package #4 Task C3 (spec D5): `secret()` resolves on the http tasks, so
-    /// their properties are exempt under every spelling -- while their `runIf`
-    /// (which egret's task model reads, not the handler) is still refused. A `namespace=` written in the call is refused
-    /// there as on a plugin task.
+    /// their properties are exempt under every spelling (and, since package 10a
+    /// Tasks 1-2, so are a `Log`'s `message:` and any task's `runIf:`). A
+    /// `namespace=` written in the call is refused there as on a plugin task.
     #[test]
     fn a_secret_in_an_http_tasks_properties_is_allowed_under_every_spelling() {
         use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
@@ -6037,8 +6049,8 @@ mod tests {
             );
             assert_eq!(
                 paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
-                vec!["tasks.r.runIf".to_string()],
-                "{ty}: runIf stays refused; a Log's message resolves since 10a Task 1"
+                Vec::<String>::new(),
+                "{ty}: a runIf and a Log's message resolve since 10a Tasks 1 and 2"
             );
             let src = format!(
                 "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
@@ -6086,6 +6098,32 @@ mod tests {
             );
             assert!(paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
         }
+    }
+
+    /// Package 10a Task 2: `secret()` resolves in any task's `runIf:` (a leaf,
+    /// a flowable, a nested task) and in no sibling property of it; a
+    /// `namespace=` written in the call is refused as on a plugin task.
+    #[test]
+    fn a_secret_in_a_tasks_run_if_is_allowed_and_not_beside_it() {
+        use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        let src = "id: f\nnamespace: a.b\ntasks:\n  \
+             - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    \
+             runIf: \"{{ secret('X') == 'y' }}\"\n    tasks:\n      \
+             - id: r\n        type: io.kestra.plugin.core.debug.Return\n        \
+             runIf: \"{{ secret('X') }}\"\n        format: \"{{ secret('X') }}\"\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+            vec!["tasks.s.tasks.r.format".to_string()],
+            "only the sibling property is refused"
+        );
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    \
+             type: io.kestra.plugin.core.log.Log\n    message: hi\n    \
+             runIf: \"{{ secret('K', namespace='x') }}\"\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_ARGUMENT_REFUSED),
+            vec!["tasks.l.runIf".to_string()]
+        );
+        assert!(paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
     }
 
     /// Package #4 (spec D4, and the C3 userinfo decision): each refused http

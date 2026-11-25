@@ -70,7 +70,9 @@
 //!
 //! Only reads are. `now()`, `uuid()`, `randomInt()` and the rest are
 //! evaluated again by each attempt, and only the committed attempt's values
-//! persist. `secret()` stays refused in these renders. The cache lives for
+//! persist. `secret()` is read through this cache where a render opts in
+//! ([`Prefetch::secret`], package 10a: `runIf`); the cached value lives in
+//! memory for the call and nowhere else, and every other render still refuses it. The cache lives for
 //! one call of one owner -- one `tick`'s run, one `resume`, one start, one
 //! trigger fire, one event -- never longer, so a `LoopUntil` reads its
 //! condition's value afresh at every iteration.
@@ -95,6 +97,7 @@ use super::{decode_utf8, IndexedFile, Unreadable};
 use crate::runners::files::{
     FileMeta, FileUnavailable, KvAnswer, KvArgs, NsFileArgs, NsFileMeta, RenderFiles,
 };
+use crate::runners::secrets::{Held, SecretError, SecretSource};
 
 /// How many fetch rounds one call may make (the user's ruling, 2026-10-08).
 pub const MAX_ROUNDS: u32 = 64;
@@ -141,6 +144,10 @@ enum Request {
         key: String,
         namespace: Option<String>,
     },
+    /// `secret()`: one workspace secret's data map, by name. **Reusable by
+    /// every render that runs inside a settle** (`runIf`, inputs, triggers):
+    /// see [`Prefetch::secret`].
+    Secret { workspace: Uuid, name: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -165,6 +172,7 @@ impl Request {
                 Some(ns) => format!("key '{key}' in namespace '{ns}'"),
                 None => format!("key '{key}'"),
             },
+            Request::Secret { name, .. } => format!("secret '{name}'"),
         }
     }
 
@@ -172,7 +180,9 @@ impl Request {
     /// running flow.
     fn group(&self) -> (Uuid, Option<String>) {
         match self {
-            Request::ExecBody { workspace, .. } => (*workspace, None),
+            Request::ExecBody { workspace, .. } | Request::Secret { workspace, .. } => {
+                (*workspace, None)
+            }
             Request::NsMeta(k) | Request::NsRead(k) => (k.workspace, k.flow_namespace.clone()),
             Request::Kv {
                 workspace,
@@ -184,12 +194,29 @@ impl Request {
 }
 
 /// What the live function answered, unchanged.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum Answer {
     Bytes(std::result::Result<Vec<u8>, String>),
     NsMeta(std::result::Result<NsFileMeta, FileUnavailable>),
     NsRead(std::result::Result<String, String>),
     Kv(std::result::Result<KvAnswer, String>),
+    /// A secret's data map. **Holds a value**: it is cached in memory for one
+    /// call, never logged (`Stored`'s and `Answer`'s `Debug` are derived, so
+    /// this one is written by hand below) and never persisted.
+    Secret(std::result::Result<BTreeMap<String, String>, SecretError>),
+}
+
+impl std::fmt::Debug for Answer {
+    /// A secret's values never reach a `{:?}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Answer::Bytes(b) => f.debug_tuple("Bytes").field(b).finish(),
+            Answer::NsMeta(m) => f.debug_tuple("NsMeta").field(m).finish(),
+            Answer::NsRead(r) => f.debug_tuple("NsRead").field(r).finish(),
+            Answer::Kv(k) => f.debug_tuple("Kv").field(k).finish(),
+            Answer::Secret(_) => f.write_str("Secret(<masked>)"),
+        }
+    }
 }
 
 impl Answer {
@@ -200,6 +227,7 @@ impl Answer {
             Answer::NsRead(Ok(s)) => s.len() as u64,
             Answer::Kv(Ok(KvAnswer::Value(d))) => kv_bytes(d),
             Answer::NsMeta(Ok(m)) => (m.path.len() + m.uri.len()) as u64,
+            Answer::Secret(Ok(d)) => d.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum(),
             _ => 0,
         }
     }
@@ -211,6 +239,10 @@ impl Answer {
             Request::NsMeta(_) => Answer::NsMeta(Err(FileUnavailable::Refused(message))),
             Request::NsRead(_) => Answer::NsRead(Err(message)),
             Request::Kv { .. } => Answer::Kv(Err(message)),
+            Request::Secret { name, .. } => Answer::Secret(Err(SecretError::Unavailable {
+                name: name.clone(),
+                reason: message,
+            })),
         }
     }
 
@@ -231,6 +263,7 @@ impl Answer {
             Request::Kv { .. } => Answer::Kv(Ok(KvAnswer::Value(
                 crate::storage::kv::value::KvData::String(String::new()),
             ))),
+            Request::Secret { .. } => Answer::Secret(Ok(BTreeMap::new())),
         }
     }
 }
@@ -406,6 +439,65 @@ impl Prefetch {
         Upload::Pending
     }
 
+    /// **One workspace secret's data map, for a render inside a transaction**
+    /// (package 10a Task 2; `runIf` now, inputs and triggers next).
+    ///
+    /// The same gather cycle as every other read: a hit is the cached answer;
+    /// a miss is recorded and answered [`Held::Pending`] -- the render carries
+    /// on with `""`, the attempt is rolled back by its owner, [`fetch_pending`]
+    /// reads the secret from the installed source with no transaction open,
+    /// and the next attempt hits. A limit spent ([`MAX_ROUNDS`],
+    /// [`MAX_FETCHES`]) is an error naming the secret.
+    ///
+    /// **A hit holds a secret's value in memory for this call** and nowhere
+    /// else; whoever renders with it masks it (`secrets::render_once_cached`
+    /// returns every value it handed out).
+    ///
+    /// [`fetch_pending`]: Self::fetch_pending
+    pub(crate) fn secret(&self, workspace: Uuid, name: &str) -> Held {
+        let request = Request::Secret {
+            workspace,
+            name: name.to_string(),
+        };
+        match self.lookup(request, None) {
+            Lookup::Hit(stored) => match &stored.answer {
+                Answer::Secret(answer) => Held::Answer(answer.clone()),
+                _ => Held::Answer(Err(SecretError::Unavailable {
+                    name: name.to_string(),
+                    reason: "egret's prefetch cache answered with the wrong kind of value".into(),
+                })),
+            },
+            Lookup::Missed => Held::Pending,
+            Lookup::Final(_) => Held::Answer(Err(SecretError::Unavailable {
+                name: name.to_string(),
+                reason: format!(
+                    "the expressions rendered in this transaction need more than {MAX_ROUNDS} \
+                     rounds of reads or {MAX_FETCHES} values, the limits"
+                ),
+            })),
+        }
+    }
+
+    /// **Render `text` once with `secret()` answered from this cache** -- the
+    /// one call a settle-time render that may use `secret()` makes (package
+    /// 10a: `runIf` now, inputs and triggers next). Returns the text and every
+    /// value it was handed (the caller masks what it stores with them); an
+    /// `Err` is already masked. A miss leaves this attempt pending: its result
+    /// is discarded by the owner's rollback ([`Self::secret`]).
+    pub(crate) fn render_secret_once(
+        &self,
+        workspace: Uuid,
+        text: &str,
+        cx: &crate::runners::RenderContext,
+    ) -> std::result::Result<crate::runners::secrets::RenderedText, String> {
+        let pf = self.clone();
+        crate::runners::secrets::render_once_cached(
+            text,
+            cx,
+            Arc::new(move |name: &str| pf.secret(workspace, name)),
+        )
+    }
+
     /// How many fetch rounds this call has made.
     pub fn rounds(&self) -> u32 {
         self.state().rounds
@@ -460,6 +552,17 @@ impl Prefetch {
     /// does -- and its answer cached as it came, an outage with it. Counts
     /// one round. `Err` only for egret's own failure to run the fetch.
     pub async fn fetch_pending(&self) -> Result<()> {
+        self.fetch_pending_from(crate::runners::secrets::current())
+            .await
+    }
+
+    /// [`fetch_pending`](Self::fetch_pending) with the secret source given
+    /// (`None`: this process has none, and a pending secret is answered
+    /// unavailable).
+    pub(crate) async fn fetch_pending_from(
+        &self,
+        secrets: Option<Arc<dyn SecretSource>>,
+    ) -> Result<()> {
         let (pending, uploads) = {
             let mut s = self.state();
             (
@@ -469,6 +572,40 @@ impl Prefetch {
         };
         if pending.is_empty() && uploads.is_empty() {
             return Ok(());
+        }
+        // Secrets are read from their source, on the runtime, with no
+        // transaction open: no store and no snapshot are needed for them.
+        let (secret_reads, pending): (BTreeMap<_, _>, BTreeMap<_, _>) = pending
+            .into_iter()
+            .partition(|(r, _)| matches!(r, Request::Secret { .. }));
+        if !secret_reads.is_empty() {
+            let cap = super::current()
+                .map(|s| s.caps.max_read_bytes.saturating_mul(CACHE_CAP_FACTOR))
+                .unwrap_or(u64::MAX);
+            let mut answers = Vec::with_capacity(secret_reads.len());
+            for request in secret_reads.into_keys() {
+                let Request::Secret { workspace, name } = &request else {
+                    continue;
+                };
+                let answer = match &secrets {
+                    Some(source) => source.get(*workspace, name).await,
+                    None => Err(SecretError::Unavailable {
+                        name: name.clone(),
+                        reason: "this process has no secret source".into(),
+                    }),
+                };
+                answers.push((request, Answer::Secret(answer)));
+            }
+            let mut s = self.state();
+            for (request, answer) in answers {
+                s.store(request, answer, None, cap);
+            }
+            if pending.is_empty() && uploads.is_empty() {
+                s.rounds += 1;
+                #[cfg(any(test, feature = "test-util"))]
+                FETCH_ROUNDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(());
+            }
         }
         let store = super::current().ok_or_else(|| {
             Error::Internal(anyhow::anyhow!(
@@ -605,6 +742,8 @@ fn fetch_on_this_thread(
                     key,
                     namespace: namespace.as_deref(),
                 })),
+                // Fetched on the runtime by `fetch_pending_from`.
+                Request::Secret { .. } => continue,
             };
             let outage = live.take_outage();
             out.push((request, answer, outage));
@@ -833,6 +972,76 @@ mod tests {
     use crate::storage::{Caps, FileStore};
 
     const WS: Uuid = Uuid::from_u128(0x7e9);
+
+    /// A source holding one secret, counting its reads.
+    struct One(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl SecretSource for One {
+        async fn get(
+            &self,
+            workspace: Uuid,
+            name: &str,
+        ) -> std::result::Result<BTreeMap<String, String>, SecretError> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if workspace == WS && name == "k" {
+                Ok(BTreeMap::from([("value".to_string(), "v-1".to_string())]))
+            } else {
+                Err(SecretError::NotFound { name: name.into() })
+            }
+        }
+    }
+
+    /// Package 10a Task 2: the miss -> pending -> fetch -> hit cycle of a
+    /// `secret()` read, and its masking contract. A miss renders `""` and
+    /// leaves the attempt pending; the fetch (no transaction open) reads the
+    /// source ONCE however many times the render asked; the next attempt gets
+    /// the value, and returns it for masking; a computed key and a key of
+    /// another workspace are refused or not found.
+    #[tokio::test]
+    async fn a_secret_read_misses_then_hits_after_one_fetch() {
+        let pf = Prefetch::new();
+        let source = Arc::new(One(Default::default()));
+        let cx = RenderContext::new();
+        let text = "{{ secret('k') }}-{{ secret('k') }}";
+
+        // Attempt 1: a miss. Placeholder text, nothing handed out, pending.
+        let first = pf.render_secret_once(WS, text, &cx).unwrap();
+        assert_eq!(first.text, "-");
+        assert!(first.values.is_empty());
+        assert!(pf.has_pending(), "the attempt must not commit");
+
+        // The owner's fetch: one round, one read of the source.
+        pf.fetch_pending_from(Some(source.clone())).await.unwrap();
+        assert!(!pf.has_pending());
+        assert_eq!(pf.rounds(), 1);
+        assert_eq!(source.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Attempt 2: a hit. The value renders and is handed out to be masked.
+        let second = pf.render_secret_once(WS, text, &cx).unwrap();
+        assert_eq!(second.text, "v-1-v-1");
+        assert_eq!(second.values, vec!["v-1".to_string()]);
+        assert!(!pf.has_pending());
+
+        // A secret that does not exist is the author's error, naming it.
+        let missing = pf.render_secret_once(WS, "{{ secret('nope') }}", &cx);
+        assert!(pf.has_pending());
+        pf.fetch_pending_from(Some(source)).await.unwrap();
+        let err = pf
+            .render_secret_once(WS, "{{ secret('nope') }}", &cx)
+            .unwrap_err();
+        assert!(err.contains("'nope' was not found"), "{err}");
+        drop(missing);
+
+        // No source installed: unavailable, never a panic.
+        let bare = Prefetch::new();
+        let _ = bare.render_secret_once(WS, "{{ secret('k') }}", &cx);
+        bare.fetch_pending_from(None).await.unwrap();
+        let err = bare
+            .render_secret_once(WS, "{{ secret('k') }}", &cx)
+            .unwrap_err();
+        assert!(err.contains("no secret source"), "{err}");
+    }
 
     fn uri_of(name: &str) -> String {
         format!(

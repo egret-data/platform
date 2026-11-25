@@ -5602,7 +5602,14 @@ fn drive(
         // driving, so every read it can reach is recorded, and the owner's
         // gate rolls it back before any of it commits.
         let snapshot = state.clone();
-        if render::render_run_if(surface, plan, state, side) == Pass::Rendered {
+        if render::render_run_if(
+            surface,
+            plan,
+            state,
+            ctx.gate.as_ref().map(|g| (g.prefetch(), ctx.workspace_id)),
+            side,
+        ) == Pass::Rendered
+        {
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;

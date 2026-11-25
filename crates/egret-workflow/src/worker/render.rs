@@ -81,6 +81,7 @@ use crate::executor::update::Change;
 use crate::executor::{ExecutionState, Plan, RunIx, RunState, TaskKind, Tick};
 use crate::models::{Flow, InputType};
 use crate::runners::{FileScope, RenderContext};
+use crate::storage::prefetch::Prefetch;
 
 /// Everything a render needs that lives outside `ExecutionState`, read once
 /// per [`settle`](super::claim::settle).
@@ -1764,6 +1765,7 @@ pub(super) fn render_run_if(
     surface: &Surface,
     plan: &Plan,
     state: &mut ExecutionState,
+    secrets: Option<(&Prefetch, Uuid)>,
     side: &mut RenderSide,
 ) -> Pass {
     let pending: Vec<RunIx> = (0..state.runs.len())
@@ -1784,15 +1786,46 @@ pub(super) fn render_run_if(
             .run_if
             .clone()
             .expect("filtered on Some above");
-        let cx = surface.context(plan, state, Some(ix));
-        let rendered = crate::render_str(&expression, &cx);
+        let mut cx = surface.context(plan, state, Some(ix));
+        // Package 10a Task 2: a `runIf:` that calls `secret()` renders once,
+        // with the value read through the attempt's prefetch (a miss rolls the
+        // attempt back and is fetched with no transaction open). The verdict
+        // is taken on the real text, and **only the verdict is stored** --
+        // `rendered_run_if` is a persisted, served column, and `{{ secret('k') }}`
+        // alone renders to the value.
+        let uses_secret = crate::runners::secrets::text_uses_secret(&expression);
+        let rendered = match secrets.filter(|_| uses_secret) {
+            Some((prefetch, workspace)) => prefetch
+                .render_secret_once(workspace, &expression, &cx)
+                .map(|r| {
+                    cx.redact(&r.values);
+                    verdict_text(&r.text)
+                }),
+            None => crate::render_str(&expression, &cx).map_err(|e| e.to_string()),
+        };
         let limit = surface.take_limit_failure();
         match rendered {
             Ok(value) => state.runs[ix].rendered_run_if = Some(value),
+            Err(message) if uses_secret && secrets.is_some() && limit.is_none() => {
+                // The author's own error, masked, naming the secret and
+                // never a value.
+                failed_on_a_limit(state, ix, Some(message), side)
+            }
             Err(_) => failed_on_a_limit(state, ix, limit, side),
         }
     }
     Pass::Rendered
+}
+
+/// What `rendered_run_if` stores for a `runIf:` that resolved a secret: the
+/// verdict, not the text the secret was rendered into.
+fn verdict_text(rendered: &str) -> String {
+    if crate::executor::is_truthy(rendered) {
+        "true"
+    } else {
+        "false"
+    }
+    .to_string()
 }
 
 /// Fail run `ix` for a render that would not resolve: with the message of
