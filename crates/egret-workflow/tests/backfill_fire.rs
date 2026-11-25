@@ -782,3 +782,33 @@ async fn a_paused_backfill_does_not_hold_back_a_sibling_schedule() {
     .unwrap();
     assert_eq!(fired_by, vec!["t".to_string()]);
 }
+
+/// Kestra's order: the trigger's own labels first, then the backfill's.
+#[tokio::test]
+async fn trigger_labels_come_before_backfill_labels() {
+    let Some(fx) = fx().await else { return };
+    let src = flow_yaml("lbl-order", "", "    labels:\n      env: prod\n");
+    let flow = fx.flow(&src).await;
+    let w0 = fx.w0().await;
+    common::stage_backfill(
+        &fx.db,
+        flow,
+        "s",
+        (w0, w0 + minutes(1)),
+        w0,
+        2,
+        json!({}),
+        json!([{"key": "team", "value": "ops"}]),
+    )
+    .await;
+    for _ in 0..2 {
+        assert_eq!(fx.pass().await, fired(1));
+    }
+    let want = Some(json!([
+        {"key": "env", "value": "prod"},
+        {"key": "team", "value": "ops"}
+    ]));
+    for e in execs(&fx.db, flow).await {
+        assert_eq!(e.labels, want);
+    }
+}

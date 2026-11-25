@@ -302,44 +302,55 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
         // Refused inputs consume the tick (spec §5): the dates advance
         // exactly as `tick` computed them, and no execution is created.
         TickOutcome::Fired(_) if refused.is_some() => (Fate::Skipped, refused),
-        TickOutcome::Fired(e) => match start(at, c, &e, backfill.as_ref()).await? {
-            Started::Yes => (Fate::Fired, None),
-            // A unique index (the per-tick one, or the per-backfill-tick one
-            // for a backfill's fire) says this tick already has its
-            // execution: the tick is consumed, not refired and not taken off
-            // the queue.
-            // Under statement 1 of `scheduler`'s safety section this never
-            // happens, so it is a warning, not a routine skip.
-            Started::AlreadyFired(why) => {
-                tracing::warn!(
-                    flow_id = %c.flow_id,
-                    trigger_id = %c.trigger_id,
-                    scheduled_date = %e.scheduled_date,
-                    "a schedule tick that already has an execution was claimed again; consumed"
-                );
-                (Fate::Skipped, Some(why))
+        TickOutcome::Fired(e) => {
+            // Fail-safe: a label that does not render fires nothing; the dates
+            // stay, so the next pass retries the same tick.
+            let trigger_labels = match render_trigger_labels(&e, &trigger.labels) {
+                Ok(l) => l,
+                Err(why) => {
+                    record_error(at.conn(), c, &why).await?;
+                    return Ok(Fate::Errored);
+                }
+            };
+            match start(at, c, &e, backfill.as_ref(), trigger_labels).await? {
+                Started::Yes => (Fate::Fired, None),
+                // A unique index (the per-tick one, or the per-backfill-tick one
+                // for a backfill's fire) says this tick already has its
+                // execution: the tick is consumed, not refired and not taken off
+                // the queue.
+                // Under statement 1 of `scheduler`'s safety section this never
+                // happens, so it is a warning, not a routine skip.
+                Started::AlreadyFired(why) => {
+                    tracing::warn!(
+                        flow_id = %c.flow_id,
+                        trigger_id = %c.trigger_id,
+                        scheduled_date = %e.scheduled_date,
+                        "a schedule tick that already has an execution was claimed again; consumed"
+                    );
+                    (Fate::Skipped, Some(why))
+                }
+                // Deterministic in the source: only the author's next save helps.
+                // A backfill tick's refusal ends the backfill instead (below): a
+                // save would re-derive the same tick with the same inputs, so
+                // taking the trigger off the queue would leave it stuck until the
+                // backfill was deleted (W7f §3.6, default decision 2026-10-15).
+                Started::Refused(why) if e.from_backfill && backfill.is_some() => {
+                    refused_backfill = true;
+                    (Fate::Errored, Some(format!("backfill ended: {why}")))
+                }
+                Started::Refused(why) => {
+                    take_off_queue(at.conn(), c, &why).await?;
+                    return Ok(Fate::Errored);
+                }
+                // Anything else may be transient (a timeout, a deadlock, a
+                // serialization failure). The dates stay, so the next pass fires
+                // this same tick again (spec §4 point 1); only the reason is kept.
+                Started::Failed(why) => {
+                    record_error(at.conn(), c, &why).await?;
+                    return Ok(Fate::Errored);
+                }
             }
-            // Deterministic in the source: only the author's next save helps.
-            // A backfill tick's refusal ends the backfill instead (below): a
-            // save would re-derive the same tick with the same inputs, so
-            // taking the trigger off the queue would leave it stuck until the
-            // backfill was deleted (W7f §3.6, default decision 2026-10-15).
-            Started::Refused(why) if e.from_backfill && backfill.is_some() => {
-                refused_backfill = true;
-                (Fate::Errored, Some(format!("backfill ended: {why}")))
-            }
-            Started::Refused(why) => {
-                take_off_queue(at.conn(), c, &why).await?;
-                return Ok(Fate::Errored);
-            }
-            // Anything else may be transient (a timeout, a deadlock, a
-            // serialization failure). The dates stay, so the next pass fires
-            // this same tick again (spec §4 point 1); only the reason is kept.
-            Started::Failed(why) => {
-                record_error(at.conn(), c, &why).await?;
-                return Ok(Fate::Errored);
-            }
-        },
+        }
     };
 
     let mut last_error = last_error;
@@ -468,11 +479,15 @@ async fn start(
     c: &Claimed,
     e: &ScheduledExecution,
     backfill: Option<&BackfillRow>,
+    trigger_labels: Vec<serde_json::Value>,
 ) -> Result<Started> {
     let backfill = backfill.filter(|_| e.from_backfill);
-    let labels = backfill
-        .map(|b| b.labels.clone())
-        .filter(|l| l.as_array().is_some_and(|a| !a.is_empty()));
+    // Kestra's order: the trigger's own labels, then the backfill's.
+    let mut all = trigger_labels;
+    if let Some(b) = backfill.and_then(|b| b.labels.as_array()) {
+        all.extend(b.iter().cloned());
+    }
+    let labels = (!all.is_empty()).then(|| serde_json::Value::Array(all));
     let mut sp = at.savepoint().await?;
     let started = start_execution_in_with(
         &mut sp,
@@ -508,6 +523,33 @@ async fn start(
             Ok(classify(&err))
         }
     }
+}
+
+/// The Schedule trigger's own `labels`, each value rendered against
+/// `{{ trigger.* }}` / `{{ schedule.* }}` (the tick's `{date, next, previous}`,
+/// as Kestra binds them). Keys stay literal. The error is the reason to record.
+fn render_trigger_labels(
+    e: &ScheduledExecution,
+    labels: &[crate::models::Label],
+) -> std::result::Result<Vec<serde_json::Value>, String> {
+    if labels.is_empty() {
+        return Ok(Vec::new());
+    }
+    let vars = schedule_trigger_record(e)
+        .get("variables")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut cx = crate::runners::RenderContext::new();
+    cx.insert("schedule", vars.clone());
+    cx.insert("trigger", vars);
+    labels
+        .iter()
+        .map(|l| {
+            let value = crate::render_str(&l.value, &cx)
+                .map_err(|err| format!("label `{}` did not render: {err}", l.key))?;
+            Ok(serde_json::json!({"key": l.key, "value": value}))
+        })
+        .collect()
 }
 
 /// Keep the reason, touch nothing else: the dates stay where the claim found

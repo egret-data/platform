@@ -1307,3 +1307,98 @@ async fn a_foreach_is_refused_at_fire_and_its_loop_sibling_still_fires() {
         "{err}"
     );
 }
+
+async fn labels_of(db: &Db, flow: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT labels FROM workflow.executions WHERE flow_id = $1")
+        .bind(flow)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_literal_trigger_label_reaches_the_fired_execution() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml(
+            "lbl-literal",
+            "",
+            "    labels:\n      env: prod\n",
+        ))
+        .await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(
+        labels_of(&fx.db, flow).await,
+        Some(serde_json::json!([{"key": "env", "value": "prod"}]))
+    );
+}
+
+#[tokio::test]
+async fn a_templated_trigger_label_renders_against_the_tick() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml(
+            "lbl-templated",
+            "",
+            "    timezone: Asia/Ho_Chi_Minh\n    labels:\n      scheduled: \"{{ trigger.date }}\"\n      nxt: \"{{ schedule.next }}\"\n",
+        ))
+        .await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    let due = due_date(&fx.db, flow).await;
+    assert_eq!(fx.pass().await.fired, 1);
+    let labels = labels_of(&fx.db, flow).await.expect("labels");
+    let mut got: Vec<(String, String)> = labels
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["key"].as_str().unwrap().to_string(),
+                l["value"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    let mut want = vec![
+        ("scheduled".to_string(), vn(due)),
+        ("nxt".to_string(), vn(due + Duration::minutes(1))),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[tokio::test]
+async fn an_unrenderable_trigger_label_fires_nothing_and_says_why() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml(
+            "lbl-bad",
+            "",
+            "    labels:\n      x: \"{{ nope.missing }}\"\n",
+        ))
+        .await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    let due = due_date(&fx.db, flow).await;
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            errored: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0);
+    let after = row(&fx.db, flow).await.unwrap();
+    assert!(after.last_error.is_some_and(|e| e.contains("label `x`")));
+    assert_eq!(
+        after.next_evaluation_date,
+        Some(due),
+        "tick retried, still on the queue"
+    );
+}
