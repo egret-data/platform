@@ -154,9 +154,13 @@ async fn run_flow(flow: &str) -> Option<(TaskCommands, Vec<String>)> {
     .unwrap();
     assert_eq!(state, "SUCCESS", "{message:?}");
 
-    let seen = runner.seen.lock().unwrap();
-    assert_eq!(seen.len(), 1, "the runner ran once");
-    let cmds = seen[0].clone();
+    // Scope the std Mutex guard so it is dropped before the `.await` below
+    // (clippy::await_holding_lock).
+    let cmds = {
+        let seen = runner.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "the runner ran once");
+        seen[0].clone()
+    };
 
     let lines: Vec<String> = sqlx::query_scalar(
         "SELECT message FROM workflow.task_logs WHERE execution_id = $1 ORDER BY id",
