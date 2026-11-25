@@ -111,7 +111,7 @@
 //!   store like any other stored input.)*
 //! * **No registry credentials, no `shmSize`, `deviceRequests`, `privileged`,
 //!   `networkMode`, volumes.** W5a Task 5 implements `pullPolicy`, `cpu.cpus`,
-//!   `memory.memory` and `delete` (see [`create_args`]); every other Kestra
+//!   `memory.memory` and `delete` (see [`create_args_with`]); every other Kestra
 //!   `Docker` property is refused at save by `scripts::parse`, never ignored.
 
 use std::collections::BTreeMap;
@@ -3011,7 +3011,7 @@ pub(crate) fn create_args(
     create_args_with(task, commands, spec, name, None)
 }
 
-/// [`create_args`] with the secret env-file, when there is one: `--env-file
+/// [`create_args_with`] carries the secret env-file, when there is one: `--env-file
 /// <path>` carries `commands.secret_env`, so no secret value is in the argv.
 pub(crate) fn create_args_with(
     task: &TaskInput,
