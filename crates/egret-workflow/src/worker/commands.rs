@@ -1809,9 +1809,21 @@ impl DockerRunner {
         observer: &dyn LineObserver,
         name: &str,
     ) -> Result<CommandsResult> {
-        let borrowed_args = create_args(task, commands, spec, name);
+        // Secret-bearing env goes through a 0600 `--env-file`, never `--env
+        // K=V` (which the host's `ps` would show). The guard unlinks the file
+        // on every path out of `docker create`, `?` included.
+        let env_file = SecretEnvFile::write(name, &commands.secret_env)?;
+        let borrowed_args = create_args_with(
+            task,
+            commands,
+            spec,
+            name,
+            env_file.as_ref().map(SecretEnvFile::path),
+        );
         let borrowed: Vec<&str> = borrowed_args.iter().map(String::as_str).collect();
-        let created = self.cli(&borrowed).await?;
+        let created = self.cli(&borrowed).await;
+        drop(env_file);
+        let created = created?;
         if !created.status.success() {
             return Err(self
                 .classify("create", &String::from_utf8_lossy(&created.stderr))
@@ -2995,6 +3007,18 @@ pub(crate) fn create_args(
     spec: &RunnerSpec,
     name: &str,
 ) -> Vec<String> {
+    create_args_with(task, commands, spec, name, None)
+}
+
+/// [`create_args`] with the secret env-file, when there is one: `--env-file
+/// <path>` carries `commands.secret_env`, so no secret value is in the argv.
+pub(crate) fn create_args_with(
+    task: &TaskInput,
+    commands: &TaskCommands,
+    spec: &RunnerSpec,
+    name: &str,
+    env_file: Option<&std::path::Path>,
+) -> Vec<String> {
     let argv = commands.argv();
     let mut create: Vec<String> = vec![
         "create".into(),
@@ -3036,6 +3060,10 @@ pub(crate) fn create_args(
         create.push("--env".into());
         create.push(format!("{k}={v}"));
     }
+    if let Some(path) = env_file {
+        create.push("--env-file".into());
+        create.push(path.display().to_string());
+    }
     // `withEntrypoint(interpreter)` + `withCmd(joined)`. The CLI takes one
     // string for `--entrypoint`, so the interpreter's head is the entrypoint
     // and its tail leads the CMD — which produces the identical argv, because
@@ -3052,6 +3080,52 @@ pub(crate) fn create_args(
     create.push(commands.container_image.clone());
     create.extend(argv[1..].iter().cloned());
     create
+}
+
+/// A private (0600) env-file holding `commands.secret_env`, unlinked when
+/// dropped -- so `docker create` can read it and no early return leaks it.
+pub(crate) struct SecretEnvFile {
+    path: std::path::PathBuf,
+}
+
+impl SecretEnvFile {
+    /// `None` when there is no secret env (nothing is written).
+    pub(crate) fn write(name: &str, secret_env: &BTreeMap<String, String>) -> Result<Option<Self>> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if secret_env.is_empty() {
+            return Ok(None);
+        }
+        let path = std::env::temp_dir().join(format!("egret-env-{name}-{}", uuid::Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| Error::Internal(anyhow::anyhow!("could not create the env-file: {e}")))?;
+        // The guard exists before the content is written, so a failed write
+        // still unlinks the file.
+        let guard = Self { path };
+        let mut body = String::new();
+        for (k, v) in secret_env {
+            body.push_str(&format!("{k}={v}\n"));
+        }
+        file.write_all(body.as_bytes())
+            .map_err(|e| Error::Internal(anyhow::anyhow!("could not write the env-file: {e}")))?;
+        Ok(Some(guard))
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for SecretEnvFile {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            tracing::debug!(error = %e, "could not remove the secret env-file");
+        }
+    }
 }
 
 /// What a failed [`write_tar`](crate::storage::transfer::write_tar) is to a
@@ -3437,6 +3511,61 @@ mod tests {
                 "{name} holds a character docker will refuse"
             );
         }
+    }
+
+    /// Secret env travels by a 0600 `--env-file` that is unlinked on drop; the
+    /// value is never in the argv; non-secret env stays `--env K=V`.
+    #[test]
+    fn secret_env_goes_by_a_private_env_file_not_argv() {
+        use std::os::unix::fs::PermissionsExt;
+        let task = leased(1_700_000_000);
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["echo hi".into()],
+            env: BTreeMap::from([("PLAIN".into(), "visible".into())]),
+            secret_env: BTreeMap::from([("TOK".into(), "shh-9f2".into())]),
+            ..TaskCommands::default()
+        };
+        let spec = RunnerSpec::defaults(crate::scripts::RunnerKind::Docker);
+        let file = SecretEnvFile::write("n", &cmds.secret_env)
+            .expect("write")
+            .expect("a file for a non-empty secret_env");
+        let path = file.path().to_path_buf();
+        let a = create_args_with(&task, &cmds, &spec, "n", Some(&path));
+
+        assert!(
+            a.windows(2).any(|w| w == ["--env", "PLAIN=visible"]),
+            "{a:?}"
+        );
+        let at = a
+            .iter()
+            .position(|x| x == "--env-file")
+            .expect("--env-file");
+        assert_eq!(a[at + 1], path.display().to_string());
+        assert!(!a.iter().any(|x| x.starts_with("TOK=")), "{a:?}");
+        assert!(!a.iter().any(|x| x.contains("shh-9f2")), "{a:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "TOK=shh-9f2\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        drop(file);
+        assert!(!path.exists(), "the guard must unlink the env-file");
+
+        // No secret env: no file, no flag.
+        assert!(SecretEnvFile::write("n", &BTreeMap::new())
+            .unwrap()
+            .is_none());
+        let plain = create_args(
+            &task,
+            &TaskCommands {
+                container_image: "alpine".into(),
+                commands: vec!["x".into()],
+                ..TaskCommands::default()
+            },
+            &spec,
+            "n",
+        );
+        assert!(!plain.iter().any(|x| x == "--env-file"));
     }
 
     /// **`docker create` carries the `taskRunner:` properties the Docker runner
