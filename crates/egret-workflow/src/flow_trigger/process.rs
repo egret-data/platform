@@ -21,11 +21,12 @@ use crate::runners::{render_str_guarded, GuardedRender, RenderContext};
 use crate::scheduler::start::{
     classify, flow_is_on, workflows_feature_default, Started, WORKFLOWS_FEATURE,
 };
+use crate::storage::prefetch::Prefetch;
 use crate::trigger::flow::{
     evaluate, FiredExecution, ListeningFlow, Outcome, SourceExecution, WhenVerdict,
     WindowFreeFlowTrigger, DEFAULT_MAX_EXECUTION_DEPTH,
 };
-use crate::trigger::webhook::{render_value, render_value_guarded, InputRefusal};
+use crate::trigger::webhook::{render_value_secret, InputRefusal, SecretRender};
 use crate::trigger::{
     condition_keys, dependency_matches, depends_on_refusals, merge, satisfied, DepSource,
     ResolvedWindow, TimeWindow,
@@ -885,7 +886,7 @@ async fn listen(
         Ok(r) => r,
         Err(e) => return Ok(Fate::Broken(e.to_string())),
     };
-    let fired = match filter(&listener, l, &flow, source, ctx) {
+    let fired = match filter(&listener, l, &flow, source, ctx, at.gate().prefetch()) {
         Ok(f) => f,
         Err(why) => return Ok(Fate::Refused(why)),
     };
@@ -925,8 +926,9 @@ fn filter(
     flow: &Flow,
     source: &Source,
     ctx: &RenderContext,
+    prefetch: &Prefetch,
 ) -> std::result::Result<FiredExecution, String> {
-    let when = render_when(listener.when_source(), ctx);
+    let when = render_trigger_when(listener.when_source(), ctx, l.workspace_id, prefetch);
     let listening = ListeningFlow {
         workspace_id: l.workspace_id,
         namespace: l.namespace.clone(),
@@ -959,6 +961,41 @@ fn render_when(source: Option<&str>, ctx: &RenderContext) -> WhenVerdict {
             Ok(GuardedRender::Rendered(s)) => WhenVerdict::Rendered(s),
             Ok(GuardedRender::Forbidden(_)) | Err(_) => WhenVerdict::Unrenderable,
         },
+    }
+}
+
+/// The trigger's OWN `when`: [`render_when`], except that `secret()` resolves
+/// (package 10a Task 4) through the event attempt's prefetch -- a miss renders
+/// `""`, and the attempt is rolled back, fetched and run again. A `when` that
+/// resolved a secret is kept as its verdict only (`"true"` / `"false"`), so no
+/// refusal or log that echoes a `when` can carry the rendered text. The
+/// `dependsOn` dependencies' `when`s are not lifted: they render by
+/// [`render_when`], where `secret()` is refused.
+fn render_trigger_when(
+    source: Option<&str>,
+    ctx: &RenderContext,
+    workspace: Uuid,
+    prefetch: &Prefetch,
+) -> WhenVerdict {
+    let Some(w) = source.filter(|w| crate::runners::secrets::text_uses_secret(w)) else {
+        return render_when(source, ctx);
+    };
+    let reads_forbidden = crate::runners::referenced_roots(w)
+        .map(|roots| FORBIDDEN_ROOTS.iter().any(|f| roots.contains(*f)))
+        .unwrap_or(false);
+    if reads_forbidden {
+        return WhenVerdict::Unrenderable;
+    }
+    match prefetch.render_secret_once(workspace, w, ctx) {
+        Ok(done) => WhenVerdict::Rendered(
+            if crate::executor::is_truthy(&done.text) {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
+        Err(_) => WhenVerdict::Unrenderable,
     }
 }
 
@@ -1012,13 +1049,24 @@ async fn start_fire(
     // (the measured "Unable to find `trigger`" above). Only `outputs` is
     // bound: `{{ trigger.executionId }}` still fails then, as Kestra's
     // `Map.of(TRIGGER_VAR, Map.of(OUTPUTS_VAR, outputs))` holds no other key.
+    //
+    // `secret()` in an input resolves through the attempt's prefetch (package
+    // 10a Task 4); a miss renders `""` and the whole event attempt is rolled
+    // back, so no execution born from the placeholder survives. The value is
+    // stored sealed (`secret_inputs::sealed_ids` reads the trigger's inputs),
+    // and the failure message below is masked with every value handed out.
+    let mut secrets = SecretRender {
+        prefetch: sp.gate().prefetch(),
+        workspace: l.workspace_id,
+        handed: Vec::new(),
+    };
     let rendered = match trigger_outputs {
         Some(Value::Object(o)) if !o.is_empty() => {
             let mut cx = ctx.clone();
             cx.insert("trigger", serde_json::json!({ "outputs": o }));
-            render_value_guarded(&declared, &cx, "", &[])
+            render_value_secret(&declared, &cx, "", &[], Some(&mut secrets))
         }
-        _ => render_value(&declared, ctx, ""),
+        _ => render_value_secret(&declared, ctx, "", FORBIDDEN_ROOTS, Some(&mut secrets)),
     };
     let (inputs, render_failure) = match rendered {
         Ok(v) => (v, None),
@@ -1030,7 +1078,13 @@ async fn start_fire(
         ),
         Err(InputRefusal::Unrenderable { key, error }) => (
             Value::Object(Map::new()),
-            Some(format!("inputs.{key} does not render: {error}")),
+            Some(
+                crate::logs::mask(
+                    &format!("inputs.{key} does not render: {error}"),
+                    &secrets.handed,
+                )
+                .into_owned(),
+            ),
         ),
     };
     let started = start_execution_in_with(
@@ -1112,7 +1166,7 @@ async fn listen_depends_on(
             "the dependsOn trigger has no listener filter".to_string(),
         ));
     };
-    let fired = match filter(&listener, l, flow, source, ctx) {
+    let fired = match filter(&listener, l, flow, source, ctx, at.gate().prefetch()) {
         Ok(f) => f,
         Err(why) => return Ok(Fate::Refused(why)),
     };
@@ -1773,5 +1827,48 @@ mod tests {
         );
         let none = flow_trigger_record(&fired("t"), &record, None);
         assert!(none["variables"].get("outputs").is_none());
+    }
+
+    struct Sentinel;
+
+    #[async_trait::async_trait]
+    impl crate::runners::secrets::SecretSource for Sentinel {
+        async fn get(
+            &self,
+            _workspace: Uuid,
+            _name: &str,
+        ) -> std::result::Result<
+            std::collections::BTreeMap<String, String>,
+            crate::runners::secrets::SecretError,
+        > {
+            Ok(std::collections::BTreeMap::from([(
+                "value".to_string(),
+                "when-SENTINEL-5e".to_string(),
+            )]))
+        }
+    }
+
+    /// A `when` that resolved a secret is kept as its VERDICT, never as the
+    /// text it rendered to (which the refusal and the logs may echo).
+    #[tokio::test]
+    async fn a_when_that_resolves_a_secret_keeps_only_its_verdict() {
+        let ws = Uuid::from_u128(0x5e);
+        let pf = Prefetch::new();
+        let cx = RenderContext::new();
+        let when = "{{ secret('S') }}";
+        // The miss renders "" (falsy) and leaves the read pending.
+        assert_eq!(
+            render_trigger_when(Some(when), &cx, ws, &pf),
+            WhenVerdict::Rendered("false".into())
+        );
+        assert!(pf.has_pending());
+        pf.fetch_pending_from(Some(std::sync::Arc::new(Sentinel)))
+            .await
+            .unwrap();
+        // The hit renders the secret's value, which is truthy: the verdict.
+        assert_eq!(
+            render_trigger_when(Some(when), &cx, ws, &pf),
+            WhenVerdict::Rendered("true".into())
+        );
     }
 }

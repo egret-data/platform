@@ -839,33 +839,66 @@ impl InputRefusal {
 /// over-acceptance rather than a leak.
 const FORBIDDEN_INPUT_ROOTS: &[&str] = &["trigger"];
 
-/// Render one declared value the way the artifact renders it.
+/// What a trigger's `inputs` render needs to resolve `secret()` (package 10a
+/// Task 4): the settle-style prefetch the reads go through, the workspace the
+/// secrets belong to, and -- collected as the render goes -- every value it
+/// was handed, for masking whatever the caller writes about the render.
+pub(crate) struct SecretRender<'a> {
+    pub prefetch: &'a crate::storage::prefetch::Prefetch,
+    pub workspace: uuid::Uuid,
+    pub handed: Vec<String>,
+}
+
+/// Render one declared value the way the artifact renders it, with the roots
+/// it refuses named by the caller (a Flow trigger whose source published
+/// outputs binds `trigger` and refuses nothing; package #6 Task B3), and with
+/// `secret()` resolved in every string that calls it.
 ///
 /// `pub(crate)` because a Flow trigger's `inputs:` are rendered by the same
 /// `runContext.render(Map)` (W13a Task 4, `flow_trigger::process`), against the
 /// SOURCE execution's context rather than an `InputContext`.
 ///
 /// `VariableRenderer.renderObject(Object, Map, boolean)`, measured from the
-/// bytecode of the pinned image rather than from a signature — see
-/// [`render_inputs`] for the table and for the sentence this replaced.
-pub(crate) fn render_value(
-    v: &Value,
-    cx: &RenderContext,
-    path: &str,
-) -> Result<Value, InputRefusal> {
-    render_value_guarded(v, cx, path, FORBIDDEN_INPUT_ROOTS)
-}
-
-/// [`render_value`] with the roots it refuses named by the caller: a Flow
-/// trigger whose source published outputs binds `trigger` (`{outputs}`) and
-/// refuses nothing (package #6 Task B3, `flow_trigger::process`).
-pub(crate) fn render_value_guarded(
+/// bytecode of the pinned image rather than from a signature -- see
+/// [`render_inputs`] for the table and for the sentence this replaced. With
+/// `secrets: None` `secret()` stays refused.
+///
+/// A string that calls `secret()` (package 10a Task 4) renders **one pass**,
+/// as on every 10a surface: the text a secret's value or a context value
+/// holds is inert. Every other string takes the fixpoint. Its `trigger` guard is asked of the source first, exactly as the
+/// fixpoint asks it. An object KEY that calls `secret()` still renders with
+/// the refusing environment.
+pub(crate) fn render_value_secret(
     v: &Value,
     cx: &RenderContext,
     path: &str,
     forbidden: &[&str],
+    mut secrets: Option<&mut SecretRender<'_>>,
 ) -> Result<Value, InputRefusal> {
     match v {
+        Value::String(text)
+            if secrets.is_some() && crate::runners::secrets::text_uses_secret(text) =>
+        {
+            let sec = secrets.as_deref_mut().expect("checked is_some above");
+            let reads_forbidden = crate::runners::referenced_roots(text)
+                .map(|roots| forbidden.iter().any(|f| roots.contains(*f)))
+                .unwrap_or(false);
+            if reads_forbidden {
+                return Err(InputRefusal::NeedsTriggerContext {
+                    key: path.to_string(),
+                });
+            }
+            match sec.prefetch.render_secret_once(sec.workspace, text, cx) {
+                Ok(done) => {
+                    sec.handed.extend(done.values);
+                    Ok(Value::String(done.text))
+                }
+                Err(error) => Err(InputRefusal::Unrenderable {
+                    key: path.to_string(),
+                    error,
+                }),
+            }
+        }
         // `instanceof String` -> render.
         Value::String(text) => match render_str_guarded(text, cx, forbidden) {
             Ok(GuardedRender::Rendered(out)) => Ok(Value::String(out)),
@@ -881,11 +914,12 @@ pub(crate) fn render_value_guarded(
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for (i, item) in items.iter().enumerate() {
-                out.push(render_value_guarded(
+                out.push(render_value_secret(
                     item,
                     cx,
                     &format!("{path}[{i}]"),
                     forbidden,
+                    secrets.as_deref_mut(),
                 )?);
             }
             Ok(Value::Array(out))
@@ -918,7 +952,8 @@ pub(crate) fn render_value_guarded(
                         })
                     }
                 };
-                let value = render_value_guarded(&map[k], cx, &here, forbidden)?;
+                let value =
+                    render_value_secret(&map[k], cx, &here, forbidden, secrets.as_deref_mut())?;
                 // `putIfAbsent`: the first key to render to a given string
                 // wins, and the later one is DROPPED rather than overwriting.
                 out.entry(rendered_key).or_insert(value);
@@ -977,7 +1012,7 @@ pub(crate) fn render_value_guarded(
 /// **`putIfAbsent`**, so when two keys render to the same string the **first in
 /// iteration order wins** and the second is dropped.
 ///
-/// [`render_value`] reproduces the `Map`, `List` and `String` arms and the
+/// [`render_value_secret`] reproduces the `Map`, `List` and `String` arms and the
 /// `putIfAbsent` rule. **Three divergences, named rather than found:**
 ///
 /// 1. **`Set` has no JSON counterpart**, so there is no arm for it. A YAML
@@ -1005,6 +1040,16 @@ pub(crate) fn render_value_guarded(
 /// pass 1, and `vars.tpl = "{{ [trigger] }}"` with `a: "{{ vars.tpl }}"`
 /// reaches the root on pass 2.
 pub fn render_inputs(webhook: &Webhook, icx: &InputContext) -> Result<Value, InputRefusal> {
+    render_inputs_with_secrets(webhook, icx, None)
+}
+
+/// [`render_inputs`] resolving `secret()` through `secrets` (package 10a Task
+/// 4). The webhook's `key:` is NOT rendered here and stays refused.
+pub(crate) fn render_inputs_with_secrets(
+    webhook: &Webhook,
+    icx: &InputContext,
+    secrets: Option<&mut SecretRender<'_>>,
+) -> Result<Value, InputRefusal> {
     let Some(declared) = webhook.inputs.as_ref() else {
         return Ok(Value::Object(Map::new()));
     };
@@ -1014,7 +1059,13 @@ pub fn render_inputs(webhook: &Webhook, icx: &InputContext) -> Result<Value, Inp
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
     );
-    render_value(&as_value, &icx.render_context(), "")
+    render_value_secret(
+        &as_value,
+        &icx.render_context(),
+        "",
+        FORBIDDEN_INPUT_ROOTS,
+        secrets,
+    )
 }
 
 #[cfg(test)]

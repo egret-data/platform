@@ -172,6 +172,11 @@ impl Savepoint<'_> {
         &mut self.sp
     }
 
+    /// The cache every render in this savepoint reads through: the attempt's.
+    pub(crate) fn gate(&self) -> &Gate {
+        self.gate
+    }
+
     /// `RELEASE SAVEPOINT`: what the savepoint did joins the attempt.
     pub(crate) async fn release(self) -> Result<()> {
         self.sp.commit().await.map_err(db_err)

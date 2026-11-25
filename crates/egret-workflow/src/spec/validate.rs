@@ -606,6 +606,16 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
 
     struct Walk<'a> {
         plugin: HashSet<(&'a str, &'a str)>,
+        /// The (`id`, `type`) of every `Log` task: its `message:` resolves
+        /// `secret()` (package 10a Task 1), so it is not walked as "outside".
+        log: HashSet<(&'a str, &'a str)>,
+        /// The (`id`, `type`) of every Webhook trigger: its `inputs:` resolve
+        /// `secret()` (package 10a Task 4). Its `key:` does NOT -- the key is
+        /// a credential compared per request.
+        webhook: HashSet<(&'a str, &'a str)>,
+        /// The (`id`, `type`) of every Flow trigger: its `when:` and `inputs:`
+        /// resolve `secret()` (package 10a Task 4).
+        flow_trigger: HashSet<(&'a str, &'a str)>,
         report: &'a mut ValidationReport,
     }
 
@@ -670,6 +680,15 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                     let ty = map.get("type").and_then(serde_json::Value::as_str);
                     let is_plugin =
                         matches!((id, ty), (Some(i), Some(t)) if self.plugin.contains(&(i, t)));
+                    let is_log =
+                        matches!((id, ty), (Some(i), Some(t)) if self.log.contains(&(i, t)));
+                    // Only a trigger directly under `triggers:`.
+                    let is_trigger_property = path
+                        .strip_prefix("triggers.")
+                        .is_some_and(|rest| !rest.contains('.'));
+                    let in_webhook =
+                        matches!((id, ty), (Some(i), Some(t)) if self.webhook.contains(&(i, t)));
+                    let in_flow_trigger = matches!((id, ty), (Some(i), Some(t)) if self.flow_trigger.contains(&(i, t)));
                     // W9c spec §7: a `Set` or `Put` task's `value`.
                     let kv_value_of = match (id, ty) {
                         (Some(i), Some(t)) if t == kv::SET || t == kv::PUT => Some(i),
@@ -680,6 +699,58 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                         self.outside(path.clone(), k);
                         if let (Some(task), "value") = (kv_value_of, k.as_str()) {
                             self.kv_value(task, v, here);
+                        } else if is_log && k == "message" {
+                            // Resolves, but a `namespace=` / `full=` written
+                            // in the call is still refused, as on a plugin task.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
+                        } else if k == "runIf" && id.is_some() && ty.is_some() {
+                            // A task's `runIf:` resolves `secret()` (package
+                            // 10a Task 2, through the settle's prefetch), on
+                            // every kind of task. An `id` and a `type` make
+                            // the map a task (or trigger or input, which
+                            // have no `runIf`); a `namespace=` / `full=`
+                            // written in the call is still refused.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
+                        } else if k == "defaults"
+                            && id.is_some()
+                            && ty.is_some()
+                            && path
+                                .strip_prefix("inputs.")
+                                .is_some_and(|rest| !rest.contains('.'))
+                        {
+                            // A flow input's `defaults:` resolves `secret()`
+                            // (package 10a Task 3): rendered at start, the
+                            // value sealed like a SECRET input's. Only the
+                            // flow's own `inputs:` (path `inputs.<id>`), not
+                            // a `Pause`'s `onResume`; a `namespace=` / `full=`
+                            // written in the call is still refused.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
+                        } else if is_trigger_property
+                            && ((k == "inputs" && (in_webhook || in_flow_trigger))
+                                || (k == "when" && in_flow_trigger))
+                        {
+                            // A Webhook or Flow trigger's `inputs:`, and a
+                            // Flow trigger's `when:`, resolve `secret()`
+                            // (package 10a Task 4). `key:` and a Schedule's
+                            // `inputs:` / `when:` stay refused; a
+                            // `namespace=` / `full=` in the call still is.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
                         } else if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
@@ -708,9 +779,30 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
             t.r#type.starts_with(crate::plugins::PREFIX)
                 || crate::worker::handlers::http::resolves_secrets(&t.r#type)
         });
+    let log = crate::plugins::leaves(flow)
+        .into_iter()
+        .filter(|(_, t, _)| {
+            crate::spec::registry::known_type(&t.r#type)
+                .is_some_and(|row| row.r#type == crate::worker::handlers::log::TYPE_ID)
+        })
+        .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
+        .collect();
     let mut walk = Walk {
         plugin: tasks
             .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
+            .collect(),
+        log,
+        webhook: flow
+            .triggers
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Webhook(_)))
+            .map(|t| (t.id.as_str(), t.r#type.as_str()))
+            .collect(),
+        flow_trigger: flow
+            .triggers
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Flow(_)))
+            .map(|t| (t.id.as_str(), t.r#type.as_str()))
             .collect(),
         report,
     };
@@ -5993,10 +6085,9 @@ mod tests {
     }
 
     /// Package #4 Task C3 (spec D5): `secret()` resolves on the http tasks, so
-    /// their properties are exempt under every spelling -- while their `runIf`
-    /// (which egret's task model reads, not the handler) and a `Log` beside
-    /// them are still refused. A `namespace=` written in the call is refused
-    /// there as on a plugin task.
+    /// their properties are exempt under every spelling (and, since package 10a
+    /// Tasks 1-2, so are a `Log`'s `message:` and any task's `runIf:`). A
+    /// `namespace=` written in the call is refused there as on a plugin task.
     #[test]
     fn a_secret_in_an_http_tasks_properties_is_allowed_under_every_spelling() {
         use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
@@ -6016,8 +6107,8 @@ mod tests {
             );
             assert_eq!(
                 paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
-                vec!["tasks.r.runIf".to_string(), "tasks.l.message".to_string()],
-                "{ty}"
+                Vec::<String>::new(),
+                "{ty}: a runIf and a Log's message resolve since 10a Tasks 1 and 2"
             );
             let src = format!(
                 "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: {ty}\n    \
@@ -6030,6 +6121,90 @@ mod tests {
             );
             assert!(paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
         }
+    }
+
+    /// Package 10a Task 1: `secret()` resolves in a `Log` task's `message:`
+    /// (a string or a list, either spelling, at any depth) and ONLY there: its
+    /// `level:` and a `Return`'s `format:` stay refused, and a `namespace=`
+    /// written in the call is refused as on a plugin task.
+    #[test]
+    fn a_secret_in_a_log_tasks_message_is_allowed_and_nowhere_else_on_it() {
+        use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        for ty in ["io.kestra.plugin.core.log.Log", "core.log"] {
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: {ty}\n    \
+                 message: \"{{{{ secret('X') }}}}\"\n  \
+                 - id: m\n    type: {ty}\n    message:\n      - \"{{{{ secret('X') }}}}\"\n  \
+                 - id: n\n    type: {ty}\n    message: hi\n    \
+                 level: \"{{{{ secret('X') }}}}\"\n  \
+                 - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+                 format: \"{{{{ secret('X') }}}}\"\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+                vec!["tasks.n.level".to_string(), "tasks.r.format".to_string()],
+                "{ty}"
+            );
+            let src = format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    type: {ty}\n    \
+                 message: \"{{{{ secret('K', namespace='x') }}}}\"\n"
+            );
+            assert_eq!(
+                paths_of(&src, CODE_SECRET_ARGUMENT_REFUSED),
+                vec!["tasks.l.message".to_string()],
+                "{ty}"
+            );
+            assert!(paths_of(&src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
+        }
+    }
+
+    /// Package 10a Task 2: `secret()` resolves in any task's `runIf:` (a leaf,
+    /// a flowable, a nested task) and in no sibling property of it; a
+    /// `namespace=` written in the call is refused as on a plugin task.
+    #[test]
+    fn a_secret_in_a_tasks_run_if_is_allowed_and_not_beside_it() {
+        use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        let src = "id: f\nnamespace: a.b\ntasks:\n  \
+             - id: s\n    type: io.kestra.plugin.core.flow.Sequential\n    \
+             runIf: \"{{ secret('X') == 'y' }}\"\n    tasks:\n      \
+             - id: r\n        type: io.kestra.plugin.core.debug.Return\n        \
+             runIf: \"{{ secret('X') }}\"\n        format: \"{{ secret('X') }}\"\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+            vec!["tasks.s.tasks.r.format".to_string()],
+            "only the sibling property is refused"
+        );
+        let src = "id: f\nnamespace: a.b\ntasks:\n  - id: l\n    \
+             type: io.kestra.plugin.core.log.Log\n    message: hi\n    \
+             runIf: \"{{ secret('K', namespace='x') }}\"\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_ARGUMENT_REFUSED),
+            vec!["tasks.l.runIf".to_string()]
+        );
+        assert!(paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
+    }
+
+    /// Package 10a Task 3: `secret()` resolves in a flow input's `defaults:`
+    /// and in no sibling property of it; a `namespace=` written in the call is
+    /// refused as on a plugin task.
+    #[test]
+    fn a_secret_in_a_flow_inputs_defaults_is_allowed_and_not_beside_it() {
+        use crate::plugins::{CODE_SECRET_ARGUMENT_REFUSED, CODE_SECRET_OUTSIDE_PLUGIN_TASK};
+        let src = "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: STRING\n    \
+             defaults: \"{{ secret('X') }}\"\n    description: \"{{ secret('X') }}\"\n\
+             tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK),
+            vec!["inputs.i.description".to_string()]
+        );
+        let src = "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: STRING\n    \
+             defaults: \"{{ secret('K', namespace='x') }}\"\n\
+             tasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+        assert_eq!(
+            paths_of(src, CODE_SECRET_ARGUMENT_REFUSED),
+            vec!["inputs.i.defaults".to_string()]
+        );
+        assert!(paths_of(src, CODE_SECRET_OUTSIDE_PLUGIN_TASK).is_empty());
     }
 
     /// Package #4 (spec D4, and the C3 userinfo decision): each refused http

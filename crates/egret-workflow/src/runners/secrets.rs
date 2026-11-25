@@ -4,10 +4,36 @@
 //! # Where `secret()` resolves, and where it does not
 //!
 //! The shared [`super::env::environment`] keeps **refusing** `secret` (the
-//! `REFUSED` row in `functions`, with the pod-spec reason): script tasks,
-//! inputs, `runIf`, `Log` and triggers all render against it. Only
-//! [`render_with_secrets`] registers a working `secret`, per render, over the
-//! refusal on a copy of the environment ([`super::env::render_once_with`]).
+//! `REFUSED` row in `functions`, with the pod-spec reason). Only
+//! [`render_with_secrets`] (and [`render_once_cached`] over the settle's
+//! prefetch, where the render is synchronous inside a transaction) registers a
+//! working `secret`, per render, over the refusal on a copy of the
+//! environment ([`super::env::render_once_with`]).
+//!
+//! `kestra.*` plugin tasks' properties resolve it, and package 10a added four
+//! more surfaces, each masked in logs and walker-allow-listed at save:
+//!
+//! 1. a `Log`'s `message:`;
+//! 2. a task's `runIf:` (only the verdict is stored, never the rendered text);
+//! 3. a flow input's `defaults:` (the value is **sealed** like a `SECRET`
+//!    input, never stored in clear);
+//! 4. a Webhook trigger's `inputs:` and a Flow trigger's `inputs:` and
+//!    `when:` (inputs sealed, `when` stored as a verdict).
+//!
+//! Everything else **stays refused**: a KV `Set`/`Put` value or key, a flow
+//! output's `value:`, `Return.format`, a script task's `commands`, a
+//! Webhook's `key:` (a credential compared per request), a Schedule's
+//! `inputs:` and `when:`, a `dependsOn` dependency's `when:`, a Pause's
+//! `onResume`, and the eval seal. Each would write the value somewhere a
+//! reader without `workflow:use_secrets` could read it. Calling `secret()`
+//! at any surface needs `workflow:use_secrets` to save or publish the flow.
+//!
+//! Known limitations (10a): an input default calling `secret()` resolves only
+//! on a top-level start (scheduler, API, Schedule trigger); on a Subflow
+//! child, a replay with Replace inputs, a Pause `onResume` and a Flow-trigger
+//! fire it stays raw and the run fails at render with the refusal (no leak).
+//! During a secret-store outage a Flow-trigger `when:` that calls `secret()`
+//! is unrenderable and the event is refused (data loss, not a leak).
 //!
 //! # One pass each, never the fixpoint loop (fix round 1, user ruling 1A)
 //!
@@ -507,28 +533,139 @@ impl Resolver {
             Some(Err(e)) => return Err(pebble_error(e.to_string())),
             Some(Ok(data)) => data,
         };
-        let keys = || data.keys().cloned().collect::<Vec<_>>().join(", ");
-        let value = match &call.subkey {
-            Some(subkey) => data.get(subkey).ok_or_else(|| {
-                pebble_error(format!(
-                    "Cannot find secret sub-key '{subkey}' in secret '{name}'; its keys are: {}.",
-                    keys()
-                ))
-            })?,
-            None => data.get(VALUE_KEY).ok_or_else(|| {
-                pebble_error(format!(
-                    "secret '{name}' has no key '{VALUE_KEY}'; its keys are: {}. Name one with \
-                     `subkey=`.",
-                    keys()
-                ))
-            })?,
-        };
-        let mut handed = self.handed.lock().expect("resolve lock");
-        if !handed.contains(value) {
-            handed.push(value.clone());
-        }
-        Ok(MjValue::from(value.as_str()))
+        value_of(&call, data, &self.handed)
     }
+}
+
+/// The value `call` names in `data`, recorded in `handed`.
+fn value_of(
+    call: &Call,
+    data: &BTreeMap<String, String>,
+    handed: &Mutex<Vec<String>>,
+) -> Result<MjValue, MjError> {
+    let name = &call.key;
+    let keys = || data.keys().cloned().collect::<Vec<_>>().join(", ");
+    let value = match &call.subkey {
+        Some(subkey) => data.get(subkey).ok_or_else(|| {
+            pebble_error(format!(
+                "Cannot find secret sub-key '{subkey}' in secret '{name}'; its keys are: {}.",
+                keys()
+            ))
+        })?,
+        None => data.get(VALUE_KEY).ok_or_else(|| {
+            pebble_error(format!(
+                "secret '{name}' has no key '{VALUE_KEY}'; its keys are: {}. Name one with \
+                 `subkey=`.",
+                keys()
+            ))
+        })?,
+    };
+    let mut handed = handed.lock().expect("resolve lock");
+    if !handed.contains(value) {
+        handed.push(value.clone());
+    }
+    Ok(MjValue::from(value.as_str()))
+}
+
+/// The process's secret source, installed once by `runtime::handlers_for`:
+/// what `storage::prefetch` fetches a `secret()` read from, because a render
+/// inside a settle's transaction cannot await one and `settle` carries no
+/// source. Mirrors `storage::install`/`storage::current`.
+static INSTALLED: std::sync::OnceLock<Arc<dyn SecretSource>> = std::sync::OnceLock::new();
+
+/// Install the process's secret source. A second call hands its argument
+/// back and the first stays.
+pub fn install(source: Arc<dyn SecretSource>) -> Result<(), Arc<dyn SecretSource>> {
+    INSTALLED.set(source)
+}
+
+/// The installed source, `None` when this process has none.
+pub fn current() -> Option<Arc<dyn SecretSource>> {
+    INSTALLED.get().cloned()
+}
+
+/// What a prefetch cache answers for one secret (`storage::prefetch`).
+pub(crate) enum Held {
+    /// Fetched: the data map, or why it could not be read.
+    Answer(Result<BTreeMap<String, String>, SecretError>),
+    /// Recorded as a pending read. The render carries on with `""`; the
+    /// attempt is rolled back and renders again with the value.
+    Pending,
+}
+
+/// A text rendered once, and every secret value it was handed.
+pub(crate) struct RenderedText {
+    pub text: String,
+    pub values: Vec<String>,
+}
+
+impl fmt::Debug for RenderedText {
+    /// Neither the text nor the values: both can hold a secret.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RenderedText(<masked>)")
+    }
+}
+
+/// One synchronous, single-pass render of `text` with `secret()` answered by
+/// `read` -- a prefetch cache -- for the surfaces that render inside a
+/// settle's transaction (`runIf`, then inputs and triggers).
+///
+/// The keys `read` is asked for are collected from `text` as pass 1 does
+/// (literal keys, and a render with every secret `""`), and any other key is
+/// refused without being named ([`DEPENDS_ON_A_SECRET`]). A key `read`
+/// answers [`Held::Pending`] gets `""`: the result of an attempt that held
+/// one is discarded by its rollback. **An error is returned masked** with
+/// every value handed out.
+pub(crate) fn render_once_cached(
+    text: &str,
+    cx: &RenderContext,
+    read: Arc<dyn Fn(&str) -> Held + Send + Sync>,
+) -> Result<RenderedText, String> {
+    let collected = Arc::new(Collected::default());
+    collect_text(&collected, text, cx);
+    let allowed: Arc<BTreeSet<String>> =
+        Arc::new(collected.names.lock().expect("collect lock").clone());
+    let handed: Arc<Mutex<Vec<String>>> = Arc::default();
+    let extend = {
+        let handed = handed.clone();
+        move |env: &mut Environment<'static>| {
+            let (handed, allowed, read) = (handed.clone(), allowed.clone(), read.clone());
+            env.add_function("secret", move |rest: Rest<MjValue>| {
+                refuse_in_nested_render()?;
+                let call = parse_call(rest)?;
+                if !allowed.contains(&call.key) {
+                    return Err(pebble_error(DEPENDS_ON_A_SECRET));
+                }
+                match read(&call.key) {
+                    Held::Pending => Ok(MjValue::from("")),
+                    Held::Answer(Err(e)) => Err(pebble_error(e.to_string())),
+                    Held::Answer(Ok(data)) => value_of(&call, &data, &handed),
+                }
+            });
+        }
+    };
+    let rendered = render_once_with(text, cx, &extend);
+    let values = handed.lock().expect("resolve lock").clone();
+    match rendered {
+        Ok(text) => Ok(RenderedText { text, values }),
+        Err(e) => Err(crate::logs::mask(&e.to_string(), &values).into_owned()),
+    }
+}
+
+/// Pass 1 for one string: its literal keys, then a render that records the
+/// keys computed ones name.
+fn collect_text(collected: &Arc<Collected>, text: &str, cx: &RenderContext) {
+    collected
+        .names
+        .lock()
+        .expect("collect lock")
+        .extend(literal_keys(text));
+    let c = collected.clone();
+    let extend = move |env: &mut Environment<'static>| {
+        let c = c.clone();
+        env.add_function("secret", move |rest: Rest<MjValue>| c.call(rest));
+    };
+    let _ = render_once_with(text, cx, &extend);
 }
 
 /// `object` with every string rendered by `render`, keys literal. `path` is

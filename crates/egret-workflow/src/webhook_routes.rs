@@ -217,8 +217,8 @@ use uuid::Uuid;
 
 use crate::routes::WorkflowState;
 use crate::trigger::webhook::{
-    build_output, declared_unsupported, find, render_inputs, ExecutionTrigger, InputContext,
-    KeyContext, WebhookRequest,
+    build_output, declared_unsupported, find, ExecutionTrigger, InputContext, KeyContext,
+    WebhookRequest,
 };
 
 /// The largest webhook body this surface accepts, in bytes.
@@ -642,7 +642,30 @@ async fn handle(
     //
     // Two refusals, two statuses: a capability gap egret owes (409, named) and
     // an author's broken template (400).
-    let inputs = render_inputs(webhook, &InputContext::of(&kcx)).map_err(|r| match r {
+    //
+    // `secret()` in an input resolves here (package 10a Task 4). This handler
+    // holds no transaction, so the read cycle is the plain one: render (a miss
+    // records the read and renders `""`), fetch, render again until nothing is
+    // pending. The `key:` is rendered elsewhere and stays refused.
+    let prefetch = crate::storage::prefetch::Prefetch::new();
+    let mut secrets = crate::trigger::webhook::SecretRender {
+        prefetch: &prefetch,
+        workspace: ws_id,
+        handed: Vec::new(),
+    };
+    let rendered = loop {
+        secrets.handed.clear();
+        let attempt = crate::trigger::webhook::render_inputs_with_secrets(
+            webhook,
+            &InputContext::of(&kcx),
+            Some(&mut secrets),
+        );
+        if !prefetch.has_pending() {
+            break attempt;
+        }
+        prefetch.fetch_pending().await?;
+    };
+    let inputs = rendered.map_err(|r| match r {
         crate::trigger::webhook::InputRefusal::NeedsTriggerContext { .. } => {
             Error::Conflict(r.message(&trigger.id))
         }

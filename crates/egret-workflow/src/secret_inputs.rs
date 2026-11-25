@@ -72,6 +72,77 @@ fn secret_ids(flow: &Flow) -> impl Iterator<Item = &str> {
         .map(|i| i.id.as_str())
 }
 
+/// The ids [`split`] seals: every input declared `type: SECRET`, and (package
+/// 10a Tasks 3 and 4, decision D3) every input whose `defaults:` calls
+/// `secret()` or that a Webhook / Flow trigger's `inputs:` supplies from one.
+///
+/// Kestra stores the plaintext of a `secret()` rendered into a non-SECRET
+/// input; egret seals it as a SECRET one, a stricter divergence. The set is a
+/// property of the DECLARATION, so every writer that splits (a start, a
+/// replay of the stored values, a `Subflow` child) agrees without carrying an
+/// id-set beside the value. The cost is that a value posted for such an input
+/// is sealed too, which hides more, never less.
+fn sealed_ids(flow: &Flow) -> impl Iterator<Item = &str> {
+    flow.inputs
+        .iter()
+        .filter(|i| {
+            i.r#type == InputType::Secret
+                || i.defaults
+                    .as_ref()
+                    .is_some_and(|d| crate::runners::secrets::text_uses_secret(d.source()))
+        })
+        .map(|i| i.id.as_str())
+}
+
+/// Every input key a Webhook or Flow trigger of `flow` supplies from a
+/// template that calls `secret()` (package 10a Task 4) -- DECLARED OR NOT. A
+/// Flow-trigger fire skips the start-time input check, so a key the listener
+/// never declared reaches `split` as it was rendered and must be sealed too.
+/// Like a default, a property of the declaration, so a replay or a child agrees.
+fn trigger_secret_keys(flow: &Flow) -> Vec<String> {
+    fn uses(v: &Value) -> bool {
+        match v {
+            Value::String(s) => crate::runners::secrets::text_uses_secret(s),
+            Value::Array(a) => a.iter().any(uses),
+            Value::Object(m) => m
+                .iter()
+                .any(|(k, v)| crate::runners::secrets::text_uses_secret(k) || uses(v)),
+            _ => false,
+        }
+    }
+    flow.triggers
+        .iter()
+        .filter_map(|t| match &t.kind {
+            crate::models::TriggerKind::Webhook(w) => w.inputs.as_ref(),
+            crate::models::TriggerKind::Flow(f) => f.inputs.as_ref(),
+            _ => None,
+        })
+        .flat_map(|m| m.iter().filter(|(_, v)| uses(v)).map(|(k, _)| k.clone()))
+        .collect()
+}
+
+/// Whether a Webhook or Flow trigger of `flow` has an `inputs:` map that calls
+/// `secret()` in a value AND names a key by a template. The key then renders to
+/// a name this module cannot know (`"{{ 'y' }}"` stores `y`), so the literal
+/// key in [`trigger_secret_keys`] would not match it: every key is sealed
+/// instead, which hides more, never less.
+fn trigger_templates_a_secret_key(flow: &Flow) -> bool {
+    flow.triggers.iter().any(|t| {
+        let map = match &t.kind {
+            crate::models::TriggerKind::Webhook(w) => w.inputs.as_ref(),
+            crate::models::TriggerKind::Flow(f) => f.inputs.as_ref(),
+            _ => None,
+        };
+        map.is_some_and(|m| {
+            m.keys().any(|k| k.contains('{'))
+                && m.values().any(|v| match v {
+                    Value::Null | Value::Bool(_) | Value::Number(_) => false,
+                    other => crate::runners::secrets::text_uses_secret(&other.to_string()),
+                })
+        })
+    })
+}
+
 /// `inputs` with every SECRET input's value replaced by [`MASK`], and the
 /// values themselves sealed for `workflow.executions.secret_inputs`.
 ///
@@ -90,7 +161,14 @@ fn split_with(
         return Ok((inputs, None));
     };
     let mut secret = Map::new();
-    for id in secret_ids(flow) {
+    let mut ids: Vec<String> = sealed_ids(flow)
+        .map(str::to_string)
+        .chain(trigger_secret_keys(flow))
+        .collect();
+    if trigger_templates_a_secret_key(flow) {
+        ids.extend(posted.keys().cloned());
+    }
+    for id in ids.iter().map(String::as_str) {
         if let Some(v) = posted.get_mut(id) {
             if !v.is_null() {
                 secret.insert(id.to_string(), std::mem::replace(v, Value::from(MASK)));

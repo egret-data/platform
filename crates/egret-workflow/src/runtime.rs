@@ -818,6 +818,16 @@ pub async fn handlers_for(
     cfg.validate_plugin_host()
         .map_err(egret_core::Error::InvalidInput)?;
     let mut handlers = Handlers::with_core_tasks(crate::storage::current());
+    // Package 10a Task 2: a `runIf:` renders inside a settle's transaction,
+    // where `secret()` is read through the prefetch cache and fetched by the
+    // transaction's owner from this process-wide source.
+    let _ = crate::runners::secrets::install(secrets.clone());
+    // Package 10a Task 1: `secret()` resolves in a `Log`'s `message:`, so the
+    // deployment's `Log` holds the secret source. `with_core_tasks` keeps the
+    // source-less one (the oracle's registry); this replaces it.
+    handlers.add_publishable(Arc::new(crate::worker::handlers::log::Log::with_secrets(
+        secrets.clone(),
+    )));
     // W9a Task 11: `Delete` and `PurgeCurrentExecutionFiles` need the pool,
     // so they are registered here, for every deployment, with or without a
     // container runner.
@@ -1218,6 +1228,49 @@ mod tests {
         // A runner needs the plugin host's image (a boot error without it).
         cfg.plugin_host.image = Some("egret-plugin-host:dev".into());
         cfg
+    }
+
+    /// Package 10a Task 1: the registry `handlers_for` builds -- production's --
+    /// serves a `Log` that resolves `secret()` (and masks it), under both
+    /// spellings. Dropping the `Log::with_secrets` re-registration leaves
+    /// `with_core_tasks`'s source-less `Log`, which refuses the call: red.
+    #[tokio::test]
+    async fn handlers_for_serves_a_log_that_resolves_secret() {
+        use crate::worker::handlers::testing::recorded;
+
+        struct Pw;
+        #[async_trait::async_trait]
+        impl crate::runners::secrets::SecretSource for Pw {
+            async fn get(
+                &self,
+                _workspace: uuid::Uuid,
+                _name: &str,
+            ) -> std::result::Result<
+                std::collections::BTreeMap<String, String>,
+                crate::runners::secrets::SecretError,
+            > {
+                Ok([("value".to_string(), "hunter2-SENTINEL".to_string())].into())
+            }
+        }
+
+        let cfg = cfg(egret_config::ContainerRunner::None);
+        let (h, _) = handlers_for(&cfg, unconnected_pool(), Arc::new(Pw), Arc::new(NoQuery))
+            .await
+            .expect("builds without a database or a docker daemon");
+        for ty in ["io.kestra.plugin.core.log.Log", "core.log"] {
+            let handler = h.get(ty).unwrap_or_else(|| panic!("{ty} is served"));
+            let (task, sink) = recorded(
+                crate::worker::handlers::log::TYPE_ID,
+                serde_json::json!({"message": "pw={{ secret('P') }}"}),
+            );
+            let out = handler.run(&task).await.unwrap();
+            assert_eq!(out.state, crate::executor::RunState::Success, "{ty}");
+            assert_eq!(
+                sink.texts(),
+                vec![(crate::logs::LogLevel::Info, "pw=******".to_string())],
+                "{ty}: resolved and masked"
+            );
+        }
     }
 
     async fn built(cfg: &egret_config::WorkflowConfig) -> Served {
