@@ -4,6 +4,9 @@
 **Ngày:** 2026-11-25
 **Roadmap:** egret-workflow parity Kestra, gói **#11 (triggers)**, phần **11a**. #11 là một chương trình nhiều gói (decomposition user duyệt): **11a** = bind `trigger.*` (tài liệu này); 11b Schedule parity (`when`/`lateMaximumDelay`/`recoverMissedSchedules`/labels/stopAfter); 11c Webhook parity (synchronous webhooks, webhook `when`, labels, stopAfter); 11d Flow-trigger listener conditions + lifecycle cross-cutting. 11a là keystone, làm trước.
 
+> **Hiệu chỉnh Task 0 (2026-11-25):** egret ĐÃ persist trigger record trong cột `workflow.executions.execution_trigger` sẵn có (migration 0140), shape `{id,type,variables:{...}}`; Schedule + Flow đã populate và **replay copy verbatim**. Nên "cột mới" ở §3.1 là không cần — 11a tái dùng `execution_trigger`. Chỉ thiếu: `build_context` không đọc nó, và route Webhook set `trigger: None`. Plan phản ánh điều này (không migration; chỉ bind + webhook-capture).
+
+
 ## 1. Mục tiêu
 
 Khi một flow được khởi bởi trigger, bind biến của trigger vào render context của **mọi task** trong flow được khởi, để biểu thức `{{ trigger.body }}`, `{{ trigger.date }}`, `{{ trigger.outputs.x }}` render được. Hiện tại không: `build_context` (worker/render.rs) bind `inputs/vars/flow/labels/execution/outputs/tasks/task/taskrun` và **không có root `trigger`**, nên `{{ trigger.* }}` trong task render fail ("Unable to find `trigger`"). Đây là roadmap note 13.

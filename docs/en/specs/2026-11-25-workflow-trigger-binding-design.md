@@ -4,6 +4,9 @@
 **Date:** 2026-11-25
 **Roadmap:** egret-workflow Kestra parity, package **#11 (triggers)**, part **11a**. #11 is a multi-package program (user-approved decomposition): **11a** = `trigger.*` binding (this doc); 11b = Schedule parity (`when`/`lateMaximumDelay`/`recoverMissedSchedules`/labels/stopAfter); 11c = Webhook parity (synchronous webhooks, webhook `when`, labels, stopAfter); 11d = Flow-trigger listener conditions + cross-cutting lifecycle. 11a is the keystone and is built first.
 
+> **Task 0 correction (2026-11-25):** egret ALREADY persists the trigger record in the existing `workflow.executions.execution_trigger` column (migration 0140), shaped `{id,type,variables:{...}}`; Schedule + Flow already populate it and **replay copies it verbatim**. So §3.1's "new column" is unnecessary — 11a reuses `execution_trigger`. Only gaps: `build_context` doesn't read it, and the Webhook route sets `trigger: None`. The plan reflects this (no migration; bind + webhook-capture only).
+
+
 ## 1. Goal
 
 When a flow is started by a trigger, bind the trigger's variables into **every task's render context** of the fired flow, so an expression like `{{ trigger.body }}`, `{{ trigger.date }}` or `{{ trigger.outputs.x }}` renders. Today it does not: `build_context` (worker/render.rs) binds `inputs/vars/flow/labels/execution/outputs/tasks/task/taskrun` and **no `trigger` root**, so `{{ trigger.* }}` in a task fails to render ("Unable to find `trigger`"). This is roadmap note 13.
