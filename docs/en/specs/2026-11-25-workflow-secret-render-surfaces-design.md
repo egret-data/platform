@@ -105,10 +105,170 @@ is lifted. Known starting points (Task 0's grep confirms the full set on the wor
 - Any fixture-keyed test (routes/publish/worker) that uses a Log/runIf/input/trigger `secret()` flow
   as a "must be refused" case — the 9a/9b 6th/7th-file analog. Grep for the fixtures, not just codes.
 
-## 6. Differences / measured facts (Task 0 — fill from Kestra before any terminal is pinned)
+## 6. Differences / measured facts (Task 0, measured 2026-11-25)
 
-*(Empty until Task 0 runs. Record the M1–M4 answers, the inputs seal decision (D3), and any observed
-divergence here, with `file:line` into the Kestra checkout `data-portal/kestra` @ `96893b589`.)*
+Source: Kestra checkout `data-portal/kestra` @ `96893b589`, read (not run). Paths are under
+`core/src/main/java/io/kestra/core/` unless prefixed.
+
+### 6.1 M1 — masking reach: per-logger, NOT execution-wide
+
+`secret()` calls `SecretFunction.consumeSecret` (`runners/pebble/functions/SecretFunction.java:121-128`),
+which invokes the `addSecretConsumer` variable (`RunVariables.SECRET_CONSUMER_VARIABLE_NAME`,
+`runners/RunVariables.java:30`). That consumer is `RunContextLogger::usedSecret`
+(`runners/RunContextLogger.java:187-192`; wired at `RunVariables.java:567-569` and
+`RunContextInitializer.java:144,238,265,280-281`). `usedSecret` adds the plaintext **and its base64** to
+the logger's private `useSecrets` list; every appender replaces them with `******` on its own
+logger's lines (`BaseAppender.replaceSecret`, `RunContextLogger.java:376-385`).
+
+So masking is **per `RunContextLogger`** (one per task run / trigger), not per execution. A secret
+resolved in task A is masked in A's log lines (and a `forDynamicTaskRun` child inherits the parent
+list, `RunContextLogger.java:296`), but a later task B that never resolves it does not mask it.
+**egret divergence (stricter, accepted):** the egret masking set is applied to every line of the
+Surface that carries it, but a value a render resolves at run time is not persisted anywhere — the
+only durable feed is `executions.secret_inputs` / `secret_outputs`. D2's "execution-wide" therefore
+means "every line of the attempt/render that resolved it"; execution-wide persistence exists only
+for sealed inputs (D3). Each lifted surface must mask its own attempt's lines AND its own failure
+message with the values it resolved.
+
+### 6.2 M2 — inputs posture: Kestra STORES the plaintext (non-SECRET types)
+
+`FlowInputOutput.resolveInputValue` (`runners/FlowInputOutput.java:305-408`) renders a `defaults`
+expression with the execution run context (`resolveDefaultValue`, `:372-381`, `:413-427`; its own
+comment names `secret()`). The rendered value goes through `parseType` (`:538-552`):
+`SELECT/STRING/EMAIL -> current.toString()` is stored as plaintext in the execution's inputs; only
+`type: SECRET` is encrypted (`EncryptionService.encrypt` -> `EncryptedString`, `:542-550`). The
+consumer masks it only in the logger of the run context that rendered it (`RunContextFactory.of(flow,
+execution, ...)`, `runners/RunContextFactory.java:113-139`). SECRET inputs are decrypted again for
+expressions (`:322`).
+
+**D3 DECISION: SEAL, through `secret_inputs::split`** — a deliberate, stricter divergence from
+Kestra. Reasons: (a) Kestra's own behaviour is "plaintext in the stored execution", which in egret
+would put the secret in `workflow.executions.inputs` and in the API's execution body in clear — the
+exact class `secret_inputs` exists to prevent; (b) sealing is invisible to rendering (`Surface::load`
+reveals and redacts, `worker/render.rs:230`); (c) the alternative "redact-only" fixes the logs but not
+the stored row. **Two facts Task 3 must carry:**
+1. egret never renders a templated default at start: `inputs_check` stores nothing for it
+   (`inputs_check.rs:359-371`, "not validated, rendered only for a dependent to see") and
+   `worker::render::with_declared_defaults` (`render.rs:1036-1082`) inserts the **raw template source**,
+   which today resolves only because `render_str` re-renders its own output (multi-pass). The 1A
+   ruling's `render_with_secrets` is **one pass** (`runners/secrets.rs` header), so a `{{ inputs.x }}`
+   whose default is `{{ secret('X') }}` would NOT resolve through it. The templated default must be
+   rendered with the resolver **at start**, and the value stored (sealed) — as Kestra does.
+2. `secret_inputs::split` selects ids by declared `type: SECRET` only (`secret_inputs.rs:68-80`, via
+   `secret_ids`). Sealing a STRING input that resolved a secret needs `split` (or a sibling) to take
+   the set of ids to seal.
+
+### 6.3 M3 — trigger timing
+
+Schedule: the trigger run context is `runContextFactory.of(flow, trigger)` in the scheduler
+(`scheduler/.../TriggerScheduler.java:179,203`), with its own `RunContextLogger`
+(`RunContextFactory.java:176-193`; consumer wired by `RunVariables.build` `:567`). `when` renders per
+candidate tick at trigger evaluation (`plugin/core/trigger/Schedule.java:372-381, 548-559`); `inputs`
+and `labels` render when the execution is built, still at evaluation, before the execution exists
+(`plugin/core/trigger/SchedulableExecutionFactory.java:60-87, 91-108`). Webhook: at **request time**,
+`WebhookService.newExecution` (`services/WebhookService.java:147-178`) renders labels
+(`LabelService.fromTrigger`), `conditionService.isValid`, then `runContext.render(trigger.getInputs())`;
+the `key` is rendered per request in `ExecutionController.findWebhook` (`webserver/.../
+ExecutionController.java:889-890`). Values are masked in the **trigger's own** logger only (the
+created execution has its own logger and does not inherit the list). Trigger inputs then flow through
+`readInputs`, so a SECRET-typed target input encrypts and a STRING one stores plaintext (as M2).
+
+### 6.4 M4 — runIf
+
+`runIf` renders to a string and `TruthUtils.isTruthy` (`utils/TruthUtils.java:5-14`: false for
+`false`, `0`, `-0`, empty) — a boolean; the value is never surfaced
+(`executor/.../ExecutorService.java:1298,1377`; `executor/.../handler/ExecutionEventMessageHandler.java:269`;
+`worker/.../WorkerTaskProcessor.java:138`). The only path to text is the error message, logged on the
+task's logger (`ExecutionEventMessageHandler.java:317-318`, `WorkerTaskProcessor.java:153`), which the
+logger masks. Executor-side runIf uses `RunContextFactory.of(flow, task, execution, taskRun)` with a
+logger, so the consumer is wired.
+
+### 6.5 What egret has at each surface TODAY (seams; worktree `05f737230`)
+
+- **Resolver:** `runners::secrets::render_with_secrets(props: &Map<String, Value>, cx: &RenderContext,
+  workspace: Uuid, source: &dyn SecretSource) -> Result<(Map<String, Value>, Resolved), String>`
+  (`secrets.rs:141`, async, one pass, error already masked). **`Resolved.values: Vec<String>` is a
+  public field** (`:123-125`) — there is no accessor method. Redaction feed:
+  `RenderContext::redact(&mut self, &[String])` / `redactions()` (`runners/env.rs:413-420`).
+- **Log:** `worker::handlers::log::Log::run` (`worker/handlers/log.rs:91`, `render_str(text,
+  &task.render)`); `Log` holds no `SecretSource` (kestra/http handlers hold `rt.secrets`,
+  `kestra.rs:204`, `http.rs:200`), and its masked log is built from `task.render.redactions()`
+  (`worker/claim.rs:272`).
+- **runIf:** `worker::render::render_run_if` (`worker/render.rs:1763`), **synchronous**
+  `crate::render_str`, called from `claim.rs:5605` inside a settle pass — a synchronous render cannot
+  await a secret fetch, so the surface needs a pre-fetch (the collect/fetch/resolve split) before the
+  pass. Failure of a runIf is silent (no message) except a read limit (`failed_on_a_limit`).
+- **Inputs at start:** `worker::claim::checked_inputs` / `checked_inputs_for` / `input_renderer`
+  (`claim.rs:4279-4330`) -> `inputs_check::resolve` (`InputRenderer` trait, `inputs_check.rs:137`):
+  renders `dependsOn.condition`, SELECT/MULTISELECT `expression`, and a templated default only for a
+  depended-on input. Synchronous, no secret source; `start_execution_in_on` (`claim.rs:4347`). Stored
+  form: `secret_inputs::split` at the start (`secret_inputs.rs:80`).
+- **Triggers:** egret has NO Schedule `when` (refused: `ScheduleError::UnsupportedWhenCondition`,
+  `trigger/schedule.rs:1277-1300`, roadmap #11) and refuses a templated Schedule `inputs` value at fire
+  (`scheduler/fire.rs:595-606` `refuse_templated`; KI-122 save warning). Real render seams today:
+  Webhook `inputs` (`trigger::webhook::render_inputs`, `webhook.rs:1007`, called at
+  `webhook_routes.rs:645`; sync, no source) and Webhook `key` (`render_key`, `webhook.rs:540`),
+  Flow-trigger `when`/`inputs` (`flow_trigger/process.rs:955 render_when`, `start_fire` `:996`).
+  There is no Webhook `conditions` render; trigger `labels` are a model field (`models/trigger.rs:51`)
+  with no render seam found. **The "trigger" surface of 10a is narrower than the spec's
+  "Schedule/Webhook condition and labels": see §6.7.**
+
+### 6.6 Lift map (grep authority; code + message + fixture YAML)
+
+Refusal CODE `secret_outside_plugin_task` (`plugins/mod.rs:177`), emitted by `spec/validate.rs:614-621`
+(`Walk::outside`, which refuses a `secret()` in EVERY string that is not a `kestra.*`/http task's
+properties — so each lift must be an allow-list of paths, not a removal; `Return.format`, outputs
+`value:`, Set/Put `value`, `key`, script commands must stay refused).
+Refusal MESSAGE: `functions::SECRET_REFUSAL` (`runners/functions.rs:323-326`, text "resolves only on
+`kestra.*` plugin tasks ... no other render (inputs, runIf, Log, triggers) resolves secrets" — becomes
+false and must be reworded; every assertion below on that substring moves with it). Wiring:
+`functions.rs:388` (`("secret", Refusal::Confined(SECRET_REFUSAL))`), re-export `runners/mod.rs:95`.
+
+Code/message sites (src): `src/plugins/mod.rs:174-193` (doc + `CODE_SECRET_OUTSIDE_PLUGIN_TASK`,
+`CODE_SECRET_IN_KV_VALUE`), `src/spec/validate.rs:541-707` (walker + header) and its tests `:5881-6031`
+(`a_secret_in_a_set_or_put_value...`, `a_secret_elsewhere_on_a_set_task...`,
+`a_secret_in_an_http_tasks_properties_is_allowed...` — **asserts `runIf` and a `Log` beside an http
+task are refused: `:6013-6015`, `:6026-6027`**), `:6816-6830` (outputs `value:` — stays refused),
+`src/runners/secrets.rs:1-10` (header prose) and tests `:997, :1026, :1085, :1102`
+(`resolves only on \`kestra.*\``), `src/runners/functions.rs:3795` (constant-keyed),
+`src/runners/nested.rs:55-67,925` (nested `render()` stays refused — keep), `src/outputs.rs:516-535`
+(output `value:` — keep), `src/worker/handlers/storage/items.rs:42,2059-2095` (FilterItems expression
+— keep), `src/storage/prefetch.rs:73` (keep), `src/eval.rs:13-22,403-422` (eval seal — keep),
+`src/secret_inputs.rs:37` (prose).
+
+Tests (tests/): `tests/plugins_gate.rs:1027-1110` (**`secret_outside_a_plugin_tasks_properties_is_refused_by_name`
+— its cases are literally "a plugin task's runIf" (`tasks.q.runIf`), "an input's defaults"
+(`inputs.i.defaults`), "a Log under a flowable's errors" (`tasks.s.errors.e.message`), "a trigger"
+(`triggers.w.key`), plus a script `commands` case; asserts the "resolves only on" message**),
+`tests/plugins_gate.rs:1133-1135,1158-1170` (argument/detector tests — keep), `:813-1000, 1192`
+(WF_USE_SECRETS gate — keep, D5), `tests/publish.rs:917-960` (KV value; negative assertion on the
+message substring), `tests/executions_routes.rs:4090-4302` (eval seal — keep). Not touching a refused
+surface: `tests/http_*.rs`, `tests/plugin_host_live.rs`, `tests/secret_inputs.rs` (names only).
+
+Fixture YAML (oracle-exec): `oracle-exec/corpus/valids/secrets.yaml` (Return `format:` x4 + a Log
+`message:`; stays refused after 10a because of `Return.format`), and
+`oracle-exec/corpus/valids/webhook-secret-key.yaml` (Webhook `key:`). Both are named in
+`oracle-exec/driver.rs:743-751` (the "245" census note) and sit in `VALIDATE_REFUSED`
+(`driver.rs:957-960`, "22"); also `oracle-exec/w5b-plugins.json`, `w9a-storage.json` (plugin-task
+`secret()` only; untouched). **CORPUS-COUPLING WARNING:** the spec's "banks 0 corpus flows" holds only
+if the trigger lift leaves Webhook `key` refused. A lift that allows `secret()` anywhere under
+`triggers:` moves `valids/webhook-secret-key` out of `VALIDATE_REFUSED` and trips the census.
+Decision: keep `triggers.*.key` refused in 10a (see §6.7).
+
+`source_uses_secret` (`runners/secrets.rs:333-348`) walks **every** YAML string leaf and mapping key
+of the whole source (aliases resolved, double-quoted escapes decoded), so it covers Log, runIf,
+inputs and triggers: D5 CONFIRMED, no surface escapes it. It gates create/update/publish
+(`routes.rs:697,824,1159`); a start is not separately gated (the source was gated when saved).
+
+### 6.7 Divergences and concerns recorded for later tasks
+
+1. Masking is per-logger in Kestra; egret masks per resolving render/attempt (+ sealed inputs).
+2. Inputs: seal (stricter than Kestra's plaintext-for-non-SECRET); needs render-at-start for templated
+   defaults and a `split` that takes an id set (§6.2).
+3. Triggers: only Webhook `inputs` and Flow-trigger `when`/`inputs` have a render seam; Schedule
+   `when` (#11) and templated Schedule `inputs` are refused outright and are NOT 10a. Webhook `key`
+   stays refused (corpus coupling, and it is a credential compared per request).
+4. runIf is synchronous in a settle pass: Task 2 needs a pre-fetch before the pass.
 
 ## 7. Scope
 
