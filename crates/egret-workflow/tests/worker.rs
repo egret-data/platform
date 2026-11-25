@@ -1813,9 +1813,10 @@ async fn a_new_start_of_each_refused_flow_is_still_refused(pool: sqlx::PgPool) {
         // A `WorkingDirectory` runs now (plan Task 3, and Task 7 for its
         // properties); a `cache` with no `patterns` is the refusal that remains.
         "id: new-wd\nnamespace: t\ntasks:\n  - id: wd\n    type: io.kestra.plugin.core.flow.WorkingDirectory\n    cache:\n      ttl: PT1H\n    tasks:\n      - id: c\n        type: io.kestra.plugin.core.debug.Return\n        format: c\n".to_string(),
-        // An AllowFailure is planned now (spec §5.2); a `retry:` on the block is
-        // the refusal that remains (spec §2).
-        "id: new-af\nnamespace: t\ntasks:\n  - id: af\n    type: io.kestra.plugin.core.flow.AllowFailure\n    retry:\n      type: constant\n      interval: PT1S\n      maxAttempts: 3\n    tasks:\n      - id: t\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n".to_string(),
+        // (An AllowFailure with a block `retry:` is planned AND started now —
+        // roadmap package 9b lifted its refusal — so it is no longer listed
+        // here; its clean start is covered by the executor drive-tests and the
+        // `valids/retry-with-flowable-errors` corpus run.)
         format!(
             "id: new-ov\nnamespace: t\ntasks:\n  - id: o\n    type: {UNREGISTERED}\n    \
              values:\n      k: v\n"
