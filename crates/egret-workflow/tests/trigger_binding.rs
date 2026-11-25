@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
+const WEBHOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
 const FLOW: &str = "io.kestra.plugin.core.trigger.Flow";
 const SRC: &str = "id: f\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
 
@@ -136,6 +137,62 @@ async fn a_flow_fired_task_renders_the_source_values(pool: sqlx::PgPool) {
         let (msg, state) = task_message(&pool, ex, tpl).await;
         assert_eq!(msg.as_deref(), Some(want), "{tpl} (state {state})");
     }
+}
+
+/// The record the webhook route stores (`ExecutionTrigger` serialised): `body`
+/// only when the request had one. Both coupled columns stay NULL.
+fn webhook_record(body: Option<Value>) -> Value {
+    let mut v = json!({
+        "headers": {"x": ["hdr"]},
+        "parameters": {"x": ["a", "b"]},
+    });
+    if let Some(b) = body {
+        v["body"] = b;
+    }
+    json!({"id": "hook", "type": WEBHOOK, "variables": v})
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_webhook_fired_task_renders_body_headers_parameters(pool: sqlx::PgPool) {
+    let ws = setup(&pool).await;
+    for (tpl, want) in [
+        ("{{ trigger.body.hello }}", "world"),
+        ("{{ trigger.headers.x[0] }}", "hdr"),
+        ("{{ trigger.parameters.x[1] }}", "b"),
+        ("{{ trigger._context.type }}", WEBHOOK),
+        ("{{ trigger._context.id }}", "hook"),
+    ] {
+        let ex = born(
+            &pool,
+            ws,
+            &src_reading(tpl),
+            Some(webhook_record(Some(json!({"hello": "world"})))),
+            false,
+            None,
+        )
+        .await;
+        let (msg, state) = task_message(&pool, ex, tpl).await;
+        assert_eq!(msg.as_deref(), Some(want), "{tpl} (state {state})");
+    }
+}
+
+/// A GET has no `body` key (Kestra parity): reading it fails to render.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_bodyless_webhook_fire_has_no_trigger_body(pool: sqlx::PgPool) {
+    let ws = setup(&pool).await;
+    let tpl = "{{ trigger.body }}";
+    let ex = born(
+        &pool,
+        ws,
+        &src_reading(tpl),
+        Some(webhook_record(None)),
+        false,
+        None,
+    )
+    .await;
+    let (msg, state) = task_message(&pool, ex, tpl).await;
+    assert_eq!(msg, None, "no body key: the task must not render");
+    assert_eq!(state, "FAILED");
 }
 
 /// Guard 2: the Flow trigger's OWN `when`/`inputs` context
