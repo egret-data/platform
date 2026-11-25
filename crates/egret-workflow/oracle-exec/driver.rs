@@ -1535,6 +1535,20 @@ async fn read_trace_inner(
         // (an execution with no task_runs at all, e.g. the subflow-link control).
         let parent = run_ix.map(|ix| {
             let ix = ix.max(0) as usize;
+            // The `unwrap_or(ix)` fallback is only legitimate when `ix` is past
+            // the end (an execution that surfaced no runs, e.g. the subflow-link
+            // control). An in-range `ix` that maps to `None` means a *discarded*
+            // run is a sub-execution's parent -- which cannot happen today (a
+            // discarded errors run is a childless leaf), but if a future corpus
+            // flow nests a spawning task inside an AllowFailure block's `errors:`
+            // under a block retry, the fallback would silently mis-link the
+            // parent. Fail loudly the instant that shape appears rather than
+            // produce a false green/red.
+            debug_assert!(
+                ix >= old_to_new.len() || old_to_new[ix].is_some(),
+                "sub-execution parent run_ix {ix} points at a discarded run; \
+                 the read_trace_inner index remap is silently wrong",
+            );
             old_to_new.get(ix).copied().flatten().unwrap_or(ix)
         });
         spawned.push(Box::pin(read_trace_inner(pool, child, parent, loop_value)).await?);
