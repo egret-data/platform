@@ -64,13 +64,14 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use egret_core::{Error, Result};
 use futures_util::io::AsyncBufReadExt as _;
-use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
+use k8s_openapi::api::core::v1::{ContainerStatus, Pod, Secret};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, LogParams, PostParams};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::pod_spec::{
-    self, attempt_of, pod_name, PodConfig, DELETE_ANNOTATION, ENDED_MARKER, FILES_IN, FILES_OUT,
-    MAIN, MARKERS_DIR, READY_MARKER, STDERR_FILE,
+    self, attempt_of, pod_name, secret_name, PodConfig, DELETE_ANNOTATION, ENDED_MARKER, FILES_IN,
+    FILES_OUT, MAIN, MARKERS_DIR, READY_MARKER, STDERR_FILE,
 };
 use crate::logs::{LogLevel, LogRepo, RunIdentity};
 use crate::scripts::RunnerSpec;
@@ -195,7 +196,17 @@ impl KubernetesRunner {
 
     /// The pod by name; `Ok(false)` when it already existed (re-attach),
     /// `Ok(true)` when this call created it.
-    async fn get_or_create(&self, name: &str, pod: &Pod) -> Result<bool> {
+    ///
+    /// `secret_env` non-empty: on a create, the pod is created first, then
+    /// the per-attempt Secret with the pod as owner (create-only RBAC; the
+    /// kubelet holds the container until the Secret appears). A re-attach
+    /// also ensures the Secret (idempotent), repairing a crash between the two.
+    async fn get_or_create(
+        &self,
+        name: &str,
+        pod: &Pod,
+        secret: Option<(&str, &BTreeMap<String, String>)>,
+    ) -> Result<bool> {
         if let Some(existing) = self
             .pods()
             .get_opt(name)
@@ -207,10 +218,29 @@ impl KubernetesRunner {
                     "the task's pod {name} is being deleted (the run was cancelled)"
                 )));
             }
+            // A crash between the pod and its Secret leaves the pod waiting
+            // on a Secret that never comes: provision it now (409 = present).
+            if let Some((secret_name, values)) = secret {
+                self.ensure_secret(secret_name, values, name, &existing)
+                    .await?;
+            }
             return Ok(false);
         }
         match self.pods().create(&PostParams::default(), pod).await {
-            Ok(_) => Ok(true),
+            Ok(created) => {
+                if let Some((secret_name, values)) = secret {
+                    if let Err(e) = self
+                        .ensure_secret(secret_name, values, name, &created)
+                        .await
+                    {
+                        // The pod would wait forever on a Secret that is not
+                        // coming: remove it, best effort, and fail the task.
+                        let _ = self.delete_pod(name).await;
+                        return Err(e);
+                    }
+                }
+                Ok(true)
+            }
             // Another holder created it between the read and the create.
             Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(false),
             // The API refused the pod as written: an author's value (an env
@@ -219,6 +249,58 @@ impl KubernetesRunner {
                 Error::InvalidInput(format!("Kubernetes refused the task's pod: {}", ae.message)),
             ),
             Err(e) => Err(internal("creating the task pod", e)),
+        }
+    }
+
+    /// Create the per-attempt Secret already owned by the just-created pod,
+    /// so k8s GC removes it with the pod and no `patch` right is needed.
+    async fn ensure_secret(
+        &self,
+        secret_name: &str,
+        values: &BTreeMap<String, String>,
+        pod_name: &str,
+        pod: &Pod,
+    ) -> Result<()> {
+        let fail = |e: &dyn std::fmt::Display, forbidden: bool| {
+            let hint = if forbidden {
+                " (the engine service account needs `create` on Secrets there)"
+            } else {
+                ""
+            };
+            Error::InvalidInput(format!(
+                "cannot create the Secret for secret() env in namespace {}: {e}{hint}",
+                self.cfg.namespace
+            ))
+        };
+        let uid = pod
+            .metadata
+            .uid
+            .clone()
+            .ok_or_else(|| fail(&"the API returned no uid for the task pod", false))?;
+        let body = Secret {
+            metadata: kube::api::ObjectMeta {
+                name: Some(secret_name.to_string()),
+                namespace: Some(self.cfg.namespace.clone()),
+                owner_references: Some(vec![OwnerReference {
+                    api_version: "v1".into(),
+                    kind: "Pod".into(),
+                    name: pod_name.to_string(),
+                    uid,
+                    controller: Some(false),
+                    block_owner_deletion: Some(false),
+                }]),
+                ..Default::default()
+            },
+            string_data: Some(values.clone()),
+            ..Default::default()
+        };
+        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), &self.cfg.namespace);
+        match secrets.create(&PostParams::default(), &body).await {
+            Ok(_) => Ok(()),
+            // Already there from the original creation (owner set then).
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 403 => Err(fail(&ae.message, true)),
+            Err(e) => Err(fail(&e, false)),
         }
     }
 
@@ -364,16 +446,16 @@ impl KubernetesRunner {
         } else {
             (None, Replayed::default())
         };
+        let log = task.log.masked(&cmds.secret_masks);
         let split = pod_spec::stderr_is_separable(cmds);
         if !split {
-            task.log
-                .line(
-                    LogLevel::Warn,
-                    "The interpreter is not a shell, so under the Kubernetes task runner this \
+            log.line(
+                LogLevel::Warn,
+                "The interpreter is not a shell, so under the Kubernetes task runner this \
                      task's stderr cannot be separated from its stdout: its stderr lines are \
                      logged at INFO and counted as stdout.",
-                )
-                .await;
+            )
+            .await;
         }
         let mut result = CommandsResult::default();
         let mut state = StreamState::default();
@@ -427,7 +509,7 @@ impl KubernetesRunner {
             while let Some((is_err, line)) = rx.recv().await {
                 // Compared as stored, not as read (W5b fix round 1, M1).
                 stream_replayed_line(
-                    task,
+                    &log,
                     observer,
                     &mut result,
                     &mut state,
@@ -1361,7 +1443,10 @@ impl TaskRunner for KubernetesRunner {
         let pod = pod_spec::build(task, commands, spec, &self.cfg).map_err(Error::InvalidInput)?;
         let name = pod_name(task.run_id, attempt_of(task));
 
-        let created = self.get_or_create(&name, &pod).await?;
+        let secret_name = secret_name(task.run_id, attempt_of(task));
+        let secret = (!commands.secret_env.is_empty())
+            .then_some((secret_name.as_str(), &commands.secret_env));
+        let created = self.get_or_create(&name, &pod, secret).await?;
         if !created {
             tracing::info!(run = %task.run_id, pod = %name, "re-attaching to the task's existing pod");
         }

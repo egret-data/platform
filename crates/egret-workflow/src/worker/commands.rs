@@ -111,7 +111,7 @@
 //!   store like any other stored input.)*
 //! * **No registry credentials, no `shmSize`, `deviceRequests`, `privileged`,
 //!   `networkMode`, volumes.** W5a Task 5 implements `pullPolicy`, `cpu.cpus`,
-//!   `memory.memory` and `delete` (see [`create_args`]); every other Kestra
+//!   `memory.memory` and `delete` (see [`create_args_with`]); every other Kestra
 //!   `Docker` property is refused at save by `scripts::parse`, never ignored.
 
 use std::collections::BTreeMap;
@@ -225,6 +225,13 @@ pub struct TaskCommands {
     /// `TaskCommands.getEnv()`. `BTreeMap` so the argv this produces is ordered
     /// and therefore assertable.
     pub env: BTreeMap<String, String>,
+    /// Secret-bearing env entries (key -> resolved value), injected through a
+    /// SECURE channel by the runner (k8s Secret+secretKeyRef; docker --env-file),
+    /// never inline in the pod spec / docker CLI. Package 10b.
+    pub secret_env: BTreeMap<String, String>,
+    /// Every secret value to redact from this task's stdout/stderr (from
+    /// `runners::secrets::Resolved.values`). Package 10b.
+    pub secret_masks: Vec<String>,
     /// Files the handler itself writes into [`WORKING_DIR`] before the command
     /// starts, keyed by their name relative to it.
     ///
@@ -377,6 +384,11 @@ impl std::fmt::Debug for TaskCommands {
             .field("before_commands", &self.before_commands)
             .field("commands", &self.commands)
             .field("env", &self.env)
+            .field("secret_env", &self.secret_env.keys().collect::<Vec<_>>())
+            .field(
+                "secret_masks",
+                &format_args!("<{} values>", self.secret_masks.len()),
+            )
             .field("input_files", &files)
             .field("stored_inputs", &stored)
             .field("output_files", &self.output_files)
@@ -708,7 +720,7 @@ pub const LOG_DEBUG_MARKER: &str = "##kestra:log:debug##";
 pub const LOG_INFO_MARKER: &str = "##kestra:log:info##";
 
 /// One line from a command's stream: decide it with [`ingest_line`], show it
-/// to `observer`, and write it to `task.log`.
+/// to `observer`, and write it to `log`.
 ///
 /// The async half of line handling, shared by [`DockerRunner`] and every fake
 /// runner in the tests, so a test driving a fake exercises the same levels and
@@ -717,7 +729,7 @@ pub const LOG_INFO_MARKER: &str = "##kestra:log:info##";
 // one call shape shared by three runners and a fake would only rename them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_line(
-    task: &TaskInput,
+    log: &crate::logs::RunLog,
     observer: &dyn LineObserver,
     result: &mut CommandsResult,
     state: &mut StreamState,
@@ -730,7 +742,7 @@ pub(crate) async fn stream_line(
         ingest_line(result, state, max_vars_bytes, line, is_err, host_protocol)
     {
         observer.observe(level, &text);
-        task.log.line(level, &text).await;
+        log.line(level, &text).await;
     }
 }
 
@@ -746,7 +758,7 @@ pub(crate) async fn stream_line(
 /// `RunLog::stored_form`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_replayed_line(
-    task: &TaskInput,
+    log: &crate::logs::RunLog,
     observer: &dyn LineObserver,
     result: &mut CommandsResult,
     state: &mut StreamState,
@@ -759,11 +771,11 @@ pub(crate) async fn stream_replayed_line(
     if let Some((level, text)) =
         ingest_line(result, state, max_vars_bytes, line, is_err, host_protocol)
     {
-        if replayed.already_stored(&task.log.stored_form(&text)) {
+        if replayed.already_stored(&log.stored_form(&text)) {
             return;
         }
         observer.observe(level, &text);
-        task.log.line(level, &text).await;
+        log.line(level, &text).await;
     }
 }
 
@@ -1797,9 +1809,21 @@ impl DockerRunner {
         observer: &dyn LineObserver,
         name: &str,
     ) -> Result<CommandsResult> {
-        let borrowed_args = create_args(task, commands, spec, name);
+        // Secret-bearing env goes through a 0600 `--env-file`, never `--env
+        // K=V` (which the host's `ps` would show). The guard unlinks the file
+        // on every path out of `docker create`, `?` included.
+        let env_file = SecretEnvFile::write(name, &commands.secret_env)?;
+        let borrowed_args = create_args_with(
+            task,
+            commands,
+            spec,
+            name,
+            env_file.as_ref().map(SecretEnvFile::path),
+        );
         let borrowed: Vec<&str> = borrowed_args.iter().map(String::as_str).collect();
-        let created = self.cli(&borrowed).await?;
+        let created = self.cli(&borrowed).await;
+        drop(env_file);
+        let created = created?;
         if !created.status.success() {
             return Err(self
                 .classify("create", &String::from_utf8_lossy(&created.stderr))
@@ -1837,9 +1861,10 @@ impl DockerRunner {
             .map_err(|e| {
                 Error::Internal(anyhow::anyhow!("could not run `{} logs`: {e}", self.binary))
             })?;
+        let log = task.log.masked(&commands.secret_masks);
         let mut result = self
             .pump(
-                task,
+                &log,
                 observer,
                 &mut child,
                 Some(&mut replayed),
@@ -1876,7 +1901,7 @@ impl DockerRunner {
     /// (`replayed`) is dropped once.
     async fn pump(
         &self,
-        task: &TaskInput,
+        log: &crate::logs::RunLog,
         observer: &dyn LineObserver,
         child: &mut tokio::process::Child,
         mut replayed: Option<&mut crate::worker::k8s::runner::Replayed>,
@@ -1909,7 +1934,7 @@ impl DockerRunner {
             match replayed.as_deref_mut() {
                 Some(r) => {
                     stream_replayed_line(
-                        task,
+                        log,
                         observer,
                         &mut result,
                         &mut state,
@@ -1923,7 +1948,7 @@ impl DockerRunner {
                 }
                 None => {
                     stream_line(
-                        task,
+                        log,
                         observer,
                         &mut result,
                         &mut state,
@@ -2180,8 +2205,9 @@ impl DockerRunner {
                 ))
             })?;
 
+        let log = task.log.masked(&commands.secret_masks);
         let mut result = self
-            .pump(task, observer, &mut child, None, commands.host_protocol)
+            .pump(&log, observer, &mut child, None, commands.host_protocol)
             .await?;
         let status = child.wait().await.map_err(io_err)?;
 
@@ -2975,11 +3001,24 @@ fn parse_docker_ps(stdout: &str) -> Vec<ListedContainer> {
 /// over xfs with `pquota` -- so a task on this runner can fill the daemon's
 /// disk. The Kubernetes runner bounds it (`ephemeral-storage` and
 /// `emptyDir.sizeLimit`); this runner is for local development and tests.
+#[cfg(test)]
 pub(crate) fn create_args(
     task: &TaskInput,
     commands: &TaskCommands,
     spec: &RunnerSpec,
     name: &str,
+) -> Vec<String> {
+    create_args_with(task, commands, spec, name, None)
+}
+
+/// [`create_args_with`] carries the secret env-file, when there is one: `--env-file
+/// <path>` carries `commands.secret_env`, so no secret value is in the argv.
+pub(crate) fn create_args_with(
+    task: &TaskInput,
+    commands: &TaskCommands,
+    spec: &RunnerSpec,
+    name: &str,
+    env_file: Option<&std::path::Path>,
 ) -> Vec<String> {
     let argv = commands.argv();
     let mut create: Vec<String> = vec![
@@ -3022,6 +3061,10 @@ pub(crate) fn create_args(
         create.push("--env".into());
         create.push(format!("{k}={v}"));
     }
+    if let Some(path) = env_file {
+        create.push("--env-file".into());
+        create.push(path.display().to_string());
+    }
     // `withEntrypoint(interpreter)` + `withCmd(joined)`. The CLI takes one
     // string for `--entrypoint`, so the interpreter's head is the entrypoint
     // and its tail leads the CMD — which produces the identical argv, because
@@ -3038,6 +3081,65 @@ pub(crate) fn create_args(
     create.push(commands.container_image.clone());
     create.extend(argv[1..].iter().cloned());
     create
+}
+
+/// A private (0600) env-file holding `commands.secret_env`, unlinked when
+/// dropped -- so `docker create` can read it and no early return leaks it.
+pub(crate) struct SecretEnvFile {
+    path: std::path::PathBuf,
+}
+
+impl SecretEnvFile {
+    /// `None` when there is no secret env (nothing is written).
+    pub(crate) fn write(name: &str, secret_env: &BTreeMap<String, String>) -> Result<Option<Self>> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if secret_env.is_empty() {
+            return Ok(None);
+        }
+        // `--env-file` is line-oriented with no escaping: refuse what it
+        // cannot carry rather than inject or truncate. Never echo the value.
+        for (k, v) in secret_env {
+            let bad = |c: char| matches!(c, '\n' | '\r' | '\0');
+            if k.contains(|c| bad(c) || c == '=') || v.contains(bad) {
+                return Err(Error::InvalidInput(format!(
+                    "a secret() value for env var `{}` contains a newline (or \
+                     carriage-return/NUL), which the Docker runner's --env-file cannot \
+                     carry safely; use the Kubernetes runner for multi-line secrets",
+                    k.escape_debug()
+                )));
+            }
+        }
+        let path = std::env::temp_dir().join(format!("egret-env-{name}-{}", uuid::Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| Error::Internal(anyhow::anyhow!("could not create the env-file: {e}")))?;
+        // The guard exists before the content is written, so a failed write
+        // still unlinks the file.
+        let guard = Self { path };
+        let mut body = String::new();
+        for (k, v) in secret_env {
+            body.push_str(&format!("{k}={v}\n"));
+        }
+        file.write_all(body.as_bytes())
+            .map_err(|e| Error::Internal(anyhow::anyhow!("could not write the env-file: {e}")))?;
+        Ok(Some(guard))
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for SecretEnvFile {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            tracing::debug!(error = %e, "could not remove the secret env-file");
+        }
+    }
 }
 
 /// What a failed [`write_tar`](crate::storage::transfer::write_tar) is to a
@@ -3423,6 +3525,81 @@ mod tests {
                 "{name} holds a character docker will refuse"
             );
         }
+    }
+
+    /// Secret env travels by a 0600 `--env-file` that is unlinked on drop; the
+    /// value is never in the argv; non-secret env stays `--env K=V`.
+    #[test]
+    fn secret_env_goes_by_a_private_env_file_not_argv() {
+        use std::os::unix::fs::PermissionsExt;
+        let task = leased(1_700_000_000);
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["echo hi".into()],
+            env: BTreeMap::from([("PLAIN".into(), "visible".into())]),
+            secret_env: BTreeMap::from([("TOK".into(), "shh-9f2".into())]),
+            ..TaskCommands::default()
+        };
+        let spec = RunnerSpec::defaults(crate::scripts::RunnerKind::Docker);
+        let file = SecretEnvFile::write("n", &cmds.secret_env)
+            .expect("write")
+            .expect("a file for a non-empty secret_env");
+        let path = file.path().to_path_buf();
+        let a = create_args_with(&task, &cmds, &spec, "n", Some(&path));
+
+        assert!(
+            a.windows(2).any(|w| w == ["--env", "PLAIN=visible"]),
+            "{a:?}"
+        );
+        let at = a
+            .iter()
+            .position(|x| x == "--env-file")
+            .expect("--env-file");
+        assert_eq!(a[at + 1], path.display().to_string());
+        assert!(!a.iter().any(|x| x.starts_with("TOK=")), "{a:?}");
+        assert!(!a.iter().any(|x| x.contains("shh-9f2")), "{a:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "TOK=shh-9f2\n");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        drop(file);
+        assert!(!path.exists(), "the guard must unlink the env-file");
+
+        // No secret env: no file, no flag.
+        assert!(SecretEnvFile::write("n", &BTreeMap::new())
+            .unwrap()
+            .is_none());
+        let plain = create_args(
+            &task,
+            &TaskCommands {
+                container_image: "alpine".into(),
+                commands: vec!["x".into()],
+                ..TaskCommands::default()
+            },
+            &spec,
+            "n",
+        );
+        assert!(!plain.iter().any(|x| x == "--env-file"));
+    }
+
+    #[test]
+    fn a_secret_value_with_a_newline_is_refused_without_a_file() {
+        let env = BTreeMap::from([("PEM".to_string(), "a\nEVIL=1-zz9".to_string())]);
+        let err = match SecretEnvFile::write("nl-test", &env) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a newline value must be refused"),
+        };
+        assert!(err.contains("PEM"), "{err}");
+        assert!(!err.contains("EVIL") && !err.contains("zz9"), "{err}");
+        let left = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("egret-env-nl-test")
+            });
+        assert!(!left, "no env-file may be left");
     }
 
     /// **`docker create` carries the `taskRunner:` properties the Docker runner
@@ -4016,7 +4193,13 @@ mod tests {
             .spawn()
             .expect("sh");
         DockerRunner::new()
-            .pump(&task, &NoObserver, &mut child, Some(&mut replayed), true)
+            .pump(
+                &task.log,
+                &NoObserver,
+                &mut child,
+                Some(&mut replayed),
+                true,
+            )
             .await
             .expect("pumped");
         child.wait().await.expect("exited");
