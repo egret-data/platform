@@ -4,18 +4,36 @@
 //! # Where `secret()` resolves, and where it does not
 //!
 //! The shared [`super::env::environment`] keeps **refusing** `secret` (the
-//! `REFUSED` row in `functions`, with the pod-spec reason): script tasks and
-//! triggers render against it, except the lifted trigger paths below. A `Log`'s `message:` resolves
-//! it through [`render_with_secrets`] (package 10a Task 1), and a task's
-//! `runIf:` and a flow input's `defaults:` through [`render_once_cached`] over
-//! the settle's prefetch (Tasks 2 and 3: the render is synchronous inside a
-//! transaction; an input's value is then sealed, never stored in clear). A
-//! Webhook or Flow trigger's `inputs:` and a Flow trigger's `when:` resolve the
-//! same way (Task 4); a Webhook's `key:` (a credential compared per request),
-//! a Schedule's `inputs:` and `when:`, and a `dependsOn` dependency's `when:`
-//! stay refused. Only
-//! [`render_with_secrets`] registers a working `secret`, per render, over the
-//! refusal on a copy of the environment ([`super::env::render_once_with`]).
+//! `REFUSED` row in `functions`, with the pod-spec reason). Only
+//! [`render_with_secrets`] (and [`render_once_cached`] over the settle's
+//! prefetch, where the render is synchronous inside a transaction) registers a
+//! working `secret`, per render, over the refusal on a copy of the
+//! environment ([`super::env::render_once_with`]).
+//!
+//! `kestra.*` plugin tasks' properties resolve it, and package 10a added four
+//! more surfaces, each masked in logs and walker-allow-listed at save:
+//!
+//! 1. a `Log`'s `message:`;
+//! 2. a task's `runIf:` (only the verdict is stored, never the rendered text);
+//! 3. a flow input's `defaults:` (the value is **sealed** like a `SECRET`
+//!    input, never stored in clear);
+//! 4. a Webhook trigger's `inputs:` and a Flow trigger's `inputs:` and
+//!    `when:` (inputs sealed, `when` stored as a verdict).
+//!
+//! Everything else **stays refused**: a KV `Set`/`Put` value or key, a flow
+//! output's `value:`, `Return.format`, a script task's `commands`, a
+//! Webhook's `key:` (a credential compared per request), a Schedule's
+//! `inputs:` and `when:`, a `dependsOn` dependency's `when:`, a Pause's
+//! `onResume`, and the eval seal. Each would write the value somewhere a
+//! reader without `workflow:use_secrets` could read it. Calling `secret()`
+//! at any surface needs `workflow:use_secrets` to save or publish the flow.
+//!
+//! Known limitations (10a): an input default calling `secret()` resolves only
+//! on a top-level start (scheduler, API, Schedule trigger); on a Subflow
+//! child, a replay with Replace inputs, a Pause `onResume` and a Flow-trigger
+//! fire it stays raw and the run fails at render with the refusal (no leak).
+//! During a secret-store outage a Flow-trigger `when:` that calls `secret()`
+//! is unrenderable and the event is refused (data loss, not a leak).
 //!
 //! # One pass each, never the fixpoint loop (fix round 1, user ruling 1A)
 //!

@@ -1121,6 +1121,99 @@ fn secret_outside_a_plugin_tasks_properties_is_refused_by_name() {
     assert!(errors_of(&ok).is_empty(), "{:?}", errors_of(&ok));
 }
 
+/// Package 10a Task 5, D5: lifting a surface does not lift the permission.
+/// A caller without `workflow:use_secrets` cannot save a flow that calls
+/// `secret()` at any of the lifted surfaces.
+#[tokio::test]
+async fn a_lifted_surface_still_needs_workflow_use_secrets_to_save() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _admin) = common::seed_workspace(&db).await;
+    let editor = another_user(&db).await;
+    common::grant(&db, ws, editor, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app_with_scripts(&db, scripts::ScriptSettings::default()).await;
+    let flows = format!("/api/ws/{ws}/workflows/flows");
+    let s = "{{ secret('db') }}";
+    let log = "type: io.kestra.plugin.core.log.Log\n    message: hi";
+    let cases = [
+        (
+            "a Log message",
+            format!("id: f\nnamespace: g.a\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: \"{s}\"\n"),
+        ),
+        (
+            "a runIf",
+            format!("id: f\nnamespace: g.b\ntasks:\n  - id: l\n    {log}\n    runIf: \"{s}\"\n"),
+        ),
+        (
+            "an input default",
+            format!("id: f\nnamespace: g.c\ninputs:\n  - id: i\n    type: STRING\n    defaults: \"{s}\"\ntasks:\n  - id: l\n    {log}\n"),
+        ),
+        (
+            "a Webhook trigger input",
+            format!("id: f\nnamespace: g.d\ntasks:\n  - id: l\n    {log}\ntriggers:\n  - id: w\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: k\n    inputs:\n      x: \"{s}\"\n"),
+        ),
+    ];
+    for (name, src) in cases {
+        let res = common::post(&app, &flows, editor, json!({ "source": src })).await;
+        let (st, body) = (res.status(), common::body_text(res).await);
+        assert!(
+            st == StatusCode::FORBIDDEN && body.contains(USE_SECRETS),
+            "{name}: {st} {body}"
+        );
+    }
+}
+
+/// Package 10a Task 5, D4: the surfaces 10a did NOT lift stay refused, one
+/// assertion each (the lifted ones are pinned beside their own surface).
+#[test]
+fn the_confined_surfaces_still_refuse_secret_at_save() {
+    let log = "  - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n";
+    let cases = [
+        (
+            "a KV Set value",
+            format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: k\n    type: io.kestra.plugin.core.kv.Set\n    \
+                 key: m\n    value: {SECRET}\n"
+            ),
+            "tasks.k.value",
+            plugins::CODE_SECRET_IN_KV_VALUE,
+        ),
+        (
+            "a KV Set key",
+            format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: k\n    type: io.kestra.plugin.core.kv.Set\n    \
+                 key: {SECRET}\n    value: v\n"
+            ),
+            "tasks.k.key",
+            plugins::CODE_SECRET_OUTSIDE_PLUGIN_TASK,
+        ),
+        (
+            "a flow output value",
+            format!(
+                "id: f\nnamespace: a.b\ntasks:\n{log}outputs:\n  - id: o\n    type: STRING\n    value: {SECRET}\n"
+            ),
+            "outputs.o.value",
+            plugins::CODE_SECRET_OUTSIDE_PLUGIN_TASK,
+        ),
+        (
+            "a Return's format",
+            format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: r\n    type: io.kestra.plugin.core.debug.Return\n    \
+                 format: {SECRET}\n"
+            ),
+            "tasks.r.format",
+            plugins::CODE_SECRET_OUTSIDE_PLUGIN_TASK,
+        ),
+    ];
+    for (name, src, path, code) in cases {
+        let errs = errors_of(&src);
+        let f = errs
+            .iter()
+            .find(|f| f.code == code)
+            .unwrap_or_else(|| panic!("{name}: {errs:?}"));
+        assert_eq!(f.path, path, "{name}");
+    }
+}
+
 #[test]
 fn namespace_and_full_written_in_a_call_are_refused_at_publish() {
     let with = |call: &str| {

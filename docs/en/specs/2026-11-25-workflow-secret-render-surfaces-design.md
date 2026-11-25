@@ -279,13 +279,33 @@ inputs and triggers: D5 CONFIRMED, no surface escapes it. It gates create/update
 
 ## 7. Scope
 
-**In:** resolve `secret()` at Log `message:`, task `runIf:`, flow input value/default, and
-Schedule/Webhook triggers; mask every handed-out value execution-wide via the redactions; lift the
-matching refusals; the inputs seal posture per M2; tests; docs.
+**In (as built):** `secret()` resolves at four surfaces, each masked and walker-allow-listed:
+Log `message:`, task `runIf:` (verdict stored, never the text), flow input `defaults:` (sealed like a
+`SECRET` input), and Webhook `inputs:` + Flow-trigger `inputs:`/`when:` (inputs sealed, `when` a
+verdict). Every handed-out value is masked in logs; the inputs seal posture per M2; tests; docs.
 
-**Out:** `secret()` in script/container **env** (→ 10b); the Kubernetes runner (→ #17); `secret()` in
-**KV value** and task **output `value:`** (§3.1 security divergence, unchanged); the eval endpoint seal
-(unchanged); any new secret *source* or *store* (the workspace secret store is unchanged).
+**Out / still refused:** KV `Set`/`Put` value and key, task and flow output `value:`,
+`Return.format`, script `commands`, Webhook `key:`, Schedule templated `inputs:`/`when:`, `dependsOn`
+dependency `when:`, Pause `onResume`, and the eval endpoint seal. Also out: `secret()` in
+script/container **env** (-> 10b), the Kubernetes runner (-> #17), any new secret *source*. Banks are
+unchanged (census tuple, `LIVE` 299, `VALIDATE_REFUSED` 21): `valids/webhook-secret-key` (Webhook
+`key`) and `valids/secrets` (`Return.format`) stay refused.
+
+**As-built notes.** Reads go through the per-attempt `Prefetch` (a third kind, `secret`), because
+runIf/inputs/trigger renders are synchronous inside a transaction. A seal set is *derived* from the
+declaration (every `SECRET` input, every input whose default calls `secret()`, every key a trigger
+supplies from a `secret()` template, declared or not), so replay and Subflow re-seal on every path.
+`workflow:use_secrets` is still required to save or publish a flow that calls `secret()` at any surface.
+
+**Known limitations (follow-ups, both fail safe):**
+
+- A `secret()` in a flow **input default** resolves only on a top-level start (scheduler, API,
+  Schedule-trigger). On a **Subflow child**, a **replay with Replace inputs**, a **Pause `onResume`**
+  and a **Flow-trigger fire**, the default stays raw and the run fails at render with the secret
+  refusal (no leak). Follow-up: extend those paths.
+- During a **secret-store outage**, a Flow-trigger `when` that calls `secret()` is treated as
+  unrenderable and the event is refused/skipped (data loss, not a leak). Follow-up: align with how
+  `runIf` surfaces the outage.
 
 ## 8. Testing
 

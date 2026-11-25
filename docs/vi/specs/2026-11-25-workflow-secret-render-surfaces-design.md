@@ -256,13 +256,33 @@ không bị chặn riêng (source đã bị chặn lúc lưu).
 
 ## 7. Phạm vi
 
-**Trong:** resolve `secret()` ở Log `message:`, `runIf:` của task, input value/default của flow, và
-trigger Schedule/Webhook; mask mọi giá trị trao ra toàn-execution qua redactions; lift các từ-chối tương
-ứng; posture seal inputs theo M2; test; docs.
+**Trong (như đã build):** `secret()` resolve ở bốn bề mặt, mỗi nơi đều được mask và nằm trong
+allow-list của walker: `message:` của Log, `runIf:` của task (chỉ lưu verdict, không lưu text),
+`defaults:` của input flow (được seal như input `SECRET`), và `inputs:` của Webhook + `inputs:`/`when:`
+của Flow-trigger (inputs được seal, `when` chỉ lưu verdict). Mọi giá trị trao ra đều bị mask trong log;
+posture seal inputs theo M2; test; docs.
 
-**Ngoài:** `secret()` trong **env** của script/container (→ 10b); runner Kubernetes (→ #17); `secret()`
-trong **KV value** và **output `value:`** của task (§3.1 security divergence, không đổi); seal của
-endpoint eval (không đổi); mọi *source* hay *store* secret mới (store secret của workspace không đổi).
+**Ngoài / vẫn bị từ chối:** value và key của KV `Set`/`Put`, `value:` của output (task và flow),
+`Return.format`, `commands` của script, `key:` của Webhook, `inputs:`/`when:` có template của Schedule,
+`when` của dependency trong `dependsOn`, `onResume` của Pause, và seal của endpoint eval. Cũng ngoài
+phạm vi: `secret()` trong **env** của script/container (→ 10b), runner Kubernetes (→ #17), mọi *source*
+secret mới. Banks không đổi (tuple census, `LIVE` 299, `VALIDATE_REFUSED` 21): `valids/webhook-secret-key`
+(`key` của Webhook) và `valids/secrets` (`Return.format`) vẫn bị từ chối.
+
+**Ghi chú as-built.** Việc đọc đi qua `Prefetch` theo từng attempt (loại thứ ba, `secret`), vì render
+runIf/inputs/trigger là đồng bộ trong transaction. Tập seal được *suy ra* từ khai báo (mọi input
+`SECRET`, mọi input có default gọi `secret()`, mọi key mà trigger cấp từ template `secret()`, dù đã khai
+báo hay chưa), nên replay và Subflow seal lại ở mọi đường. Vẫn cần `workflow:use_secrets` để lưu hoặc
+publish flow gọi `secret()` ở bất kỳ bề mặt nào.
+
+**Giới hạn đã biết (follow-up, cả hai đều fail-safe):**
+
+- `secret()` trong **default của input** flow chỉ resolve khi start ở cấp cao nhất (scheduler, API,
+  Schedule-trigger). Ở **Subflow child**, **replay với Replace inputs**, **Pause `onResume`** và
+  **Flow-trigger fire**, default giữ nguyên dạng thô và run lỗi lúc render với từ-chối secret (không
+  rò rỉ). Follow-up: mở rộng các đường này.
+- Khi **secret store gặp sự cố**, `when` của Flow-trigger có gọi `secret()` bị coi là không render được
+  và event bị từ chối/bỏ qua (mất dữ liệu, không rò rỉ). Follow-up: đồng bộ với cách `runIf` báo sự cố.
 
 ## 8. Kiểm thử
 
