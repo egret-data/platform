@@ -1332,7 +1332,7 @@ pub(super) async fn iteration_outputs(
         }
     }
 
-    let cx = surface.context(&ctx.plan, state, None);
+    let cx = surface.context(&ctx.plan, state, None, true);
     let redactions: Vec<String> = cx.redactions().to_vec();
     let evaluated = crate::outputs::evaluate(&cx, &the_loop.outputs);
     let typed = match evaluated {

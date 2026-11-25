@@ -2870,7 +2870,11 @@ async fn render_context_on(
             format!("negative run_ix {}", c.run_ix),
         ))
     })?;
-    Ok((surface.context(&ctx.plan, &state, Some(run)), wants, flow))
+    Ok((
+        surface.context(&ctx.plan, &state, Some(run), true),
+        wants,
+        flow,
+    ))
 }
 
 /// Record one handler's result, drive `advance()` to a fixed point, and write
@@ -5502,7 +5506,7 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
     // exactly what `Surface::context`'s `Option<RunIx>` was left open for.
     // Kestra builds it the same way: `runContextFactory.of(flow, execution)`,
     // no taskrun.
-    let cx = surface.context(&ctx.plan, state, None);
+    let cx = surface.context(&ctx.plan, state, None, true);
     // `Err` is a render that will not resolve, and the artifact treats that as
     // a VIOLATION rather than as a skip -- see `crate::sla`'s module doc for
     // the bytecode, and for the assertion W8 Task 6 shipped saying the
