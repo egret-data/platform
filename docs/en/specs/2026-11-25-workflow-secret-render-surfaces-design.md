@@ -71,12 +71,19 @@ and 9b): the census tuple, the driver's `LIVE`/`VALIDATE_REFUSED` constants, and
 - **D1 — reuse, not reinvent.** 10a installs `render_with_secrets` (or the same resolver seam) on the
   Log, `runIf`, input and trigger render paths; it adds each `Resolved::values` to the execution's
   `RenderContext` redactions. No new masking primitive, no migration, no API, no model field.
-- **D2 — masking is execution-wide and mandatory.** A value a `secret()` hands out at any 10a surface
-  is masked in every persisted log line and in a failed run's message, via the redactions — the same
-  channel SECRET inputs use. A surface is not lifted until its values reach the redactions.
-- **D3 — inputs seal posture decided by M2.** If Kestra keeps input `secret()` plaintext out of the
-  stored execution, 10a seals it through `secret_inputs` (reuse `split`/`reveal`); otherwise it only
-  adds the value to the redactions. Recorded in §6 after Task 0.
+- **D2 — masking is per-attempt and mandatory (corrected by Task 0 §6.1).** Kestra masks per-logger,
+  not execution-wide; egret already redacts each attempt from `task.render.redactions()`. So a value a
+  `secret()` hands out at a 10a surface is masked in that surface's OWN attempt lines and its OWN failure
+  message. The only execution-wide persistence is the SECRET-input seal (D3). A surface is not lifted
+  until its resolved values reach its attempt's redactions. (Also: lifts are allow-list entries on the
+  `secret_outside_plugin_task` walker, not arm removals; runIf and inputs render synchronously inside
+  settle passes, so those surfaces pre-fetch the secrets before the pass — §6.5.)
+- **D3 — inputs: SEAL (user-confirmed 2026-11-25; stricter than Kestra).** Task 0 §6.2 measured that
+  Kestra STORES the plaintext for non-SECRET input types. egret instead seals a resolved input secret
+  through `secret_inputs::split` (extended to take an extra id-set), as it does a `type: SECRET` input —
+  a deliberate, stricter security divergence, because parity would put the secret in `executions.inputs`
+  and the API body in clear. This requires rendering a templated default **at start** (egret does not
+  today — `with_declared_defaults` inserts the raw template).
 - **D4 — KV value and output `value:` stay refused/unmasked (§3.1).** Not in scope; their refusals are
   not lifted. This is the deliberate security divergence `secret_inputs.rs` already documents.
 - **D5 — the `WF_USE_SECRETS` gate is unchanged.** `routes::source_uses_secret` already refuses a

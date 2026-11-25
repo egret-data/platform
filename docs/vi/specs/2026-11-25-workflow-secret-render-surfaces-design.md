@@ -1,5 +1,7 @@
 # secret() ở các render surface — thiết kế (gói 10a)
 
+> **Cập nhật sau Task 0 (2026-11-25):** phép đo Kestra đã sửa vài tiền đề: masking là per-attempt (không execution-wide), D3 = SEAL (nghiêm hơn Kestra, user chốt), lift = allow-list trên walker, triggers chỉ gồm Webhook `inputs` + Flow-trigger `when`/`inputs` (giữ `key` refused → "banks 0" phụ thuộc điều này), runIf/inputs cần pre-fetch. Chi tiết trong §6 (đã điền) và bản EN; §6 là authority.
+
 **Roadmap:** gói **#10 "secret() everywhere"** tách thành **10a** (gói này: `secret()` ở các render
 surface in-process — Log, `runIf`, inputs, triggers — resolve và mask) và **10b** (`secret()` trong
 script env, inject an toàn vào container — spec riêng). #10 hoàn tất khi cả hai merge. Ba task http đã

@@ -1,5 +1,7 @@
 # secret() ở các render surface (gói 10a) — Kế hoạch triển khai
 
+> **Cập nhật sau Task 0 (2026-11-25):** bản EN của plan này đã fold các đính chính Task 0 (lift = allow-list, D3=SEAL, triggers hẹp + giữ `key` refused, runIf/inputs pre-fetch, `Resolved.values` là field). Implementer đọc brief trích từ bản EN. Bản VI task-body sẽ được đồng bộ ở Task 5/PR.
+
 > **Cho worker agentic:** SUB-SKILL BẮT BUỘC: Dùng superpowers:subagent-driven-development để triển khai plan này theo từng task. Các bước dùng cú pháp checkbox (`- [ ]`) để theo dõi.
 
 **Mục tiêu:** Resolve `secret()` trong Log `message:`, `runIf:` của task, inputs của flow, và triggers,
