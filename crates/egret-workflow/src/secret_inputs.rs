@@ -73,7 +73,8 @@ fn secret_ids(flow: &Flow) -> impl Iterator<Item = &str> {
 }
 
 /// The ids [`split`] seals: every input declared `type: SECRET`, and (package
-/// 10a Task 3, decision D3) every input whose `defaults:` calls `secret()`.
+/// 10a Tasks 3 and 4, decision D3) every input whose `defaults:` calls
+/// `secret()` or that a Webhook / Flow trigger's `inputs:` supplies from one.
 ///
 /// Kestra stores the plaintext of a `secret()` rendered into a non-SECRET
 /// input; egret seals it as a SECRET one, a stricter divergence. The set is a
@@ -89,8 +90,33 @@ fn sealed_ids(flow: &Flow) -> impl Iterator<Item = &str> {
                 || i.defaults
                     .as_ref()
                     .is_some_and(|d| crate::runners::secrets::text_uses_secret(d.source()))
+                || supplied_from_secret(flow, &i.id)
         })
         .map(|i| i.id.as_str())
+}
+
+/// Whether a Webhook or Flow trigger of `flow` supplies input `id` from a
+/// template that calls `secret()` (package 10a Task 4). Like a default, a
+/// property of the declaration, so a replay or a child agrees.
+fn supplied_from_secret(flow: &Flow, id: &str) -> bool {
+    fn uses(v: &Value) -> bool {
+        match v {
+            Value::String(s) => crate::runners::secrets::text_uses_secret(s),
+            Value::Array(a) => a.iter().any(uses),
+            Value::Object(m) => m
+                .iter()
+                .any(|(k, v)| crate::runners::secrets::text_uses_secret(k) || uses(v)),
+            _ => false,
+        }
+    }
+    flow.triggers.iter().any(|t| {
+        let supplied = match &t.kind {
+            crate::models::TriggerKind::Webhook(w) => w.inputs.as_ref(),
+            crate::models::TriggerKind::Flow(f) => f.inputs.as_ref(),
+            _ => None,
+        };
+        supplied.and_then(|m| m.get(id)).is_some_and(uses)
+    })
 }
 
 /// `inputs` with every SECRET input's value replaced by [`MASK`], and the

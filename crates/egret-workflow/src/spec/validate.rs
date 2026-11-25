@@ -609,6 +609,13 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
         /// The (`id`, `type`) of every `Log` task: its `message:` resolves
         /// `secret()` (package 10a Task 1), so it is not walked as "outside".
         log: HashSet<(&'a str, &'a str)>,
+        /// The (`id`, `type`) of every Webhook trigger: its `inputs:` resolve
+        /// `secret()` (package 10a Task 4). Its `key:` does NOT -- the key is
+        /// a credential compared per request.
+        webhook: HashSet<(&'a str, &'a str)>,
+        /// The (`id`, `type`) of every Flow trigger: its `when:` and `inputs:`
+        /// resolve `secret()` (package 10a Task 4).
+        flow_trigger: HashSet<(&'a str, &'a str)>,
         report: &'a mut ValidationReport,
     }
 
@@ -675,6 +682,13 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                         matches!((id, ty), (Some(i), Some(t)) if self.plugin.contains(&(i, t)));
                     let is_log =
                         matches!((id, ty), (Some(i), Some(t)) if self.log.contains(&(i, t)));
+                    // Only a trigger directly under `triggers:`.
+                    let is_trigger_property = path
+                        .strip_prefix("triggers.")
+                        .is_some_and(|rest| !rest.contains('.'));
+                    let in_webhook =
+                        matches!((id, ty), (Some(i), Some(t)) if self.webhook.contains(&(i, t)));
+                    let in_flow_trigger = matches!((id, ty), (Some(i), Some(t)) if self.flow_trigger.contains(&(i, t)));
                     // W9c spec §7: a `Set` or `Put` task's `value`.
                     let kv_value_of = match (id, ty) {
                         (Some(i), Some(t)) if t == kv::SET || t == kv::PUT => Some(i),
@@ -723,6 +737,20 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                             for (p, text) in found {
                                 self.property(p, text);
                             }
+                        } else if is_trigger_property
+                            && ((k == "inputs" && (in_webhook || in_flow_trigger))
+                                || (k == "when" && in_flow_trigger))
+                        {
+                            // A Webhook or Flow trigger's `inputs:`, and a
+                            // Flow trigger's `when:`, resolve `secret()`
+                            // (package 10a Task 4). `key:` and a Schedule's
+                            // `inputs:` / `when:` stay refused; a
+                            // `namespace=` / `full=` in the call still is.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
                         } else if is_plugin && !TASK_KEYS.contains(&k.as_str()) {
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
@@ -764,6 +792,18 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
             .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
             .collect(),
         log,
+        webhook: flow
+            .triggers
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Webhook(_)))
+            .map(|t| (t.id.as_str(), t.r#type.as_str()))
+            .collect(),
+        flow_trigger: flow
+            .triggers
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Flow(_)))
+            .map(|t| (t.id.as_str(), t.r#type.as_str()))
+            .collect(),
         report,
     };
     walk.value(&doc, String::new());
