@@ -194,21 +194,32 @@ impl Registry for Ok_ {
     }
 }
 
-/// Ignored: `worker::copy::replay_execution` builds its `NewExecution` with
-/// `trigger: None` (copy.rs:219), so a replay does NOT carry the column and
-/// `trigger.*` is unbound there. Needs a product decision (copy trigger +
-/// scheduled_date + flow_trigger_event_id on replay?) -- out of Task 1 scope.
-#[ignore = "replay does not copy execution_trigger today (copy.rs:219)"]
-#[sqlx::test(migrations = "../../migrations")]
-async fn a_replay_of_a_schedule_fire_keeps_the_binding(pool: sqlx::PgPool) {
-    let ws = setup(&pool).await;
-    let old = born(&pool, ws, SRC, Some(schedule_record()), true, None).await;
+/// Settles `old` and replays it from its task `a`; returns the replay's id.
+/// The original gets a real `flow_id` first, so the replay (which copies it)
+/// would collide with the original on the one-per-fire unique indexes if they
+/// did not exclude replays.
+async fn replay_of(pool: &sqlx::PgPool, ws: Uuid, old: Uuid, source: &str) -> Uuid {
+    let flow: Uuid = sqlx::query_scalar(
+        "INSERT INTO workflow.flows (workspace_id, namespace, flow_id, source, plan) \
+         VALUES ($1, 't', gen_random_uuid()::text, $2, '{}') RETURNING id",
+    )
+    .bind(ws)
+    .bind(source)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE workflow.executions SET flow_id = $2 WHERE id = $1")
+        .bind(old)
+        .bind(flow)
+        .execute(pool)
+        .await
+        .unwrap();
     for _ in 0..30 {
-        egret_workflow::worker::tick(&pool, 64, &Ok_).await.unwrap();
+        egret_workflow::worker::tick(pool, 64, &Ok_).await.unwrap();
     }
     let state: String = sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
         .bind(old)
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .unwrap();
     assert_eq!(state, "SUCCESS");
@@ -216,20 +227,20 @@ async fn a_replay_of_a_schedule_fire_keeps_the_binding(pool: sqlx::PgPool) {
         "SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'a'",
     )
     .bind(old)
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .unwrap();
     let user: Uuid = sqlx::query_scalar("SELECT created_by FROM workspaces WHERE id = $1")
         .bind(ws)
-        .fetch_one(&pool)
+        .fetch_one(pool)
         .await
         .unwrap();
     let new = replay_execution(
-        &pool,
+        pool,
         &ReplayRequest {
             workspace_id: ws,
             from: old,
-            source: SRC,
+            source,
             kind: ReplayKind::FromTaskRun(run),
             inputs: ReplayInputs::Reuse,
             started_by: user,
@@ -241,8 +252,77 @@ async fn a_replay_of_a_schedule_fire_keeps_the_binding(pool: sqlx::PgPool) {
     .expect("replay")
     .expect("not refused");
     assert_ne!(new, old);
+    new
+}
+
+/// A replay carries the trigger record and its coupled columns verbatim, and
+/// coexists with the original despite the one-per-fire unique indexes.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_of_a_schedule_fire_keeps_the_binding(pool: sqlx::PgPool) {
+    let ws = setup(&pool).await;
+    let src = src_reading("{{ trigger.date }}");
+    let old = born(&pool, ws, &src, Some(schedule_record()), true, None).await;
+    let new = replay_of(&pool, ws, old, &src).await;
+    let (msg, state) = task_message(&pool, new, "").await;
     assert_eq!(
-        render(&pool, new, "{{ trigger.date }}").await.unwrap(),
-        "2026-11-25T07:00:00.000000+07:00"
+        msg.as_deref(),
+        Some("2026-11-25T07:00:00.000000+07:00"),
+        "state {state}"
     );
+    let same: bool = sqlx::query_scalar(
+        "SELECT n.execution_trigger = o.execution_trigger \
+            AND n.scheduled_date = o.scheduled_date AND n.flow_trigger_event_id IS NULL \
+            AND n.flow_id = o.flow_id \
+           FROM workflow.executions n, workflow.executions o WHERE n.id = $1 AND o.id = $2",
+    )
+    .bind(new)
+    .bind(old)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(same);
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_of_a_flow_fire_keeps_the_binding(pool: sqlx::PgPool) {
+    let ws = setup(&pool).await;
+    for (tpl, want) in [
+        ("{{ trigger.outputs.x }}", "ten"),
+        ("{{ trigger.executionId }}", "exec-123"),
+    ] {
+        let src = src_reading(tpl);
+        let old = born(&pool, ws, &src, Some(flow_record()), false, Some(7)).await;
+        let new = replay_of(&pool, ws, old, &src).await;
+        let (msg, state) = task_message(&pool, new, tpl).await;
+        assert_eq!(msg.as_deref(), Some(want), "{tpl} (state {state})");
+        let ev: Option<i64> = sqlx::query_scalar(
+            "SELECT flow_trigger_event_id FROM workflow.executions WHERE id = $1",
+        )
+        .bind(new)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ev, Some(7));
+    }
+}
+/// A replay of a non-triggered execution stays NULL on all three columns
+/// (no trigger is fabricated), and its `trigger.*` still does not render.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_of_a_standalone_execution_has_no_trigger(pool: sqlx::PgPool) {
+    let ws = setup(&pool).await;
+    let src = src_reading("{{ trigger.x }}");
+    let old = born(&pool, ws, &src, None, false, None).await;
+    let new = replay_of(&pool, ws, old, &src).await;
+    let nulls: bool = sqlx::query_scalar(
+        "SELECT execution_trigger IS NULL AND scheduled_date IS NULL \
+            AND flow_trigger_event_id IS NULL FROM workflow.executions WHERE id = $1",
+    )
+    .bind(new)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(nulls);
+    let (msg, state) = task_message(&pool, new, "").await;
+    assert_eq!(msg, None, "no trigger fabricated");
+    assert_eq!(state, "FAILED");
 }

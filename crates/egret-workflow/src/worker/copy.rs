@@ -130,6 +130,10 @@ struct Old {
     secret_inputs: Option<Vec<u8>>,
     variables: Option<serde_json::Value>,
     flow_id: Option<Uuid>,
+    // The trigger record and its coupled columns, copied as a set (0140/0156/0157 CHECKs).
+    execution_trigger: Option<serde_json::Value>,
+    scheduled_date: Option<chrono::DateTime<chrono::Utc>>,
+    flow_trigger_event_id: Option<i64>,
 }
 
 /// One row: the facts the checks read (the files of the whole chain, S7)
@@ -152,7 +156,8 @@ SELECT CASE WHEN x.loop_index IS NOT NULL THEN x.parent_execution_id END AS loop
        EXISTS (SELECT 1 FROM workflow.executions p JOIN chain c ON p.id = c.id \
                 WHERE p.files_pruned_at IS NOT NULL) AS files_pruned, \
        COALESCE(workflow.execution_is_idle(x.id), false) AS idle, \
-       x.labels, x.labels_replaced, x.attempt_number, x.seq, x.inputs, x.secret_inputs, x.variables, x.flow_id \
+       x.labels, x.labels_replaced, x.attempt_number, x.seq, x.inputs, x.secret_inputs, x.variables, x.flow_id, \
+       x.execution_trigger, x.scheduled_date, x.flow_trigger_event_id \
   FROM workflow.executions x WHERE x.id = $1";
 
 async fn replay_locked(
@@ -216,11 +221,14 @@ async fn replay_locked(
         flow_id: old.flow_id,
         source: req.source,
         inputs,
-        trigger: None,
-        scheduled_date: None,
+        // A replay carries the trigger verbatim (Kestra `Execution.java:422`),
+        // with the columns the CHECKs couple to it; all NULL for a
+        // non-triggered original.
+        trigger: old.execution_trigger.clone(),
+        scheduled_date: old.scheduled_date,
         trigger_execution_id: None,
         execution_depth: 0,
-        flow_trigger_event_id: None,
+        flow_trigger_event_id: old.flow_trigger_event_id,
         born_failed: false,
         replayed_from_execution_id: Some(req.from),
         id: Some(req.id),
@@ -340,6 +348,9 @@ async fn load_old(conn: &mut PgConnection, req: &ReplayRequest<'_>) -> Result<Ol
         secret_inputs: row.get("secret_inputs"),
         variables: row.get("variables"),
         flow_id: row.get("flow_id"),
+        execution_trigger: row.get("execution_trigger"),
+        scheduled_date: row.get("scheduled_date"),
+        flow_trigger_event_id: row.get("flow_trigger_event_id"),
     })
 }
 
