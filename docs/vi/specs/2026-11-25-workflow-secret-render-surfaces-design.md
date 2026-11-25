@@ -283,6 +283,11 @@ publish flow gọi `secret()` ở bất kỳ bề mặt nào.
   rò rỉ). Follow-up: mở rộng các đường này.
 - Khi **secret store gặp sự cố**, `when` của Flow-trigger có gọi `secret()` bị coi là không render được
   và event bị từ chối/bỏ qua (mất dữ liệu, không rò rỉ). Follow-up: đồng bộ với cách `runIf` báo sự cố.
+- **Rủi ro khi viết flow (không phải rò rỉ).** Trong giá trị `inputs:` của Webhook trigger, tên tính
+  toán như `{{ secret(body.name) }}` cho phép người gọi (có thể ẩn danh) chọn secret nào của workspace
+  được resolve vào input đã seal. Giá trị vẫn được seal và mask, và tác giả vốn đã có thể gọi
+  `secret('NAME')` trực tiếp, nhưng không nên nội suy dữ liệu request do người gọi kiểm soát vào tên
+  `secret()`. Đã ghi thành cảnh báo trong tài liệu người dùng.
 
 ## 8. Kiểm thử
 

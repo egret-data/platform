@@ -306,6 +306,11 @@ supplies from a `secret()` template, declared or not), so replay and Subflow re-
 - During a **secret-store outage**, a Flow-trigger `when` that calls `secret()` is treated as
   unrenderable and the event is refused/skipped (data loss, not a leak). Follow-up: align with how
   `runIf` surfaces the outage.
+- **Authoring hazard (not a leak).** In a Webhook trigger `inputs:` value, a computed name such as
+  `{{ secret(body.name) }}` lets the (possibly anonymous) caller choose *which* workspace secret is
+  resolved into the sealed input. The value stays sealed and masked, and the author could already call
+  `secret('NAME')` directly, but authors should not interpolate caller-controlled request data into a
+  `secret()` name. Documented as a caution in the user docs.
 
 ## 8. Testing
 
