@@ -3629,7 +3629,8 @@ values = { allowed-images = [] }
     /// W5a Task 5: the chart carries the lever with `none` as its default, and
     /// the task namespace's Role is exactly the RBAC the spec allows --
     /// `pods` get/list/watch/create/delete, `pods/log` get, `pods/exec`
-    /// get/create -- nothing more. (`get` on `pods/exec` because WebSocket
+    /// get/create, `secrets` create (package 10b: secret() env injection via a
+    /// per-task owned Secret) -- nothing more. (`get` on `pods/exec` because WebSocket
     /// exec on Kubernetes >= 1.30 is authorised as `get`; measured on kind
     /// 1.33 in W5a Task 6's e2e.) (`helm template` is the full check; this pins
     /// the text so an added verb or resource fails a unit test.)
@@ -3671,9 +3672,11 @@ values = { allowed-images = [] }
                 r#"verbs: ["get"]"#,
                 r#"resources: ["pods/exec"]"#,
                 r#"verbs: ["get","create"]"#,
+                r#"resources: ["secrets"]"#,
+                r#"verbs: ["create"]"#,
             ]
         );
-        assert_eq!(rbac.matches("apiGroups:").count(), 3);
+        assert_eq!(rbac.matches("apiGroups:").count(), 4);
         assert!(!rbac.contains("ClusterRole"), "only in the task namespace");
     }
 
