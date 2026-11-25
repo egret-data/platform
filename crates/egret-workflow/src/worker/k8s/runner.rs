@@ -364,16 +364,16 @@ impl KubernetesRunner {
         } else {
             (None, Replayed::default())
         };
+        let log = task.log.masked(&cmds.secret_masks);
         let split = pod_spec::stderr_is_separable(cmds);
         if !split {
-            task.log
-                .line(
-                    LogLevel::Warn,
-                    "The interpreter is not a shell, so under the Kubernetes task runner this \
+            log.line(
+                LogLevel::Warn,
+                "The interpreter is not a shell, so under the Kubernetes task runner this \
                      task's stderr cannot be separated from its stdout: its stderr lines are \
                      logged at INFO and counted as stdout.",
-                )
-                .await;
+            )
+            .await;
         }
         let mut result = CommandsResult::default();
         let mut state = StreamState::default();
@@ -427,7 +427,7 @@ impl KubernetesRunner {
             while let Some((is_err, line)) = rx.recv().await {
                 // Compared as stored, not as read (W5b fix round 1, M1).
                 stream_replayed_line(
-                    task,
+                    &log,
                     observer,
                     &mut result,
                     &mut state,

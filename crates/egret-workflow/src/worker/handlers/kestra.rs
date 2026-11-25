@@ -290,6 +290,8 @@ impl KestraRuntime {
             output_directory: bridge.collect_to.is_some(),
             collect_to: bridge.collect_to,
             host_protocol: true,
+            secret_env: BTreeMap::new(),
+            secret_masks: Vec::new(),
         }
     }
 }

@@ -329,7 +329,7 @@ pub(super) mod testing {
             let mut state = crate::worker::commands::StreamState::default();
             for (is_err, line) in lines {
                 crate::worker::commands::stream_line(
-                    task,
+                    &task.log,
                     observer,
                     &mut scratch,
                     &mut state,
@@ -384,7 +384,7 @@ pub(super) mod testing {
                 let mut state = crate::worker::commands::StreamState::default();
                 for (is_err, line) in lines {
                     crate::worker::commands::stream_line(
-                        task,
+                        &task.log,
                         observer,
                         &mut scratch,
                         &mut state,

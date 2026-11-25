@@ -731,6 +731,8 @@ mod tests {
             output_directory: false,
             collect_to: None,
             host_protocol: false,
+            secret_env: BTreeMap::new(),
+            secret_masks: vec![],
         }
     }
 

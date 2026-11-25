@@ -225,6 +225,13 @@ pub struct TaskCommands {
     /// `TaskCommands.getEnv()`. `BTreeMap` so the argv this produces is ordered
     /// and therefore assertable.
     pub env: BTreeMap<String, String>,
+    /// Secret-bearing env entries (key -> resolved value), injected through a
+    /// SECURE channel by the runner (k8s Secret+secretKeyRef; docker --env-file),
+    /// never inline in the pod spec / docker CLI. Package 10b.
+    pub secret_env: BTreeMap<String, String>,
+    /// Every secret value to redact from this task's stdout/stderr (from
+    /// `runners::secrets::Resolved.values`). Package 10b.
+    pub secret_masks: Vec<String>,
     /// Files the handler itself writes into [`WORKING_DIR`] before the command
     /// starts, keyed by their name relative to it.
     ///
@@ -377,6 +384,11 @@ impl std::fmt::Debug for TaskCommands {
             .field("before_commands", &self.before_commands)
             .field("commands", &self.commands)
             .field("env", &self.env)
+            .field("secret_env", &self.secret_env.keys().collect::<Vec<_>>())
+            .field(
+                "secret_masks",
+                &format_args!("<{} values>", self.secret_masks.len()),
+            )
             .field("input_files", &files)
             .field("stored_inputs", &stored)
             .field("output_files", &self.output_files)
@@ -708,7 +720,7 @@ pub const LOG_DEBUG_MARKER: &str = "##kestra:log:debug##";
 pub const LOG_INFO_MARKER: &str = "##kestra:log:info##";
 
 /// One line from a command's stream: decide it with [`ingest_line`], show it
-/// to `observer`, and write it to `task.log`.
+/// to `observer`, and write it to `log`.
 ///
 /// The async half of line handling, shared by [`DockerRunner`] and every fake
 /// runner in the tests, so a test driving a fake exercises the same levels and
@@ -717,7 +729,7 @@ pub const LOG_INFO_MARKER: &str = "##kestra:log:info##";
 // one call shape shared by three runners and a fake would only rename them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_line(
-    task: &TaskInput,
+    log: &crate::logs::RunLog,
     observer: &dyn LineObserver,
     result: &mut CommandsResult,
     state: &mut StreamState,
@@ -730,7 +742,7 @@ pub(crate) async fn stream_line(
         ingest_line(result, state, max_vars_bytes, line, is_err, host_protocol)
     {
         observer.observe(level, &text);
-        task.log.line(level, &text).await;
+        log.line(level, &text).await;
     }
 }
 
@@ -746,7 +758,7 @@ pub(crate) async fn stream_line(
 /// `RunLog::stored_form`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_replayed_line(
-    task: &TaskInput,
+    log: &crate::logs::RunLog,
     observer: &dyn LineObserver,
     result: &mut CommandsResult,
     state: &mut StreamState,
@@ -759,11 +771,11 @@ pub(crate) async fn stream_replayed_line(
     if let Some((level, text)) =
         ingest_line(result, state, max_vars_bytes, line, is_err, host_protocol)
     {
-        if replayed.already_stored(&task.log.stored_form(&text)) {
+        if replayed.already_stored(&log.stored_form(&text)) {
             return;
         }
         observer.observe(level, &text);
-        task.log.line(level, &text).await;
+        log.line(level, &text).await;
     }
 }
 
@@ -1837,9 +1849,10 @@ impl DockerRunner {
             .map_err(|e| {
                 Error::Internal(anyhow::anyhow!("could not run `{} logs`: {e}", self.binary))
             })?;
+        let log = task.log.masked(&commands.secret_masks);
         let mut result = self
             .pump(
-                task,
+                &log,
                 observer,
                 &mut child,
                 Some(&mut replayed),
@@ -1876,7 +1889,7 @@ impl DockerRunner {
     /// (`replayed`) is dropped once.
     async fn pump(
         &self,
-        task: &TaskInput,
+        log: &crate::logs::RunLog,
         observer: &dyn LineObserver,
         child: &mut tokio::process::Child,
         mut replayed: Option<&mut crate::worker::k8s::runner::Replayed>,
@@ -1909,7 +1922,7 @@ impl DockerRunner {
             match replayed.as_deref_mut() {
                 Some(r) => {
                     stream_replayed_line(
-                        task,
+                        log,
                         observer,
                         &mut result,
                         &mut state,
@@ -1923,7 +1936,7 @@ impl DockerRunner {
                 }
                 None => {
                     stream_line(
-                        task,
+                        log,
                         observer,
                         &mut result,
                         &mut state,
@@ -2180,8 +2193,9 @@ impl DockerRunner {
                 ))
             })?;
 
+        let log = task.log.masked(&commands.secret_masks);
         let mut result = self
-            .pump(task, observer, &mut child, None, commands.host_protocol)
+            .pump(&log, observer, &mut child, None, commands.host_protocol)
             .await?;
         let status = child.wait().await.map_err(io_err)?;
 
@@ -4016,7 +4030,13 @@ mod tests {
             .spawn()
             .expect("sh");
         DockerRunner::new()
-            .pump(&task, &NoObserver, &mut child, Some(&mut replayed), true)
+            .pump(
+                &task.log,
+                &NoObserver,
+                &mut child,
+                Some(&mut replayed),
+                true,
+            )
             .await
             .expect("pumped");
         child.wait().await.expect("exited");

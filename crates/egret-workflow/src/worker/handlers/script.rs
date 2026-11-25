@@ -346,6 +346,8 @@ impl Script {
             // Set by `run` once the commands render: see `collect_to`.
             collect_to: None,
             host_protocol: false,
+            secret_env: BTreeMap::new(),
+            secret_masks: Vec::new(),
         };
         Ok(Rendered {
             cmds,
