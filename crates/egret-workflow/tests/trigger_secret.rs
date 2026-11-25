@@ -213,6 +213,13 @@ async fn a_flow_trigger_when_and_inputs_resolve_secret_and_no_row_holds_the_valu
     let bad_id = common::seed_flow(&db, ws, user, &bad, "draft").await;
     let producer_id = common::seed_flow(&db, ws, user, &producer, "draft").await;
 
+    // Other tests of this binary leave events in the outbox; a pass is global
+    // and would count them against these listeners.
+    settle_all(&db.pool).await;
+    sqlx::query("DELETE FROM workflow.flow_trigger_events")
+        .execute(&db.pool)
+        .await
+        .unwrap();
     let src_ex = egret_workflow::worker::start_execution(
         &db.pool,
         ws,
@@ -337,4 +344,48 @@ async fn a_webhook_input_render_error_does_not_echo_the_value() {
         "{}",
         String::from_utf8_lossy(&body)
     );
+}
+
+/// A templated key renders to a name the seal set cannot know from the source.
+#[tokio::test]
+async fn a_templated_trigger_input_key_cannot_dodge_the_seal() {
+    let _serial = SERIAL.lock().await;
+    let Some(db) = common::db().await else { return };
+    let _ = secrets::install(Arc::new(Token));
+    egret_workflow::secret_inputs::install_for_tests();
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = ns();
+    let listener = format!(
+        "id: tkey\nnamespace: {ns}\ninputs:\n  - id: x\n    type: STRING\n    defaults: ok\n\
+         tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+         triggers:\n  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    \
+         states: [SUCCESS]\n    when: \"{{{{ flow.id == 'producer-k' }}}}\"\n    inputs:\n      \
+         \"{{{{ 'y' }}}}\": \"{{{{ secret('TOKEN') }}}}\"\n"
+    );
+    let producer = format!(
+        "id: producer-k\nnamespace: {ns}\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    let lid = common::seed_flow(&db, ws, user, &listener, "draft").await;
+    let pid = common::seed_flow(&db, ws, user, &producer, "draft").await;
+    egret_workflow::worker::start_execution(
+        &db.pool,
+        ws,
+        Some(pid),
+        &producer,
+        serde_json::json!({}),
+    )
+    .await
+    .unwrap();
+    settle_all(&db.pool).await;
+    let report = process_events(&db.pool).await.expect("a pass");
+    assert_eq!(report.fired, 1, "{report:?}");
+    settle_all(&db.pool).await;
+    let (ex, inputs): (Uuid, serde_json::Value) =
+        sqlx::query_as("SELECT id, inputs FROM workflow.executions WHERE flow_id = $1")
+            .bind(lid)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(inputs["y"], egret_workflow::secret_inputs::MASK, "{inputs}");
+    assert_eq!(leaks(&db.pool, &[ex]).await, 0);
 }

@@ -121,6 +121,28 @@ fn trigger_secret_keys(flow: &Flow) -> Vec<String> {
         .collect()
 }
 
+/// Whether a Webhook or Flow trigger of `flow` has an `inputs:` map that calls
+/// `secret()` in a value AND names a key by a template. The key then renders to
+/// a name this module cannot know (`"{{ 'y' }}"` stores `y`), so the literal
+/// key in [`trigger_secret_keys`] would not match it: every key is sealed
+/// instead, which hides more, never less.
+fn trigger_templates_a_secret_key(flow: &Flow) -> bool {
+    flow.triggers.iter().any(|t| {
+        let map = match &t.kind {
+            crate::models::TriggerKind::Webhook(w) => w.inputs.as_ref(),
+            crate::models::TriggerKind::Flow(f) => f.inputs.as_ref(),
+            _ => None,
+        };
+        map.is_some_and(|m| {
+            m.keys().any(|k| k.contains('{'))
+                && m.values().any(|v| match v {
+                    Value::Null | Value::Bool(_) | Value::Number(_) => false,
+                    other => crate::runners::secrets::text_uses_secret(&other.to_string()),
+                })
+        })
+    })
+}
+
 /// `inputs` with every SECRET input's value replaced by [`MASK`], and the
 /// values themselves sealed for `workflow.executions.secret_inputs`.
 ///
@@ -139,10 +161,13 @@ fn split_with(
         return Ok((inputs, None));
     };
     let mut secret = Map::new();
-    let ids: Vec<String> = sealed_ids(flow)
+    let mut ids: Vec<String> = sealed_ids(flow)
         .map(str::to_string)
         .chain(trigger_secret_keys(flow))
         .collect();
+    if trigger_templates_a_secret_key(flow) {
+        ids.extend(posted.keys().cloned());
+    }
     for id in ids.iter().map(String::as_str) {
         if let Some(v) = posted.get_mut(id) {
             if !v.is_null() {
