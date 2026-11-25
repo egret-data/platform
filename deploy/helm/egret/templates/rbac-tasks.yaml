@@ -15,6 +15,15 @@ task namespace only (W5a spec §5, RBAC):
                                               `get` (measured on kind 1.33 in
                                               W5a Task 6's e2e: `create` alone
                                               is a 403 on every exec)
+  secrets    create                        -- package 10b: a script task's
+                                              `env:` that uses secret() is
+                                              injected through a per-task
+                                              Secret owned by (and GC'd with)
+                                              the task pod. `create` only --
+                                              no read/update/patch/delete,
+                                              because the owner reference is
+                                              set at creation and k8s garbage
+                                              collection deletes it.
 
 `pods/exec` lets egret exec into task pods; the namespace holds nothing else
 (spec §11). Bound to egret's own ServiceAccount.
@@ -33,6 +42,9 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["get","create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
