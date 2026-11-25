@@ -127,6 +127,10 @@ pub(super) struct Surface {
     system_label: Value,
     /// `execution`.
     execution: Value,
+    /// `trigger`: the fire's `variables` plus `_context`, from the row's
+    /// `execution_trigger`. `Null` for an execution no trigger fired, in which
+    /// case the context carries no `trigger` key at all.
+    trigger: Value,
     /// `item`, for a loop sub-execution. `None` at the top level.
     item: Option<Value>,
     /// Whether this execution's row has a `loop_index`: a `Loop` iteration
@@ -203,6 +207,21 @@ enum SecretOutputs {
     Masked,
 }
 
+/// The `trigger` binding of a fired execution's task render: the record's
+/// `variables` with `_context` = `{id, type}` added (Kestra `RunVariables`).
+/// `Null` for no record or one without `variables`, so a standalone execution
+/// gets no `trigger` key.
+fn trigger_binding(record: Value) -> Value {
+    let Some(Value::Object(mut vars)) = record.get("variables").cloned() else {
+        return Value::Null;
+    };
+    vars.insert(
+        "_context".into(),
+        json!({"id": record["id"], "type": record["type"]}),
+    );
+    Value::Object(vars)
+}
+
 impl Surface {
     /// Read everything the renders of one `settle` will need.
     pub(super) async fn load(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<Self> {
@@ -217,7 +236,7 @@ impl Surface {
         let reveal = mode == SecretOutputs::Reveal;
         let row = sqlx::query(
             "SELECT inputs, state, created_at, loop_index, loop_value, \
-                    parent_execution_id, parent_run_ix, trigger_execution_id, labels, labels_replaced, variables, \
+                    parent_execution_id, parent_run_ix, trigger_execution_id, execution_trigger, labels, labels_replaced, variables, \
                     secret_inputs, outputs, secret_outputs \
                FROM workflow.executions WHERE id = $1",
         )
@@ -242,6 +261,10 @@ impl Surface {
                 .and_then(|f| serde_json::to_value(&f.variables).ok())
                 .unwrap_or(Value::Null),
         };
+        let trigger = trigger_binding(
+            row.get::<Option<Value>, _>("execution_trigger")
+                .unwrap_or(Value::Null),
+        );
         let flow_value = flow
             .as_ref()
             .map(|f| json!({"id": f.id, "namespace": f.namespace}))
@@ -632,6 +655,7 @@ impl Surface {
             labels_list,
             system_label,
             execution,
+            trigger,
             item,
             loop_iteration,
             inherited,
@@ -810,6 +834,9 @@ impl Surface {
         cx.insert("flow", self.flow.clone());
         cx.insert("labels", self.labels.clone());
         cx.insert("execution", self.execution.clone());
+        if !self.trigger.is_null() {
+            cx.insert("trigger", self.trigger.clone());
+        }
         if let Some(item) = &self.item {
             cx.insert("item", item.clone());
         }
@@ -1123,6 +1150,19 @@ pub async fn execution_render_context(
 mod tests {
     use super::*;
 
+    #[test]
+    fn trigger_binding_is_null_without_a_record_and_merges_context() {
+        assert_eq!(trigger_binding(Value::Null), Value::Null);
+        assert_eq!(
+            trigger_binding(json!({"id": "t", "type": "x"})),
+            Value::Null
+        );
+        assert_eq!(
+            trigger_binding(json!({"id": "t", "type": "x.Y", "variables": {"date": "d"}})),
+            json!({"date": "d", "_context": {"id": "t", "type": "x.Y"}})
+        );
+    }
+
     fn flow(src: &str) -> Flow {
         crate::spec::parse(src).expect("the probe flow parses")
     }
@@ -1214,6 +1254,7 @@ mod tests {
             labels_list: Vec::new(),
             system_label: Value::Null,
             execution: json!({}),
+            trigger: Value::Null,
             item: None,
             loop_iteration: false,
             inherited: Map::new(),
@@ -1258,6 +1299,7 @@ mod tests {
             labels_list: Vec::new(),
             system_label: json!({"correlationId": "root"}),
             execution: json!({}),
+            trigger: Value::Null,
             item: None,
             loop_iteration: false,
             inherited: Map::new(),
