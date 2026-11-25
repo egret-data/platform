@@ -609,6 +609,9 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
         /// The (`id`, `type`) of every `Log` task: its `message:` resolves
         /// `secret()` (package 10a Task 1), so it is not walked as "outside".
         log: HashSet<(&'a str, &'a str)>,
+        /// The (`id`, `type`) of every script task: its `env:` resolves
+        /// `secret()` (package 10b); commands, script and inputFiles do not.
+        script: HashSet<(&'a str, &'a str)>,
         /// The (`id`, `type`) of every Webhook trigger: its `inputs:` resolve
         /// `secret()` (package 10a Task 4). Its `key:` does NOT -- the key is
         /// a credential compared per request.
@@ -682,6 +685,8 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                         matches!((id, ty), (Some(i), Some(t)) if self.plugin.contains(&(i, t)));
                     let is_log =
                         matches!((id, ty), (Some(i), Some(t)) if self.log.contains(&(i, t)));
+                    let is_script =
+                        matches!((id, ty), (Some(i), Some(t)) if self.script.contains(&(i, t)));
                     // Only a trigger directly under `triggers:`.
                     let is_trigger_property = path
                         .strip_prefix("triggers.")
@@ -702,6 +707,16 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                         } else if is_log && k == "message" {
                             // Resolves, but a `namespace=` / `full=` written
                             // in the call is still refused, as on a plugin task.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
+                        } else if is_script && k == "env" {
+                            // Package 10b: a script task's `env:` resolves
+                            // `secret()` (async in the handler, injected via a
+                            // secure channel). A `namespace=` / `full=` in the
+                            // call is still refused, as elsewhere.
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
                             for (p, text) in found {
@@ -787,11 +802,27 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
         })
         .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
         .collect();
+    let script = crate::plugins::leaves(flow)
+        .into_iter()
+        .filter(|(_, t, _)| {
+            crate::spec::registry::known_type(&t.r#type).is_some_and(|row| {
+                matches!(
+                    row.r#type,
+                    crate::scripts::SHELL_COMMANDS
+                        | crate::scripts::SHELL_SCRIPT
+                        | crate::scripts::PYTHON_COMMANDS
+                        | crate::scripts::PYTHON_SCRIPT
+                )
+            })
+        })
+        .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
+        .collect();
     let mut walk = Walk {
         plugin: tasks
             .map(|(_, t, _)| (t.id.as_str(), t.r#type.as_str()))
             .collect(),
         log,
+        script,
         webhook: flow
             .triggers
             .iter()

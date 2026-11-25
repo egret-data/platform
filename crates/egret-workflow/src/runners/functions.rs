@@ -317,16 +317,18 @@ pub(crate) const HTTP_REFUSAL: &str = "The 'http' function is not supported: an 
 /// `kestra.*` plugin tasks, the http tasks, a `Log` task's `message:`
 /// (package 10a Task 1) and a task's `runIf:` (Task 2), where `runners::secrets::render_with_secrets`
 /// registers a resolving `secret` over this one on a copy of the environment.
-/// Every other render -- script tasks, inputs, triggers -- goes
-/// through this environment and meets this sentence. The script task is the
-/// one an author will try, so the reason is written for it: its rendered
-/// commands and env are fields of the pod spec, readable by anyone with
-/// `get pods` in the task namespace.
+/// A script task's `env:` resolves it too (package 10b). Every other render --
+/// script commands, script, inputFiles, inputs, triggers -- goes through this
+/// environment and meets this sentence. The script task is the one an author
+/// will try, so the reason is written for it: its rendered commands, script and
+/// inputFiles are fields of the pod spec (or land on disk), readable by anyone
+/// with `get pods` in the task namespace.
 pub(crate) const SECRET_REFUSAL: &str = "The 'secret' function resolves only on `kestra.*` \
-     plugin tasks, the http tasks, a Log task's `message:` and a task's `runIf:`. It is refused \
-     here: on a script task the rendered commands and env are fields of the pod spec, readable \
-     by anyone with `get pods` in the task namespace, and no other render (inputs, triggers) \
-     resolves secrets.";
+     plugin tasks, the http tasks, a Log task's `message:`, a task's `runIf:`, and a script \
+     task's `env:`. It is refused here: on a script task the rendered commands, script and \
+     inputFiles are fields of the pod spec (or land on disk), readable by anyone with \
+     `get pods` in the task namespace -- put the secret in `env:` and reference it as an \
+     environment variable (e.g. `$NAME`) in your command instead.";
 
 /// The names egret registers only to refuse (three since package #5b Task
 /// B7), with what each is waiting

@@ -1354,3 +1354,59 @@ async fn built_in_roles_ws_admin_and_platform_admin_may_use_secrets_and_ws_edito
         );
     }
 }
+
+/// Package 10b Task 5: a script task's `env:` resolves `secret()`, so it saves;
+/// every other script field (commands, script, inputFiles) is still refused.
+#[test]
+fn a_script_tasks_env_may_call_secret_but_no_other_field_may() {
+    let head = "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    \
+                type: io.kestra.plugin.scripts.shell.Commands\n    containerImage: alpine\n";
+    let ok = format!("{head}    commands:\n      - echo hi\n    env:\n      TOK: {SECRET}\n");
+    assert!(errors_of(&ok).is_empty(), "{:?}", errors_of(&ok));
+
+    let script = "id: f\nnamespace: a.b\ntasks:\n  - id: s\n    \
+                  type: io.kestra.plugin.scripts.python.Script\n    containerImage: python\n    \
+                  script: |\n      print(\"{{ secret('db') }}\")\n";
+    let cases = [
+        (
+            "commands",
+            format!("{head}    commands:\n      - echo {SECRET}\n"),
+            "tasks.s.commands[0]",
+        ),
+        ("script", script.to_string(), "tasks.s.script"),
+        (
+            "inputFiles",
+            format!("{head}    commands:\n      - cat f\n    inputFiles:\n      f: {SECRET}\n"),
+            "tasks.s.inputFiles.f",
+        ),
+    ];
+    for (name, src, path) in cases {
+        let paths = codes_at(&src, plugins::CODE_SECRET_OUTSIDE_PLUGIN_TASK);
+        assert_eq!(
+            paths,
+            vec![path.to_string()],
+            "{name}: {:?}",
+            errors_of(&src)
+        );
+    }
+}
+
+/// Package 10b Task 5: lifting script `env:` does not lift the permission.
+#[tokio::test]
+async fn a_script_env_secret_still_needs_workflow_use_secrets_to_save() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _admin) = common::seed_workspace(&db).await;
+    let editor = another_user(&db).await;
+    common::grant(&db, ws, editor, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app_with_scripts(&db, scripts::ScriptSettings::default()).await;
+    let flows = format!("/api/ws/{ws}/workflows/flows");
+    let src = "id: f\nnamespace: g.e\ntasks:\n  - id: s\n    \
+               type: io.kestra.plugin.scripts.shell.Commands\n    containerImage: alpine\n    \
+               commands:\n      - echo hi\n    env:\n      TOK: \"{{ secret('db') }}\"\n";
+    let res = common::post(&app, &flows, editor, json!({ "source": src })).await;
+    let (st, body) = (res.status(), common::body_text(res).await);
+    assert!(
+        st == StatusCode::FORBIDDEN && body.contains(USE_SECRETS),
+        "{st} {body}"
+    );
+}
