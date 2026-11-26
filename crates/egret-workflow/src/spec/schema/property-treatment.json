@@ -1356,7 +1356,7 @@
       "mode": "honoured",
       "policyRefs": "ignored",
       "states": "honoured",
-      "stopAfter": "ignored",
+      "stopAfter": "honoured",
       "type": "honoured",
       "version": "ignored",
       "when": "honoured",
@@ -1371,7 +1371,7 @@
       "when": "honoured"
     },
     "io.kestra.plugin.core.trigger.Schedule": {
-      "allowConcurrent": "ignored",
+      "allowConcurrent": "honoured",
       "assets": "ignored",
       "cron": "honoured",
       "description": "honoured",

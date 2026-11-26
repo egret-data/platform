@@ -64,6 +64,9 @@ pub(crate) enum Lift {
     Enterprise,
     /// egret design kept (roadmap section 3.2); the text says what replaces the key.
     KeptDesign(&'static str),
+    /// Accepted but inert on purpose, and no package will change that: Kestra
+    /// itself consults the key only where egret has no counterpart.
+    Inert(&'static str),
 }
 
 impl Lift {
@@ -75,6 +78,7 @@ impl Lift {
                 "Kestra Enterprise only, ignored by Kestra OSS too, roadmap \u{a7}3.3".into()
             }
             Lift::KeptDesign(why) => format!("{why} (roadmap \u{a7}3.2)"),
+            Lift::Inert(why) => (*why).to_string(),
         }
     }
 
@@ -87,6 +91,7 @@ impl Lift {
                     .into()
             }
             Lift::KeptDesign(why) => format!("{why} (roadmap \u{a7}3.2)"),
+            Lift::Inert(why) => (*why).to_string(),
         }
     }
 }
@@ -113,6 +118,7 @@ const FLOW_TRIGGER: &str = "io.kestra.plugin.core.trigger.Flow";
 /// `deleted` column is generated from the stored JSON, `baseline-postgres.sql:117`).
 const DELETED_REASON: &str =
     "egret deletes a flow through its own delete action, never through a key in the source";
+const FAIL_ON_TRIGGER_ERROR_REASON: &str = "it is a Kestra divergence egret does not act on: Kestra consults it only for worker/polling triggers, which egret has none of, so no package will honour it";
 const DRAFT_REASON: &str =
     "egret's draft and publish split replaces it: a published version runs whatever `draft:` says";
 
@@ -172,8 +178,17 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
             }
         }
         Site::Trigger(t) => {
+            match (t, key) {
+                // Honoured now (package 11d): a Schedule holds a tick while its
+                // execution runs; a Flow trigger stops after its states.
+                (SCHEDULE, "allowConcurrent") | (FLOW_TRIGGER, "stopAfter") => return None,
+                (_, "allowConcurrent" | "stopAfter") => return Some(Package(11)),
+                (_, "failOnTriggerError") => {
+                    return Some(Lift::Inert(FAIL_ON_TRIGGER_ERROR_REASON))
+                }
+                _ => {}
+            }
             match key {
-                "stopAfter" | "failOnTriggerError" | "allowConcurrent" => return Some(Package(11)),
                 "logToFile" | "logLevel" | "version" | "assets" => return Some(Package(13)),
                 "workerSelector" | "policyRefs" => return Some(Enterprise),
                 _ => {}
@@ -720,10 +735,15 @@ impl Walk<'_> {
                 } else {
                     ""
                 };
+                let yet = if matches!(lift, Lift::Inert(_)) {
+                    ""
+                } else {
+                    " yet"
+                };
                 self.report.warnings.push(Finding {
                     code: "not_honoured",
                     message: format!(
-                        "trigger '{id}': property '{key}' is accepted by Kestra on {row} but egret does not act on it yet: {said}{}",
+                        "trigger '{id}': property '{key}' is accepted by Kestra on {row} but egret does not act on it{yet}: {said}{}",
                         lift.sentence()
                     ),
                     path: format!("{path}.{key}"),
@@ -2006,6 +2026,7 @@ mod tests {
     const LOG: &str = "tasks:\n  - id: t\n    type: core.log\n    message: hi\n";
     const SCHED: &str = "io.kestra.plugin.core.trigger.Schedule";
     const HOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
+    const FLOWT: &str = "io.kestra.plugin.core.trigger.Flow";
 
     fn at<'a>(r: &'a ValidationReport, path: &str) -> Vec<&'a Finding> {
         r.errors
@@ -2068,12 +2089,15 @@ mod tests {
     }
 
     #[test]
-    fn stop_after_and_an_explicit_allow_concurrent_false_warn_and_true_does_not() {
+    fn package_11d_lifted_schedule_allow_concurrent_and_flow_stop_after_but_not_the_rest() {
         let r = report(&format!(
             "id: f\nnamespace: a.b\n{LOG}triggers:\n\
              \x20 - id: a\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    stopAfter: [FAILED]\n\
              \x20 - id: b\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    allowConcurrent: false\n\
-             \x20 - id: c\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    allowConcurrent: true\n"
+             \x20 - id: c\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    allowConcurrent: true\n\
+             \x20 - id: d\n    type: {FLOWT}\n    stopAfter: [FAILED]\n    dependsOn:\n      - namespace: a.b\n        flowId: g\n\
+             \x20 - id: e\n    type: {FLOWT}\n    allowConcurrent: false\n    failOnTriggerError: true\n    dependsOn:\n      - namespace: a.b\n        flowId: g\n\
+             \x20 - id: g\n    type: {HOOK}\n    key: k\n    allowConcurrent: false\n"
         ));
         let paths: std::collections::BTreeSet<_> = r
             .warnings
@@ -2085,12 +2109,24 @@ mod tests {
             paths,
             std::collections::BTreeSet::from([
                 "triggers.a.stopAfter",
-                "triggers.b.allowConcurrent"
+                "triggers.e.allowConcurrent",
+                "triggers.e.failOnTriggerError",
+                "triggers.g.allowConcurrent",
             ])
         );
-        assert!(at(&r, "triggers.b.allowConcurrent")[0]
-            .message
-            .contains("egret never locks a trigger while its execution runs"));
+        for p in ["triggers.e.allowConcurrent", "triggers.g.allowConcurrent"] {
+            assert!(at(&r, p)[0]
+                .message
+                .contains("egret never locks a trigger while its execution runs"));
+        }
+        let f = at(&r, "triggers.e.failOnTriggerError")[0];
+        assert!(
+            f.message.contains("worker/polling triggers"),
+            "{}",
+            f.message
+        );
+        assert!(!f.message.contains("package #11"), "{}", f.message);
+        assert!(!f.message.contains(" yet"), "{}", f.message);
     }
 
     #[test]
@@ -2188,13 +2224,26 @@ mod tests {
             (SCHED, "labels"),
             (HOOK, "labels"),
             (SCHED, "stopAfter"),
-            (SCHED, "failOnTriggerError"),
-            (SCHED, "allowConcurrent"),
+            (HOOK, "allowConcurrent"),
+            (FLOWT, "allowConcurrent"),
         ] {
             assert_eq!(
                 lift_of(Site::Trigger(t), key),
                 Some(Package(11)),
                 "{t}.{key}"
+            );
+        }
+        // Package 11d honours these two cells.
+        assert_eq!(lift_of(Site::Trigger(SCHED), "allowConcurrent"), None);
+        assert_eq!(lift_of(Site::Trigger(FLOWT), "stopAfter"), None);
+        // `failOnTriggerError` is inert on every trigger type and no package lifts it.
+        for t in [SCHED, HOOK, FLOWT] {
+            assert!(
+                matches!(
+                    lift_of(Site::Trigger(t), "failOnTriggerError"),
+                    Some(Lift::Inert(_))
+                ),
+                "{t}"
             );
         }
     }
