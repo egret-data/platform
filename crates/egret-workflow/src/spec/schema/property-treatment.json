@@ -1379,7 +1379,7 @@
       "failOnTriggerError": "ignored",
       "id": "honoured",
       "inputs": "honoured",
-      "labels": "ignored",
+      "labels": "honoured",
       "lateMaximumDelay": "honoured",
       "logLevel": "ignored",
       "logToFile": "ignored",

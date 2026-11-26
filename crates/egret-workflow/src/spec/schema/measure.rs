@@ -86,18 +86,19 @@ const REFUSED_BY_NAME: &[&str] = &["unsupported_pause_property"];
 ///
 /// * every trigger: `id`, `type`, `description` (documentation), `disabled`
 ///   (`scheduler::sync`, `webhook_routes`, `trigger::flow`);
-/// * `Flow` also reads `when` and `labels` (`trigger::flow`
-///   `when_source`/`labels`); a Schedule reads `when` at fire time (package
-///   11b, `scheduler::fire`'s skip-and-advance), so it is honoured there too; a
-///   Webhook's path reads neither.
+/// * `Flow` reads `when` and `labels` (`trigger::flow` `when_source`/`labels`);
+///   a Schedule reads both too -- `labels` at fire time (Task 1,
+///   `scheduler::fire::render_trigger_labels`) and `when` at fire time (package
+///   11b, `scheduler::fire`'s skip-and-advance); a Webhook's path reads neither.
 ///
 /// `stopAfter`, `logToFile`, `failOnTriggerError` and `allowConcurrent` are
 /// parsed by `models::Trigger` and read by nothing.
 fn trigger_base_read(t: &str) -> Vec<&'static str> {
     let mut v = vec!["description", "disabled", "id", "type"];
     match t {
-        "io.kestra.plugin.core.trigger.Flow" => v.extend(["labels", "when"]),
-        "io.kestra.plugin.core.trigger.Schedule" => v.push("when"),
+        "io.kestra.plugin.core.trigger.Flow" | "io.kestra.plugin.core.trigger.Schedule" => {
+            v.extend(["labels", "when"])
+        }
         _ => {}
     }
     v
