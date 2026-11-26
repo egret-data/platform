@@ -113,13 +113,15 @@ pub(crate) enum Site<'a> {
 const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
 const WEBHOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
 const FLOW_TRIGGER: &str = "io.kestra.plugin.core.trigger.Flow";
+const SCHEDULE_ON_DATES: &str = "io.kestra.plugin.core.trigger.ScheduleOnDates";
+const HTTP_TRIGGER: &str = "io.kestra.plugin.core.http.Trigger";
 /// D15, measured: Kestra persists a source `deleted: true` as a tombstone row
 /// (`AbstractJdbcFlowRepository.save` writes the parsed `GenericFlow`, and the
 /// `deleted` column is generated from the stored JSON, `baseline-postgres.sql:117`).
 const DELETED_REASON: &str =
     "egret deletes a flow through its own delete action, never through a key in the source";
-const FAIL_ON_TRIGGER_ERROR_REASON: &str = "Kestra consults it only for worker/polling triggers, which egret has none of, so no package will honour it";
-const ALLOW_CONCURRENT_REASON: &str = "egret never locks a trigger while its execution runs; Kestra honours allowConcurrent only on Schedule and polling triggers, which this is not, so no package will honour it";
+const FAIL_ON_TRIGGER_ERROR_REASON: &str = "Kestra consults it only for polling triggers, and egret honours it on http.Trigger alone, so on this type no package will honour it";
+const ALLOW_CONCURRENT_REASON: &str = "egret holds a tick while its execution runs only on Schedule, ScheduleOnDates and http.Trigger; Kestra honours allowConcurrent only on Schedule and polling triggers, which this is not, so no package will honour it";
 const DRAFT_REASON: &str =
     "egret's draft and publish split replaces it: a published version runs whatever `draft:` says";
 
@@ -184,7 +186,12 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
                 // execution runs; a Flow trigger stops after its states.
                 // `stopAfter` is honoured on every trigger type (11b Schedule,
                 // 11c Webhook, 11d Flow).
-                (_, "stopAfter") | (SCHEDULE, "allowConcurrent") => return None,
+                // Package 11e: a ScheduleOnDates and an http.Trigger hold a
+                // tick the same way, and an http.Trigger's `failOnTriggerError`
+                // decides whether a transport error off-queues the poll.
+                (_, "stopAfter")
+                | (SCHEDULE | SCHEDULE_ON_DATES | HTTP_TRIGGER, "allowConcurrent")
+                | (HTTP_TRIGGER, "failOnTriggerError") => return None,
                 (_, "allowConcurrent") => return Some(Lift::Inert(ALLOW_CONCURRENT_REASON)),
                 (_, "failOnTriggerError") => {
                     return Some(Lift::Inert(FAIL_ON_TRIGGER_ERROR_REASON))
@@ -422,6 +429,8 @@ pub(crate) fn trigger_keys(t: &str) -> Vec<&'static str> {
         "io.kestra.plugin.core.trigger.Schedule" => wire_fields_of::<models::Schedule>(),
         "io.kestra.plugin.core.trigger.Webhook" => wire_fields_of::<models::Webhook>(),
         "io.kestra.plugin.core.trigger.Flow" => wire_fields_of::<models::FlowTrigger>(),
+        SCHEDULE_ON_DATES => wire_fields_of::<models::ScheduleOnDates>(),
+        HTTP_TRIGGER => wire_fields_of::<models::HttpTrigger>(),
         other => panic!("no typed model for trigger {other}"),
     }
 }
@@ -2114,7 +2123,7 @@ mod tests {
         for p in ["triggers.e.allowConcurrent", "triggers.g.allowConcurrent"] {
             let m = &at(&r, p)[0].message;
             assert!(
-                m.contains("egret never locks a trigger while its execution runs"),
+                m.contains("egret holds a tick while its execution runs only on Schedule, ScheduleOnDates and http.Trigger"),
                 "{m}"
             );
             assert!(m.contains("only on Schedule and polling triggers"), "{m}");
@@ -2122,13 +2131,37 @@ mod tests {
         }
         let f = at(&r, "triggers.e.failOnTriggerError")[0];
         assert!(
-            f.message.contains("worker/polling triggers"),
+            f.message.contains("only for polling triggers"),
             "{}",
             f.message
         );
         assert!(!f.message.contains("package #11"), "{}", f.message);
         assert!(!f.message.contains(" yet"), "{}", f.message);
         assert_eq!(f.message.matches("does not act on it").count(), 1);
+    }
+
+    /// Package 11e: the two lifted trigger types honour their keys, so the
+    /// save-time census is silent on them (including `allowConcurrent` and, on
+    /// an http.Trigger, `failOnTriggerError`); `failOnTriggerError` still warns
+    /// on a ScheduleOnDates, where nothing reads it.
+    #[test]
+    fn package_11e_lifted_trigger_types_are_silent_on_their_honoured_keys() {
+        let r = report(&format!(
+            "id: f\nnamespace: a.b\n{LOG}triggers:\n\
+             \x20 - id: d\n    type: io.kestra.plugin.core.trigger.ScheduleOnDates\n    dates: [\"2030-01-01T00:00:00Z\"]\n    timezone: UTC\n    recoverMissedSchedules: NONE\n    stopAfter: [FAILED]\n    allowConcurrent: true\n    failOnTriggerError: true\n\
+             \x20 - id: h\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://example.test/\n    interval: PT30S\n    responseCondition: \"{{{{ true }}}}\"\n    stopAfter: [FAILED]\n    allowConcurrent: true\n    failOnTriggerError: true\n"
+        ));
+        let paths: std::collections::BTreeSet<_> = r
+            .warnings
+            .iter()
+            .filter(|w| w.code == "not_honoured")
+            .map(|w| w.path.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            std::collections::BTreeSet::from(["triggers.d.failOnTriggerError"]),
+            "{r:?}"
+        );
     }
 
     #[test]

@@ -8876,6 +8876,290 @@
     }
    ]
   },
+  "io.kestra.plugin.core.http.Trigger": {
+   "markdownDescription": "Periodically calls `uri` (default GET every 60s), evaluates `responseCondition` against status/body/headers, and launches the flow when true. Supports request customization (method, params, headers, auth via options) and `stopAfter` states to disable once satisfied.##### Examples\n> Send a Slack alert if the price is below a certain threshold. The flow will be triggered every 30 seconds until the condition is met. Then, the `stopAfter` property will disable the trigger to avoid unnecessary API calls and alerts.\n```yaml\nid: http_price_alert\nnamespace: company.team\n\ntasks:\n  - id: send_slack_alert\n    type: io.kestra.plugin.slack.SlackIncomingWebhook\n    url: \"{{ secret('SLACK_WEBHOOK') }}\"\n    payload: |\n      {\n        \"channel\": \"#price-alerts\",\n        \"text\": \"The price is now: {{ json(trigger.body).price }}\"\n      }\n\ntriggers:\n  - id: http\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://fakestoreapi.com/products/1\n    responseCondition: \"{{ json(response.body).price <= 110 }}\"\n    interval: PT30S\n    stopAfter:\n      - SUCCESS\n\n```\n\n> Trigger a flow if an HTTP endpoint returns a status code equals to 200\n```yaml\nid: http_trigger\nnamespace: company.team\n\ntasks:\n  - id: log_response\n    type: io.kestra.plugin.core.log.Log\n    message: '{{ trigger.body }}'\n\ntriggers:\n  - id: http\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://api.chucknorris.io/jokes/random\n    responseCondition: \"{{ response.statusCode == 200 }}\"\n    stopAfter:\n      - SUCCESS\n\n```",
+   "properties": {
+    "allowConcurrent": {
+     "$dynamic": false,
+     "$group": "execution",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "title": "Specifies whether a trigger is allowed to start a new execution even if a previous run is still in progress.",
+     "type": "boolean"
+    },
+    "assets": {
+     "allOf": [
+      {
+       "$ref": "#/$defs/io.kestra.core.models.assets.AssetsDeclaration"
+      },
+      {
+       "$dynamic": false,
+       "$group": "advanced"
+      }
+     ]
+    },
+    "body": {
+     "$dynamic": true,
+     "title": "The full body as a string",
+     "type": "string"
+    },
+    "contentType": {
+     "$dynamic": true,
+     "default": "application/json",
+     "markdownDescription": "Default value is : `application/json`",
+     "title": "The request content type",
+     "type": "string"
+    },
+    "description": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "type": "string"
+    },
+    "disabled": {
+     "$dynamic": false,
+     "$group": "execution",
+     "default": "false",
+     "markdownDescription": "Default value is : `\"false\"`",
+     "type": "boolean"
+    },
+    "encryptBody": {
+     "anyOf": [
+      {
+       "$dynamic": true,
+       "default": "false",
+       "markdownDescription": "When true, the `encryptedBody` output will be filled, otherwise the `body` output will be filled.\n\nDefault value is : `\"false\"`",
+       "title": "If true, the HTTP response body will be automatically encrypted and decrypted in the outputs if encryption is configured.",
+       "type": "boolean"
+      },
+      {
+       "$dynamic": true,
+       "default": "false",
+       "markdownDescription": "When true, the `encryptedBody` output will be filled, otherwise the `body` output will be filled.\n\nDefault value is : `\"false\"`",
+       "title": "If true, the HTTP response body will be automatically encrypted and decrypted in the outputs if encryption is configured.",
+       "type": "string"
+      }
+     ],
+     "default": "false",
+     "title": "If true, the HTTP response body will be automatically encrypted and decrypted in the outputs if encryption is configured."
+    },
+    "failOnTriggerError": {
+     "$dynamic": false,
+     "$group": "reliability",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "type": "boolean"
+    },
+    "formData": {
+     "$dynamic": true,
+     "title": "The form data to be send",
+     "type": "object"
+    },
+    "headers": {
+     "$dynamic": true,
+     "additionalProperties": {
+      "type": "string"
+     },
+     "title": "The headers to pass to the request",
+     "type": "object"
+    },
+    "id": {
+     "maxLength": 256,
+     "minLength": 1,
+     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*",
+     "title": "A unique ID for the whole flow.",
+     "type": "string"
+    },
+    "interval": {
+     "$dynamic": false,
+     "default": "PT1M",
+     "format": "duration",
+     "markdownDescription": "The interval between 2 different polls of schedule, this can avoid to overload the remote system with too many calls. For most of the triggers that depend on external systems, a minimal interval must be at least PT30S.\nSee [ISO_8601 Durations](https://en.wikipedia.org/wiki/ISO_8601#Durations) for more information of available interval values.\n\nDefault value is : `PT1M`",
+     "title": "Interval between polling.",
+     "type": "string"
+    },
+    "labels": {
+     "$dynamic": true,
+     "$group": "advanced",
+     "anyOf": [
+      {
+       "items": {},
+       "type": "array"
+      },
+      {
+       "type": "object"
+      }
+     ],
+     "markdownDescription": "Label values are dynamic and can reference trigger variables.",
+     "title": "The labels to pass to the execution created."
+    },
+    "logLevel": {
+     "$dynamic": false,
+     "$group": "logging",
+     "enum": [
+      "ERROR",
+      "WARN",
+      "INFO",
+      "DEBUG",
+      "TRACE"
+     ],
+     "type": "string"
+    },
+    "logToFile": {
+     "$dynamic": false,
+     "$group": "logging",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "type": "boolean"
+    },
+    "method": {
+     "$dynamic": true,
+     "default": "GET",
+     "markdownDescription": "Default value is : `GET`",
+     "title": "The HTTP method to use",
+     "type": "string"
+    },
+    "options": {
+     "allOf": [
+      {
+       "$ref": "#/$defs/io.kestra.core.http.client.configurations.HttpConfiguration"
+      },
+      {
+       "title": "The HTTP request options"
+      }
+     ]
+    },
+    "params": {
+     "$dynamic": true,
+     "markdownDescription": "Adds parameter to URI query. The parameter name and value are expected to be unescaped and may contain non ASCII characters.\nThe value can be a string or a list of strings.\nThis method will not override parameters already existing on `uri` and will add them as array.",
+     "title": "The query string parameter to use",
+     "type": "object"
+    },
+    "policyRefs": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "items": {
+      "$dynamic": false,
+      "$group": "advanced",
+      "type": "string"
+     },
+     "markdownDescription": "Identifiers of `enforcement: REFERENCE` governance policies to attach to this trigger and everything nested under it (Enterprise Edition; ignored in the open-source edition).",
+     "type": "array"
+    },
+    "responseCondition": {
+     "$dynamic": true,
+     "default": "{{ response.statusCode < 400 }}",
+     "markdownDescription": "The condition will be evaluated after calling the HTTP endpoint; it can use the response itself to determine whether to start a flow or not.\nThe following variables are available when evaluating the condition:\n- `response.statusCode`: the response HTTP status code\n- `response.body`: the response body as a string\n- `response.headers`: the response headers\n\nBoolean coercion allows 0, -0, null and '' to evaluate to false, all other values will evaluate to true.\n\nThe condition will be evaluated before any 'generic trigger conditions' that can be configured via the `conditions` property.\n\n\nDefault value is : `\"{{ response.statusCode < 400 }}\"`",
+     "title": "The condition on the HTTP response to trigger a flow, which can be any expression that evaluates to a boolean value.",
+     "type": "string"
+    },
+    "stopAfter": {
+     "$dynamic": false,
+     "$group": "reliability",
+     "items": {
+      "$dynamic": false,
+      "$group": "reliability",
+      "enum": [
+       "CREATED",
+       "SUBMITTED",
+       "RUNNING",
+       "PAUSED",
+       "RESTARTED",
+       "KILLING",
+       "SUCCESS",
+       "WARNING",
+       "FAILED",
+       "KILLED",
+       "CANCELLED",
+       "QUEUED",
+       "RETRYING",
+       "RETRIED",
+       "SKIPPED",
+       "BREAKPOINT",
+       "RESUBMITTED"
+      ],
+      "type": "string"
+     },
+     "title": "List of execution states after which a trigger should be stopped (a.k.a. disabled).",
+     "type": "array"
+    },
+    "type": {
+     "enum": [
+      "io.kestra.plugin.core.http.Trigger",
+      "io.kestra.plugin.fs.http.Trigger"
+     ]
+    },
+    "uri": {
+     "$dynamic": true,
+     "title": "The fully-qualified URI that points to the HTTP destination",
+     "type": "string"
+    },
+    "version": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "markdownDescription": "Defines the version of the plugin to use.\n\nThe version must follow the Semantic Versioning (SemVer) specification:\n  - A single-digit MAJOR version (e.g., `1`).\n  - A MAJOR.MINOR version (e.g., `1.1`).\n  - A MAJOR.MINOR.PATCH version, optionally with any qualifier\n    (e.g., `1.1.2`, `1.1.0-SNAPSHOT`).\n",
+     "title": "Plugin Version",
+     "type": "string"
+    },
+    "when": {
+     "$dynamic": true,
+     "$group": "execution",
+     "default": "true",
+     "markdownDescription": "A Pebble expression evaluated at trigger time. The trigger fires only when the expression evaluates to a truthy value (`true`, a non-empty string, a non-zero number). Use this to gate trigger execution on dynamic runtime values such as execution labels, flow variables, or environment conditions.\n\nDefault value is : `\"true\"`",
+     "title": "A condition that determines whether the trigger should run.",
+     "type": "string"
+    },
+    "workerSelector": {
+     "allOf": [
+      {
+       "$ref": "#/$defs/io.kestra.core.models.tasks.WorkerSelector"
+      },
+      {
+       "$dynamic": false,
+       "$group": "execution",
+       "markdownDescription": "Routing requirements (tags + fallback) for this trigger."
+      }
+     ]
+    }
+   },
+   "required": [
+    "id",
+    "type",
+    "uri"
+   ],
+   "title": "Poll an HTTP endpoint and trigger when a condition matches.",
+   "type": "object",
+   "x-egret-outputs": [
+    {
+     "description": "The body of the response",
+     "name": "body"
+    },
+    {
+     "description": "The status code of the response",
+     "name": "code",
+     "type": "integer"
+    },
+    {
+     "description": "The encrypted body of the response",
+     "name": "encryptedBody",
+     "type": "string"
+    },
+    {
+     "description": "The form data to be sent in the request body",
+     "name": "formData",
+     "type": "object"
+    },
+    {
+     "description": "The headers of the response",
+     "name": "headers",
+     "type": "object"
+    },
+    {
+     "description": "The URL of the current request",
+     "name": "uri",
+     "type": "string"
+    }
+   ]
+  },
   "io.kestra.plugin.core.kv.Delete": {
    "markdownDescription": "Renders `key`/`namespace` (defaults to Flow Namespace) and removes the entry. If `errorOnMissing` is true and the key doesn’t exist, the task fails.\n\nRequires Namespace authorization when deleting outside the current namespace.##### Examples\n> Delete a KV pair.\n```yaml\nid: kv_store_delete\nnamespace: company.team\n\ntasks:\n  - id: kv_delete\n    type: io.kestra.plugin.core.kv.Delete\n    key: my_variable\n    namespace: dev # the current namespace of the flow will be used by default\n\n```",
    "properties": {
@@ -15171,6 +15455,201 @@
      "type": "string"
     }
    ]
+  },
+  "io.kestra.plugin.core.trigger.ScheduleOnDates": {
+   "markdownDescription": "Triggers on an explicit list of `dates` (ZonedDateTime). Timezone defaults to server but can be overridden. Honors backfill/recover logic like other schedulables.\n\nUse when a cron can’t express required occurrences (e.g., ad-hoc or irregular calendars).",
+   "properties": {
+    "allowConcurrent": {
+     "$dynamic": false,
+     "$group": "execution",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "title": "Specifies whether a trigger is allowed to start a new execution even if a previous run is still in progress.",
+     "type": "boolean"
+    },
+    "assets": {
+     "allOf": [
+      {
+       "$ref": "#/$defs/io.kestra.core.models.assets.AssetsDeclaration"
+      },
+      {
+       "$dynamic": false,
+       "$group": "advanced"
+      }
+     ]
+    },
+    "dates": {
+     "$dynamic": true,
+     "items": {
+      "$dynamic": true,
+      "format": "date-time",
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "description": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "type": "string"
+    },
+    "disabled": {
+     "$dynamic": false,
+     "$group": "execution",
+     "default": "false",
+     "markdownDescription": "Default value is : `\"false\"`",
+     "type": "boolean"
+    },
+    "failOnTriggerError": {
+     "$dynamic": false,
+     "$group": "reliability",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "type": "boolean"
+    },
+    "id": {
+     "maxLength": 256,
+     "minLength": 1,
+     "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*",
+     "title": "A unique ID for the whole flow.",
+     "type": "string"
+    },
+    "inputs": {
+     "$dynamic": true,
+     "title": "The inputs to pass to the scheduled flow",
+     "type": "object"
+    },
+    "labels": {
+     "$dynamic": true,
+     "$group": "advanced",
+     "anyOf": [
+      {
+       "items": {},
+       "type": "array"
+      },
+      {
+       "type": "object"
+      }
+     ],
+     "markdownDescription": "Label values are dynamic and can reference trigger variables.",
+     "title": "The labels to pass to the execution created."
+    },
+    "logLevel": {
+     "$dynamic": false,
+     "$group": "logging",
+     "enum": [
+      "ERROR",
+      "WARN",
+      "INFO",
+      "DEBUG",
+      "TRACE"
+     ],
+     "type": "string"
+    },
+    "logToFile": {
+     "$dynamic": false,
+     "$group": "logging",
+     "default": false,
+     "markdownDescription": "Default value is : `false`",
+     "type": "boolean"
+    },
+    "policyRefs": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "items": {
+      "$dynamic": false,
+      "$group": "advanced",
+      "type": "string"
+     },
+     "markdownDescription": "Identifiers of `enforcement: REFERENCE` governance policies to attach to this trigger and everything nested under it (Enterprise Edition; ignored in the open-source edition).",
+     "type": "array"
+    },
+    "recoverMissedSchedules": {
+     "$dynamic": false,
+     "enum": [
+      "LAST",
+      "NONE",
+      "ALL"
+     ],
+     "markdownDescription": "`ALL` will recover all missed schedules, `LAST`  will only recovered the last missing one, `NONE` will not recover any missing schedule.\nThe default is `ALL` unless a different value is configured using the global plugin configuration.",
+     "title": "Action to take in the case of missed schedules",
+     "type": "string"
+    },
+    "stopAfter": {
+     "$dynamic": false,
+     "$group": "reliability",
+     "items": {
+      "$dynamic": false,
+      "$group": "reliability",
+      "enum": [
+       "CREATED",
+       "SUBMITTED",
+       "RUNNING",
+       "PAUSED",
+       "RESTARTED",
+       "KILLING",
+       "SUCCESS",
+       "WARNING",
+       "FAILED",
+       "KILLED",
+       "CANCELLED",
+       "QUEUED",
+       "RETRYING",
+       "RETRIED",
+       "SKIPPED",
+       "BREAKPOINT",
+       "RESUBMITTED"
+      ],
+      "type": "string"
+     },
+     "title": "List of execution states after which a trigger should be stopped (a.k.a. disabled).",
+     "type": "array"
+    },
+    "timezone": {
+     "$dynamic": true,
+     "default": "Etc/UTC",
+     "markdownDescription": "Default value is : `Etc/UTC`",
+     "title": "The [time zone identifier](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) (i.e. the second column in [the Wikipedia table](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones#List)) to use for scheduling the trigger. Default value is the system time-zone.",
+     "type": "string"
+    },
+    "type": {
+     "const": "io.kestra.plugin.core.trigger.ScheduleOnDates"
+    },
+    "version": {
+     "$dynamic": false,
+     "$group": "advanced",
+     "markdownDescription": "Defines the version of the plugin to use.\n\nThe version must follow the Semantic Versioning (SemVer) specification:\n  - A single-digit MAJOR version (e.g., `1`).\n  - A MAJOR.MINOR version (e.g., `1.1`).\n  - A MAJOR.MINOR.PATCH version, optionally with any qualifier\n    (e.g., `1.1.2`, `1.1.0-SNAPSHOT`).\n",
+     "title": "Plugin Version",
+     "type": "string"
+    },
+    "when": {
+     "$dynamic": true,
+     "$group": "execution",
+     "default": "true",
+     "markdownDescription": "A Pebble expression evaluated at trigger time. The trigger fires only when the expression evaluates to a truthy value (`true`, a non-empty string, a non-zero number). Use this to gate trigger execution on dynamic runtime values such as execution labels, flow variables, or environment conditions.\n\nDefault value is : `\"true\"`",
+     "title": "A condition that determines whether the trigger should run.",
+     "type": "string"
+    },
+    "workerSelector": {
+     "allOf": [
+      {
+       "$ref": "#/$defs/io.kestra.core.models.tasks.WorkerSelector"
+      },
+      {
+       "$dynamic": false,
+       "$group": "execution",
+       "markdownDescription": "Routing requirements (tags + fallback) for this trigger."
+      }
+     ]
+    }
+   },
+   "required": [
+    "dates",
+    "id",
+    "type"
+   ],
+   "title": "Schedule a Flow on specific dates.",
+   "type": "object",
+   "x-egret-outputs": []
   },
   "io.kestra.plugin.core.trigger.Webhook": {
    "markdownDescription": "Exposes a signed endpoint `.../executions/webhook/{Namespace}/{flowId}/{key}` that accepts GET/POST/PUT to start a Flow. Secured by the required `key`; keep it secret.\n\nRequest data is available as `trigger.body`, `trigger.headers`, and `trigger.parameters`. A binary body is base64-encoded on `trigger.body`, unless `fetchType` is set to `STORE` to stream it into Kestra's internal storage and expose it as `trigger.uri` instead. A `multipart/form-data` body is available as `trigger.parts` (files, always stored in Kestra's internal storage) and `trigger.formFields`. Supports `wait`/`returnOutputs` to block and return Flow outputs, and optional `responseContentType`. Conditions are allowed except `MultipleCondition`.\n\nResponses: 404 (not found), 200 (triggered), 204 (conditions not met), 422 (inputs could not be rendered).##### Examples\n> Add a webhook trigger to the current flow with the key `4wjtkzwVGBM9yKnjm3yv8r`; the webhook will be available at the URI `/api/v1/{tenant}/executions/webhook/{namespace}/{flowId}/4wjtkzwVGBM9yKnjm3yv8r`.\n```yaml\nid: webhook_flow\nnamespace: company.team\n\ntasks:\n  - id: log_hello_world\n    type: io.kestra.plugin.core.log.Log\n    message: Hello World! 🚀\n\ntriggers:\n  - id: webhook\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: 4wjtkzwVGBM9yKnjm3yv8r\n\n```\n\n> Add a trigger matching specific webhook event condition. The flow will be executed only if the condition is met.\n\n```yaml\nid: condition_based_webhook_flow\nnamespace: company.team\n\ntasks:\n  - id: log_hello_world\n    type: io.kestra.plugin.core.log.Log\n    message: Hello World! 🚀\n\ntriggers:\n  - id: webhook\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: 4wjtkzwVGBM9yKnjm3yv8r\n    when: \"{{ trigger.body.hello == 'world' }}\"\n\n```\n\n> Webhook with text/plain response for Microsoft Graph validation handshakes.\nWhen a service like Microsoft Graph validates the webhook endpoint, it sends a validationToken that must be echoed back as plain text.\n\n```yaml\nid: microsoft_graph_webhook\nnamespace: company.team\n\ntasks:\n  - id: handle_request\n    type: io.kestra.plugin.core.debug.Return\n    format: \"{{ trigger.parameters.validationToken[0] ?? 'notification processed' }}\"\n\noutputs:\n  - id: response\n    type: STRING\n    value: \"{{ outputs.handle_request.value }}\"\n\ntriggers:\n  - id: webhook\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: 4wjtkzwVGBM9yKnjm3yv8r\n    wait: true\n    returnOutputs: true\n    responseContentType: \"text/plain\"\n\n```\n\n> Receive a file uploaded as `multipart/form-data`. Each file part is available under `trigger.parts`,\nits content stored in Kestra's internal storage and reachable through its `uri`, and the parts that are\nnot files under `trigger.formFields`.\n\n```yaml\nid: upload_webhook\nnamespace: company.team\n\ntasks:\n  - id: log_upload\n    type: io.kestra.plugin.core.log.Log\n    message: \"Received {{ trigger.parts[0].filename }} ({{ trigger.parts[0].size }} bytes, {{ trigger.parts[0].contentType }}), note: {{ trigger.formFields.note[0] }}\"\n\n  - id: measure_upload\n    type: io.kestra.plugin.core.storage.Size\n    uri: \"{{ trigger.parts[0].uri }}\"\n\ntriggers:\n  - id: webhook\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: 4wjtkzwVGBM9yKnjm3yv8r\n\n```\n\n> Receive a payload that is not a form - a large JSON export, or a binary file sent as the request body -\nwithout carrying it through the execution. `fetchType: STORE` streams the body into Kestra's internal\nstorage and exposes its URI as `trigger.uri` instead of its content as `trigger.body`. Note that a\ncondition on the trigger can no longer read the body.\n\n```yaml\nid: stored_body_webhook\nnamespace: company.team\n\ntasks:\n  - id: measure_body\n    type: io.kestra.plugin.core.storage.Size\n    uri: \"{{ trigger.uri }}\"\n\ntriggers:\n  - id: webhook\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: 4wjtkzwVGBM9yKnjm3yv8r\n    fetchType: STORE\n\n```",
@@ -22085,7 +22564,7 @@
  },
  "x-egret-source": {
   "export": "GET /api/v1/plugins/schemas/flow",
-  "exported_at": "2026-10-28",
+  "exported_at": "2026-11-27",
   "image_id": "sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd",
   "kestra_version": "2.0.0-rc13"
  },
@@ -22094,10 +22573,10 @@
    "egret.task": 38,
    "egret.trigger": 1
   },
-  "kept_definitions": 126,
+  "kept_definitions": 128,
   "raw_bytes": 16533865,
   "raw_definitions": 1850,
-  "raw_sha256": "7c458a25e0191105f74776fcf4e012753ad2e9a27cc62bbe190aa9d1d5c78e26"
+  "raw_sha256": "e3fc6241c9cf2ec22312c08c15fb435ce6d2242cc369a8bb3ef9e7603f0ba3aa"
  },
  "x-kestra-types": {
   "tasks": [

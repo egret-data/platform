@@ -99,9 +99,9 @@ const REFUSED_BY_NAME: &[&str] = &["unsupported_pause_property"];
 /// Package 11d: a Schedule reads `allowConcurrent` (the derived hold in
 /// `scheduler::fire`), and all three trigger types read `stopAfter` at the
 /// settle seam (`worker::stop_after`: 11b Schedule, 11c Webhook, 11d Flow).
-/// `logToFile` and `failOnTriggerError` are parsed by `models::Trigger` and
-/// read by nothing; `allowConcurrent` on a Flow/Webhook is likewise not in
-/// this read-set.
+/// `logToFile` is parsed by `models::Trigger` and read by nothing;
+/// `failOnTriggerError` is read on an http.Trigger only (package 11e), and
+/// `allowConcurrent` on a Flow/Webhook is not in this read-set.
 fn trigger_base_read(t: &str) -> Vec<&'static str> {
     let mut v = vec!["description", "disabled", "id", "type"];
     match t {
@@ -110,6 +110,19 @@ fn trigger_base_read(t: &str) -> Vec<&'static str> {
             v.extend(["allowConcurrent", "labels", "stopAfter", "when"])
         }
         "io.kestra.plugin.core.trigger.Webhook" => v.extend(["labels", "stopAfter", "when"]),
+        // Package 11e: both fire through the Schedule path (`allowConcurrent`
+        // hold, `when`, `labels`, `stopAfter`); an http.Trigger also reads
+        // `failOnTriggerError` (a transport error off-queues the poll).
+        "io.kestra.plugin.core.trigger.ScheduleOnDates" => {
+            v.extend(["allowConcurrent", "labels", "stopAfter", "when"])
+        }
+        "io.kestra.plugin.core.http.Trigger" => v.extend([
+            "allowConcurrent",
+            "failOnTriggerError",
+            "labels",
+            "stopAfter",
+            "when",
+        ]),
         _ => {}
     }
     v
@@ -156,6 +169,19 @@ fn downstream(flow: &Flow) -> Option<String> {
                         "trigger::webhook::build_output (409 at firing): {}",
                         u.message(&t.id)
                     ));
+                }
+            }
+            // Package 11e: a malformed `dates` / timezone, or an http.Trigger
+            // the poll would refuse (`options`/`encryptBody`/`formData`, a zero
+            // interval), is refused downstream of parse + validate.
+            TriggerKind::ScheduleOnDates(_) => {
+                if let Err(e) = crate::trigger::schedule::ScheduleTrigger::resolve(t) {
+                    return Some(format!("trigger::schedule::ScheduleTrigger::resolve: {e}"));
+                }
+            }
+            TriggerKind::HttpTrigger(h) => {
+                if let Some(first) = crate::trigger::http_trigger::refusals(h).into_iter().next() {
+                    return Some(format!("trigger::http_trigger::refusals: {first}"));
                 }
             }
             _ => {}
@@ -244,6 +270,13 @@ fn sample(row: &str, prop: &str, schema: &Value) -> Value {
         ("io.kestra.plugin.core.trigger.Schedule", "timezone") => return json!("UTC"),
         ("io.kestra.plugin.core.trigger.Schedule", "withSeconds") => return json!(false),
         ("io.kestra.plugin.core.trigger.Schedule", "lateMaximumDelay") => return json!("PT1H"),
+        // Package 11e: stage 2 resolves a ScheduleOnDates and refuses a bad
+        // http.Trigger `interval`, so these take values that resolve.
+        ("io.kestra.plugin.core.trigger.ScheduleOnDates", "dates") => {
+            return json!(["2030-01-01T00:00:00Z"])
+        }
+        ("io.kestra.plugin.core.trigger.ScheduleOnDates", "timezone") => return json!("UTC"),
+        ("io.kestra.plugin.core.http.Trigger", "interval") => return json!("PT30S"),
         ("io.kestra.plugin.core.trigger.Flow", "states") => return json!(["SUCCESS"]),
         ("io.kestra.plugin.core.trigger.Flow", "dependsOn") => {
             return json!([{ "namespace": "a.b", "flowId": "f" }])
@@ -373,6 +406,10 @@ fn trigger_site(row: &str, read: BTreeSet<&'static str>) -> Site {
     match row {
         "io.kestra.plugin.core.trigger.Schedule" => base["cron"] = json!("0 * * * *"),
         "io.kestra.plugin.core.trigger.Webhook" => base["key"] = json!("k"),
+        "io.kestra.plugin.core.trigger.ScheduleOnDates" => {
+            base["dates"] = json!(["2030-01-01T00:00:00Z"])
+        }
+        "io.kestra.plugin.core.http.Trigger" => base["uri"] = json!("https://example.test/"),
         _ => {}
     }
     Site {

@@ -185,9 +185,9 @@ const NOT_YET_ENFORCED: &[(&str, &str)] = &[
     ),
     (
         "triggers",
-        "egret fires only Schedule, Webhook and Flow triggers; roadmap package #11 lifts \
-         ScheduleOnDates and http.Trigger, #18 lifts plugin triggers, and McpToolTrigger is not \
-         engine scope (roadmap \u{a7}3.3)",
+        "egret fires only Schedule, ScheduleOnDates, Webhook, Flow and http.Trigger triggers; \
+         roadmap package #18 lifts plugin triggers, and McpToolTrigger is not engine scope \
+         (roadmap \u{a7}3.3)",
     ),
 ];
 
@@ -422,20 +422,36 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
 fn schedule_findings(flow: &Flow, report: &mut ValidationReport) {
     use crate::trigger::{ScheduleError, ScheduleTrigger};
     for trigger in &flow.triggers {
-        let TriggerKind::Schedule(schedule) = &trigger.kind else {
-            continue;
+        // Package 11e: a `ScheduleOnDates` is checked like a `Schedule`, and
+        // an absent or empty `dates` is reported too (`@NotNull` is not
+        // parsing), since the type has no other publish-time gate.
+        let inputs = match &trigger.kind {
+            TriggerKind::Schedule(s) => s.inputs.as_ref(),
+            TriggerKind::ScheduleOnDates(o) => o.inputs.as_ref(),
+            TriggerKind::HttpTrigger(h) => {
+                for reason in crate::trigger::http_trigger::refusals(h) {
+                    report.warnings.push(Finding {
+                        code: "http_trigger_not_pollable",
+                        message: format!("trigger '{}' will never be polled: {reason}", trigger.id),
+                        path: format!("triggers.{}", trigger.id),
+                    });
+                }
+                continue;
+            }
+            _ => continue,
         };
         // A `when` is honoured now (package 11b), so `resolve` no longer
         // refuses one and nothing is said about it here.
         match ScheduleTrigger::resolve(trigger) {
-            Ok(_) | Err(ScheduleError::MissingCron) => {}
+            Ok(_) => {}
+            Err(ScheduleError::MissingCron) => {}
             Err(e) => report.warnings.push(Finding {
                 code: "schedule_not_resolvable",
                 message: format!("trigger '{}' will never fire: {e}", trigger.id),
                 path: format!("triggers.{}", trigger.id),
             }),
         }
-        for (key, value) in schedule.inputs.iter().flatten() {
+        for (key, value) in inputs.into_iter().flatten() {
             if crate::scheduler::templated(value) {
                 report.warnings.push(Finding {
                     code: "schedule_input_templated",
@@ -876,17 +892,12 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
         quotas: !flow.quotas.is_empty(),
         // Narrowed at W7a's final review: Schedule, Webhook and Flow fire;
         // only a trigger of another type (`Leaf`) is declared and unenforced.
-        // Package 11e: `ScheduleOnDates` is typed and scheduled (Task 1) but
-        // stays WARNED until the package's reconcile task, so the census and
-        // this warning move together, not mid-feature (the 9a discipline).
-        triggers: flow.triggers.iter().any(|t| {
-            matches!(
-                t.kind,
-                TriggerKind::Leaf { .. }
-                    | TriggerKind::ScheduleOnDates(_)
-                    | TriggerKind::HttpTrigger(_)
-            )
-        }),
+        // Package 11e lifted `ScheduleOnDates` and `http.Trigger`: both fire now,
+        // so only an opaque `Leaf` (a plugin or realtime trigger, #18) warns.
+        triggers: flow
+            .triggers
+            .iter()
+            .any(|t| matches!(t.kind, TriggerKind::Leaf { .. })),
     };
 
     check_retry(&flow.retry, "retry", &mut report);
@@ -1851,7 +1862,7 @@ fn java_uri_scheme(text: &str) -> Result<Option<&str>, ()> {
 /// - a `Schedule` with no `inputs:` map is an empty map, not a skip;
 /// - the missing ids are joined with `" | "`, which is Kestra's own separator
 ///   and is kept so the two messages read alike side by side;
-/// - only `Schedule` triggers. A `Webhook` or a `Flow` trigger carries its own
+/// - only `Schedule` and (package 11e) `ScheduleOnDates` triggers. A `Webhook` or a `Flow` trigger carries its own
 ///   inputs at fire time and is not checked, which is `filter(Schedule.class::isInstance)`.
 ///
 /// **One narrowing, named.** Kestra reads `resolvableInputs()`, which expands
@@ -1875,10 +1886,11 @@ fn validate_schedule_inputs(flow: &Flow, report: &mut ValidationReport) {
         return;
     }
     for trigger in &flow.triggers {
-        let TriggerKind::Schedule(schedule) = &trigger.kind else {
-            continue;
+        let supplied = match &trigger.kind {
+            TriggerKind::Schedule(s) => s.inputs.as_ref(),
+            TriggerKind::ScheduleOnDates(o) => o.inputs.as_ref(),
+            _ => continue,
         };
-        let supplied = schedule.inputs.as_ref();
         let missing: Vec<&str> = without_defaults
             .iter()
             .copied()
@@ -3964,9 +3976,9 @@ mod tests {
                 ),
                 (
                     "triggers",
-                    "egret fires only Schedule, Webhook and Flow triggers; roadmap package #11 \
-                     lifts ScheduleOnDates and http.Trigger, #18 lifts plugin triggers, and \
-                     McpToolTrigger is not engine scope (roadmap \u{a7}3.3)"
+                    "egret fires only Schedule, ScheduleOnDates, Webhook, Flow and http.Trigger \
+                     triggers; roadmap package #18 lifts plugin triggers, and McpToolTrigger is \
+                     not engine scope (roadmap \u{a7}3.3)"
                 ),
             ],
             "a row added here is a claim that egret does NOT enforce that \
@@ -4053,6 +4065,9 @@ mod tests {
             "  - id: w\n    type: io.kestra.plugin.core.trigger.Webhook\n    key: k1234567\n",
             "  - id: f\n    type: io.kestra.plugin.core.trigger.Flow\n    conditions: []\n",
             "  - id: s\n    type: core.schedule\n    cron: \"0 * * * *\"\n",
+            // Package 11e lifted these two: they fire, so no warning.
+            "  - id: d\n    type: io.kestra.plugin.core.trigger.ScheduleOnDates\n    dates:\n      - \"2030-01-01T00:00:00Z\"\n",
+            "  - id: h\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://example.test/\n",
         ] {
             let yaml = format!("id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n{kind}");
             assert_eq!(
@@ -4061,16 +4076,6 @@ mod tests {
                 "egret fires this trigger, so `not yet enforced` would be false:\n{yaml}"
             );
         }
-
-        // Package 11e: `ScheduleOnDates` is typed and scheduled, but stays
-        // WARNED until the reconcile task (the census must not move mid-feature).
-        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n  - id: d\n    type: io.kestra.plugin.core.trigger.ScheduleOnDates\n    dates:\n      - \"2030-01-01T00:00:00Z\"\n";
-        assert_eq!(triggers_warning(yaml).len(), 1, "{yaml}");
-
-        // Package 11e: `http.Trigger` is typed and scheduled (no poll yet), but
-        // stays WARNED until the reconcile task.
-        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n  - id: h\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://example.test/\n";
-        assert_eq!(triggers_warning(yaml).len(), 1, "{yaml}");
 
         // POSITIVE CONTROL: a trigger egret does not fire, alone and beside a Schedule.
         let leaf = "  - id: q\n    type: io.kestra.plugin.aws.sqs.Trigger\n    queueUrl: https://example\n";
@@ -4084,11 +4089,66 @@ mod tests {
             let found = triggers_warning(&yaml);
             assert_eq!(found.len(), 1, "{yaml}");
             assert!(
-                found[0].contains("egret fires only Schedule, Webhook and Flow triggers")
-                    && !found[0].contains("W6"),
+                found[0].contains(
+                    "egret fires only Schedule, ScheduleOnDates, Webhook, Flow and http.Trigger"
+                ) && !found[0].contains("W6"),
                 "{found:?}"
             );
         }
+    }
+
+    /// Package 11e: the lifted trigger types draw their own publish findings,
+    /// so a trigger the scheduler would take off the queue is said at save.
+    #[test]
+    fn the_lifted_trigger_types_draw_publish_findings() {
+        let report = |trigger: &str, inputs: &str| {
+            let yaml = format!(
+                "id: f\nnamespace: a.b\n{inputs}tasks:\n  - id: t\n    type: core.log\ntriggers:\n{trigger}"
+            );
+            validate(&parse(&yaml).unwrap())
+        };
+        let on_dates = "  - id: d\n    type: io.kestra.plugin.core.trigger.ScheduleOnDates\n";
+        // No `dates`, and a malformed one: neither would ever fire.
+        for body in ["", "    dates:\n      - not-a-date\n"] {
+            let r = report(&format!("{on_dates}{body}"), "");
+            assert!(
+                r.warnings
+                    .iter()
+                    .any(|w| w.code == "schedule_not_resolvable"),
+                "{body}: {r:?}"
+            );
+        }
+        // A required input the date trigger does not supply is the same error a
+        // Schedule draws.
+        let r = report(
+            &format!("{on_dates}    dates:\n      - \"2030-01-01T00:00:00Z\"\n"),
+            "inputs:\n  - id: i\n    type: STRING\n",
+        );
+        assert!(
+            r.errors.iter().any(|e| e.code == "schedule_missing_inputs"),
+            "{r:?}"
+        );
+        // An http.Trigger the poll would refuse is said, once per reason.
+        let http = "  - id: h\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://example.test/\n";
+        let r = report(
+            &format!("{http}    options: {{}}\n    interval: PT0S\n"),
+            "",
+        );
+        assert_eq!(
+            r.warnings
+                .iter()
+                .filter(|w| w.code == "http_trigger_not_pollable")
+                .count(),
+            2,
+            "{r:?}"
+        );
+        let r = report(http, "");
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.code == "http_trigger_not_pollable"),
+            "{r:?}"
+        );
     }
 
     /// **The `sla` row narrowed rather than went** — W8 Task 6, and both halves

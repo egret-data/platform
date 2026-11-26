@@ -101,6 +101,9 @@ KESTRA_TYPES = [
     "io.kestra.plugin.core.trigger.Schedule",
     "io.kestra.plugin.core.trigger.Webhook",
     "io.kestra.plugin.core.trigger.Flow",
+    # package 11e: the two optional trigger types
+    "io.kestra.plugin.core.trigger.ScheduleOnDates",
+    "io.kestra.plugin.core.http.Trigger",
     # plugins/catalog.json
     "io.kestra.plugin.jdbc.mysql.Batch",
     "io.kestra.plugin.jdbc.mysql.Queries",

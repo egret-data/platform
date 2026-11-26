@@ -230,6 +230,11 @@ pub const TRIGGER_TYPES: &[(&str, &[&str])] = &[
     ("io.kestra.plugin.core.trigger.Schedule", &["core.schedule"]),
     ("io.kestra.plugin.core.trigger.Webhook", &["core.webhook"]),
     ("io.kestra.plugin.core.trigger.Flow", &["core.flow"]),
+    (
+        "io.kestra.plugin.core.trigger.ScheduleOnDates",
+        &["core.scheduleondates"],
+    ),
+    ("io.kestra.plugin.core.http.Trigger", &["core.http.trigger"]),
 ];
 
 /// The base task properties egret's `Task` model reads, served on every
