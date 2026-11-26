@@ -179,7 +179,10 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
                 _ => {}
             }
             match (t, key) {
-                (SCHEDULE | WEBHOOK, "labels" | "when") => Some(Package(11)),
+                (SCHEDULE | WEBHOOK, "labels") => Some(Package(11)),
+                // A Schedule `when` is honoured now (package 11b), so it has no
+                // lift; a Webhook `when` stays refused (a later package).
+                (WEBHOOK, "when") => Some(Package(11)),
                 (WEBHOOK, "wait" | "returnOutputs" | "responseContentType" | "responseCode") => {
                     Some(Package(11))
                 }
@@ -706,13 +709,12 @@ impl Walk<'_> {
 
     /// A typed trigger's keys (spec 3.4). Read: the base keys and the kind's
     /// own. A key Kestra has and egret does not act on warns with its package
-    /// (`lift_of`); any other is `unknown_property`. Three families are said
-    /// by the predicate that refuses them, so each key has one finding:
-    /// Schedule `when` by `validate`'s
-    /// `schedule_findings` (`ScheduleTrigger::resolve`), Webhook `wait`,
-    /// `returnOutputs`, `responseContentType` and `responseCode` below
-    /// (`webhook::declared_unsupported`). Neither predicate renders anything:
-    /// they read the parsed model only (spec 7).
+    /// (`lift_of`); any other is `unknown_property`. Webhook `wait`,
+    /// `returnOutputs`, `responseContentType` and `responseCode` are said by
+    /// the predicate that refuses them below (`webhook::declared_unsupported`),
+    /// so each has one finding. (A Schedule `when` is honoured now, package
+    /// 11b, so it is neither skipped nor warned.) The predicate renders
+    /// nothing: it reads the parsed model only (spec 7).
     fn trigger(&mut self, row: &str, id: &str, t: &serde_json::Map<String, Value>) {
         let allowed = |key: &str| {
             TRIGGER_BASE_KEYS.contains(&key)
@@ -723,9 +725,7 @@ impl Walk<'_> {
         let path = format!("triggers.{id}");
         for (key, value) in t {
             let key = key.as_str();
-            if (row == SCHEDULE && key == "when")
-                || (row == WEBHOOK && WEBHOOK_REFUSED.contains(&key))
-            {
+            if row == WEBHOOK && WEBHOOK_REFUSED.contains(&key) {
                 continue;
             }
             // Kestra's default is `false`; only a written `false` diverges (D16)
@@ -2114,19 +2114,18 @@ mod tests {
     }
 
     #[test]
-    fn a_schedule_when_is_warned_once_and_a_late_maximum_delay_not_at_all() {
+    fn a_schedule_when_and_a_late_maximum_delay_are_both_honoured_and_silent() {
         let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    when: \"{{{{ true }}}}\"\n    lateMaximumDelay: PT1H\n"));
-        assert_eq!(at(&r, "triggers.s.when").len(), 1, "{r:?}");
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert!(at(&r, "triggers.s.when").is_empty(), "{r:?}");
         assert!(at(&r, "triggers.s.lateMaximumDelay").is_empty(), "{r:?}");
-        assert!(at(&r, "triggers.s.when")[0]
-            .message
-            .ends_with("Roadmap package #11 lifts it"));
+        assert!(at(&r, "triggers.s").is_empty(), "{r:?}");
         assert_eq!(
             r.warnings
                 .iter()
                 .filter(|w| w.code == "schedule_not_resolvable")
                 .count(),
-            1,
+            0,
             "{r:?}"
         );
     }
@@ -2288,9 +2287,9 @@ mod tests {
         for (ty, key, want) in rows {
             assert_eq!(lift_of(Site::Input(ty), key), Some(want), "{ty}.{key}");
         }
-        // Trigger rows #11.
+        // Trigger rows #11. A Schedule `when` is honoured now (package 11b),
+        // so it is no longer here; a Webhook `when` stays.
         for (t, key) in [
-            (SCHED, "when"),
             (SCHED, "labels"),
             (HOOK, "wait"),
             (HOOK, "returnOutputs"),

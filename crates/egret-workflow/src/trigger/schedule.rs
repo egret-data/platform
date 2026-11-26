@@ -51,14 +51,13 @@
 //!    accept/refuse verdicts are measured; this taxonomy is not its taxonomy.
 //! 3. Refusing a timezone `chrono-tz` cannot resolve
 //!    (`ScheduleError::UnknownTimezone`) rather than coercing it.
-//! 4. Refusing a `when` condition (`UnsupportedWhenCondition`).
-//! 5. Parsing `lateMaximumDelay` with the `trigger::duration` subset
+//! 4. Parsing `lateMaximumDelay` with the `trigger::duration` subset
 //!    (upper-case `P[nD][T[nH][nM][nS]]`, no fraction, no sign, at most 366
 //!    days); a value outside it is refused (`MalformedLateMaximumDelay`).
-//! 6. The progress guard in `handle_max_delay`, which the artifact does not
+//! 5. The progress guard in `handle_max_delay`, which the artifact does not
 //!    have — and which no test covers; see its own comment.
-//! 7. Returning `None` rather than the standing date when that guard fires.
-//! 8. Carrying `ScheduledExecution`'s three instants plus a zone instead of
+//! 6. Returning `None` rather than the standing date when that guard fires.
+//! 7. Carrying `ScheduledExecution`'s three instants plus a zone instead of
 //!    formatted `trigger.*` strings, because the format was never measured.
 //!
 //! Everything else in this file is measured or derived, and says which.
@@ -1271,12 +1270,6 @@ pub enum ScheduleError {
     /// than dropped, because dropping it would replay a backlog Kestra skips.
     /// Carries the parser's message, which echoes the offending input.
     MalformedLateMaximumDelay(String),
-    /// `Schedule` supports a `when` expression that filters candidate ticks
-    /// (`Schedule.findNextDateMatchingConditions`). Rendering it needs a
-    /// `RunContext` this seam does not have, and a schedule that ignored it
-    /// would **fire where Kestra would not** — the one failure the oracle
-    /// cannot catch. So it is refused, loudly.
-    UnsupportedWhenCondition,
 }
 
 impl fmt::Display for ScheduleError {
@@ -1291,10 +1284,6 @@ impl fmt::Display for ScheduleError {
             Self::MalformedLateMaximumDelay(why) => {
                 write!(f, "core.schedule `lateMaximumDelay` is malformed: {why}")
             }
-            Self::UnsupportedWhenCondition => write!(
-                f,
-                "core.schedule `when` conditions are not supported; roadmap package #11 lifts it"
-            ),
         }
     }
 }
@@ -1343,15 +1332,12 @@ impl ScheduleTrigger {
             return Err(ScheduleError::NotASchedule);
         };
 
-        // `hasWhenCondition()` is `getWhen() != null && !"true".equals(getWhen())`
-        // -- so both an absent `when` and the literal default `"true"` mean
-        // "no condition".
-        if let Some(when) = &trigger.when {
-            if when.source() != "true" {
-                return Err(ScheduleError::UnsupportedWhenCondition);
-            }
-        }
-
+        // A Schedule's `when` is honoured now (package 11b): it is a
+        // skip-and-advance filter evaluated at fire time in `scheduler::fire`,
+        // which has a render context this pure seam does not. `resolve` carries
+        // nothing extra for it -- `fire_one` reads `trigger.when` directly --
+        // so a `when`, absent or not, no longer changes whether a Schedule
+        // resolves.
         Self::from_schedule(&trigger.id, schedule, trigger.disabled)
     }
 
@@ -2869,51 +2855,28 @@ mod tests {
     // ---------------------------------------------------------------------
 
     /// A `when` expression filters candidate ticks in Kestra
-    /// (`Schedule.findNextDateMatchingConditions`). Rendering it needs a
-    /// `RunContext` this seam does not have, so a schedule that carried one and
-    /// fired anyway would **fire where Kestra would not** — and the oracle
-    /// cannot catch that. It is refused.
-    ///
-    /// The two-sided half: `when` absent, and the literal default `"true"`,
-    /// must both resolve — `hasWhenCondition()` is
-    /// `getWhen() != null && !"true".equals(getWhen())`, so a refusal on
-    /// Spec §5 + D10: the two refusals name the package that lifts them and
-    /// carry no value of the author's (`when` and `lateMaximumDelay` are
-    /// expressions and durations the author wrote; a message names keys only).
+    /// (`Schedule.findNextDateMatchingConditions`). Package 11b honours it as a
+    /// skip-and-advance filter at fire time (`scheduler::fire`), so `resolve`
+    /// no longer refuses one: it resolves exactly as the same trigger without
+    /// the `when` would. The firing path, not `resolve`, reads the condition.
     #[test]
-    fn the_when_refusal_names_the_package_and_no_value() {
-        let secret = "SENTINEL-value-1d2f";
-        let when: Trigger = serde_norway::from_str(&format!(
-            "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"{{{{ '{secret}' }}}}\"\n"
-        ))
-        .unwrap();
-        let e = ScheduleTrigger::resolve(&when).expect_err("a when condition");
-        assert_eq!(
-            e.to_string(),
-            "core.schedule `when` conditions are not supported; roadmap package #11 lifts it"
-        );
-    }
-
-    /// `"true"` would refuse every trigger the model gives a default to.
-    #[test]
-    fn a_when_condition_is_refused_but_the_default_true_is_not() {
+    fn a_when_condition_resolves_now_and_is_honoured_at_fire_time() {
         let with_when: Trigger = serde_norway::from_str(
             "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"{{ trigger.date | date('E') == 'MON' }}\"\n",
         )
         .unwrap();
-        assert!(matches!(
-            ScheduleTrigger::resolve(&with_when),
-            Err(ScheduleError::UnsupportedWhenCondition)
-        ));
+        assert!(
+            ScheduleTrigger::resolve(&with_when).is_ok(),
+            "a `when` no longer refuses the schedule"
+        );
 
+        // The literal default `"true"` and an absent `when` resolve too --
+        // `hasWhenCondition()` is `getWhen() != null && !"true".equals(getWhen())`.
         let explicit_true: Trigger = serde_norway::from_str(
             "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"true\"\n",
         )
         .unwrap();
-        assert!(
-            ScheduleTrigger::resolve(&explicit_true).is_ok(),
-            "the literal default `true` is NOT a condition"
-        );
+        assert!(ScheduleTrigger::resolve(&explicit_true).is_ok());
 
         let absent: Trigger =
             serde_norway::from_str("id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\n").unwrap();

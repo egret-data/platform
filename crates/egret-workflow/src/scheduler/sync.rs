@@ -88,7 +88,7 @@ pub(crate) fn never_fires(cron: Option<&str>, now: DateTime<Utc>) -> String {
 ///    every one, frozen, and the save that fixes it re-derives from it.
 ///
 /// Points 2-4 are about `workflow.triggers`. Point 4 does not reach a row that keeps its dates. A refusal whose cause is
-/// not in `spec_key` (`when`, or a malformed `lateMaximumDelay`), written onto a row that is
+/// not in `spec_key` (a malformed `lateMaximumDelay`), written onto a row that is
 /// already queued under an unchanged key, leaves the old date and the old
 /// `last_error` in place; `fire_due` meets the refusal when that date comes
 /// due and takes the row off the queue then.
@@ -187,7 +187,7 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         // the queue. A row off the queue (refused, or taken off by `fire_due`
         // for a broken source) is re-initialised by the next save -- spec §4
         // point 6. Without the `IS NOT NULL` term, a refusal `spec_key` cannot
-        // see (`when`, or a malformed `lateMaximumDelay`) would stay off the queue for ever
+        // see (a malformed `lateMaximumDelay`) would stay off the queue for ever
         // after the author fixed it. The term is keyed on the date, not on
         // `last_error`, because `fire_due` also writes `last_error` for a
         // consumed tick, and re-initialising that row would drop its backlog.

@@ -17,10 +17,10 @@
 
 mod common;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Timelike, Utc, Weekday};
 use egret_core::UserId;
 use egret_metastore::Db;
-use egret_workflow::scheduler::{fire_due, PassReport};
+use egret_workflow::scheduler::{fire_due, PassReport, MAX_WHEN_WALK_PER_PASS};
 use egret_workflow::{FlowRepo, UpdateFlowInput};
 use uuid::Uuid;
 
@@ -1401,4 +1401,174 @@ async fn an_unrenderable_trigger_label_fires_nothing_and_says_why() {
         Some(due),
         "tick retried, still on the queue"
     );
+}
+
+// ---- Package 11b: Schedule `when` (skip-and-advance) ----------------------
+
+/// A `when` truthy only on even minutes fires exactly the even-minute ticks
+/// and walks past the odd ones, across as many passes as there are matching
+/// ticks. The condition is evaluated against the candidate tick's
+/// `{{ trigger.date }}`, with no database behind it.
+#[tokio::test]
+async fn a_schedule_when_fires_only_matching_ticks_and_advances() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml(
+            "when-parity",
+            "",
+            "    when: \"{{ (trigger.date | date('m') | number) % 2 == 0 }}\"\n",
+        ))
+        .await;
+    common::make_due(&fx.db, flow, "s", 4).await;
+    let due = due_date(&fx.db, flow).await;
+    let candidates: Vec<DateTime<Utc>> = (0..4).map(|k| due + Duration::minutes(k)).collect();
+    let mut want: Vec<DateTime<Utc>> = candidates
+        .iter()
+        .copied()
+        .filter(|c| c.minute() % 2 == 0)
+        .collect();
+    want.sort();
+
+    // One matching tick fires per pass; the rest are skipped. Drain with more
+    // passes than there could be matching ticks.
+    for _ in 0..8 {
+        fx.pass().await;
+    }
+    assert_eq!(common::scheduled_dates(&fx.db, flow).await, want);
+}
+
+/// A date-helper condition (`isWeekend`) renders with no DB behind it and
+/// gates firing: the single due tick fires only when its own date is a
+/// weekend, and is walked past otherwise.
+#[tokio::test]
+async fn a_schedule_when_with_a_date_helper_gates_on_the_candidate_day() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml(
+            "when-weekend",
+            "",
+            "    when: \"{{ isWeekend(trigger.date) }}\"\n",
+        ))
+        .await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    let due = due_date(&fx.db, flow).await;
+    let is_weekend = matches!(due.weekday(), Weekday::Sat | Weekday::Sun);
+
+    for _ in 0..3 {
+        fx.pass().await;
+    }
+    if is_weekend {
+        assert_eq!(
+            common::scheduled_dates(&fx.db, flow).await,
+            vec![due],
+            "a weekend tick fires"
+        );
+    } else {
+        assert_eq!(
+            executions_of(&fx.db, flow).await,
+            0,
+            "a weekday tick is skipped"
+        );
+    }
+}
+
+/// Fail-safe, mirroring `runIf` and the trigger-label path: a `when` that does
+/// not render fires nothing, records the reason, and leaves the dates so the
+/// next pass retries the same tick.
+#[tokio::test]
+async fn a_schedule_when_that_does_not_render_fires_nothing_and_says_why() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml(
+            "when-bad",
+            "",
+            "    when: \"{{ nope.missing }}\"\n",
+        ))
+        .await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    let due = due_date(&fx.db, flow).await;
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            errored: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0);
+    let after = row(&fx.db, flow).await.unwrap();
+    assert!(
+        after.last_error.is_some_and(|e| e.contains("when")),
+        "the reason names the condition"
+    );
+    assert_eq!(
+        after.next_evaluation_date,
+        Some(due),
+        "tick retried, still on the queue"
+    );
+}
+
+/// The walk is bounded per pass: a long run of falsy candidates never renders
+/// the whole backlog under one claim's transaction. It caps at
+/// `MAX_WHEN_WALK_PER_PASS` candidates, parks on the last falsy one (still due,
+/// so re-claimed at once), and resumes next pass — skipping no candidate, only
+/// moving the pass boundary.
+#[tokio::test]
+async fn a_long_falsy_when_caps_the_walk_per_pass_and_resumes() {
+    let Some(fx) = fx().await else { return };
+    let cap = i64::from(MAX_WHEN_WALK_PER_PASS);
+    let flow = fx
+        .flow(&flow_yaml("when-cap", "", "    when: \"{{ 1 == 2 }}\"\n"))
+        .await;
+    common::make_due(&fx.db, flow, "s", (2 * cap) as i32 + 5).await;
+    let due = due_date(&fx.db, flow).await;
+
+    // Pass 1 walks exactly `cap` falsy candidates and parks on the last one it
+    // evaluated — `due + (cap - 1)` minutes — firing nothing.
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            frozen: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0);
+    let after1 = row(&fx.db, flow).await.unwrap();
+    assert_eq!(
+        after1.next_evaluation_date,
+        Some(due + Duration::minutes(cap - 1)),
+        "parked at the cap boundary, not the end"
+    );
+    assert!(after1.last_error.is_none(), "a cap is not an error");
+
+    // Pass 2 resumes from the park and advances another `cap - 1` minutes —
+    // proof the walk spans passes rather than draining in one.
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            frozen: 1,
+            ..Default::default()
+        }
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0);
+    assert_eq!(
+        row(&fx.db, flow).await.unwrap().next_evaluation_date,
+        Some(due + Duration::minutes(2 * (cap - 1))),
+    );
+}
+
+/// Regression guard: a trivially-true rendered `when` fires every due tick,
+/// just as the literal default `"true"` and an absent `when` do.
+#[tokio::test]
+async fn a_rendered_true_when_fires_every_tick() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml("when-true", "", "    when: \"{{ 1 == 1 }}\"\n"))
+        .await;
+    common::make_due(&fx.db, flow, "s", 3).await;
+    let first = due_date(&fx.db, flow).await;
+    for _ in 0..4 {
+        fx.pass().await;
+    }
+    let want: Vec<_> = (0..3).map(|k| first + Duration::minutes(k)).collect();
+    assert_eq!(common::scheduled_dates(&fx.db, flow).await, want);
 }
