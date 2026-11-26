@@ -2332,3 +2332,109 @@ async fn a_webhook_stop_after_disables_the_trigger_after_a_matching_terminal() {
     assert_eq!(rows().await, 1, "FAILED is in stopAfter");
     assert_eq!(post().await, StatusCode::CONFLICT);
 }
+
+// ---- package 11c Task 3: the trigger's `when:` ----
+
+fn when_hook_flow(ns: &str, when_lines: &str) -> String {
+    format!(
+        "\
+id: fx-flow
+namespace: {ns}
+tasks:
+  - id: fx-task
+    type: core.log
+    message: hello
+triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+{when_lines}"
+    )
+}
+
+/// POST once to a webhook flow carrying `when_lines`; answer
+/// (status, body length, execution count).
+async fn post_when(when_lines: &str, query: &str) -> (StatusCode, usize, i64) {
+    let db = common::db().await.expect("db");
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    common::seed_flow(&db, ws, user, &when_hook_flow(&ns, when_lines), "draft").await;
+    let app = common::webhook_app(&db).await;
+    let res = common::anon(
+        &app,
+        "POST",
+        &format!("{}{query}", hook_url(ws, &ns, "fx-key")),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    let status = res.status();
+    let len = common::body_text(res).await.len();
+    (status, len, common::execution_count(&db, ws).await)
+}
+
+/// A falsy `when` answers 204 with no body and starts nothing. Kestra
+/// `WebhookService.newExecution` -> `conditionService.isValid`.
+#[tokio::test]
+async fn a_falsy_webhook_when_answers_204_and_starts_nothing() {
+    if common::db().await.is_none() {
+        return;
+    }
+    let (s, len, n) = post_when("    when: \"false\"\n", "").await;
+    assert_eq!((s, len, n), (StatusCode::NO_CONTENT, 0, 0));
+
+    let (s, len, n) = post_when(
+        "    when: \"{{ trigger.parameters.go[0] == 'yes' }}\"\n",
+        "?go=no",
+    )
+    .await;
+    assert_eq!(
+        (s, len, n),
+        (StatusCode::NO_CONTENT, 0, 0),
+        "templated falsy"
+    );
+}
+
+/// A `when` that fails to render is also a 204, not an error.
+#[tokio::test]
+async fn an_unrenderable_webhook_when_answers_204_and_starts_nothing() {
+    if common::db().await.is_none() {
+        return;
+    }
+    let (s, len, n) = post_when("    when: \"{{ nosuch.ref }}\"\n", "").await;
+    assert_eq!((s, len, n), (StatusCode::NO_CONTENT, 0, 0));
+}
+
+/// The controls: a truthy or absent `when` fires.
+#[tokio::test]
+async fn a_truthy_or_absent_webhook_when_fires() {
+    if common::db().await.is_none() {
+        return;
+    }
+    for (line, q) in [
+        ("    when: \"true\"\n", ""),
+        ("", ""),
+        (
+            "    when: \"{{ trigger.parameters.go[0] == 'yes' }}\"\n",
+            "?go=yes",
+        ),
+    ] {
+        let (s, _, n) = post_when(line, q).await;
+        assert_eq!((s, n), (StatusCode::OK, 1), "{line:?}{q}");
+    }
+}
+
+/// A falsy `when` short-circuits BEFORE `inputs` render: an input that would
+/// answer 400 is never reached.
+#[tokio::test]
+async fn a_falsy_webhook_when_short_circuits_before_inputs() {
+    if common::db().await.is_none() {
+        return;
+    }
+    let (s, len, n) = post_when(
+        "    when: \"false\"\n    inputs:\n      x: \"{{ nosuch.ref }}\"\n",
+        "",
+    )
+    .await;
+    assert_eq!((s, len, n), (StatusCode::NO_CONTENT, 0, 0));
+}

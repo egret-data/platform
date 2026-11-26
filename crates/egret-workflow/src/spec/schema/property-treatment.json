@@ -1414,7 +1414,7 @@
       "type": "honoured",
       "version": "ignored",
       "wait": "refused",
-      "when": "ignored",
+      "when": "honoured",
       "workerSelector": "ignored"
     },
     "io.kestra.plugin.scripts.python.Commands": {

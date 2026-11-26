@@ -722,6 +722,28 @@ pub fn render_webhook_labels(record: &Output, labels: &[crate::models::Label]) -
         .collect()
 }
 
+/// Does the trigger's `when:` let this request through?
+///
+/// Kestra's `WebhookService.newExecution` asks `conditionService.isValid`
+/// before it renders `inputs`; a falsy `when` answers 204 with no execution,
+/// and so does one that fails to render (the caller never sees an error). The
+/// record is bound under `trigger` and `webhook`, as for the labels. An absent
+/// `when` (the `"true"` default) passes without rendering.
+#[must_use]
+pub fn when_passes(record: &Output, trigger: &Trigger) -> bool {
+    let Some(when) = trigger.when.as_ref().map(|w| w.source()) else {
+        return true;
+    };
+    if when == "true" {
+        return true;
+    }
+    let vars = serde_json::to_value(record).unwrap_or(Value::Null);
+    let mut cx = RenderContext::new();
+    cx.insert("trigger", vars.clone());
+    cx.insert("webhook", vars);
+    render_str(when, &cx).is_ok_and(|r| crate::executor::is_truthy(&r))
+}
+
 /// Is this a `multipart/form-data` request?
 ///
 /// Separate from [`is_textual`] because Micronaut routes multipart to a

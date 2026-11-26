@@ -207,7 +207,8 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use egret_core::{Error, Result as EgretResult};
@@ -486,7 +487,7 @@ async fn handle(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
-) -> EgretResult<Json<WebhookResponse>> {
+) -> EgretResult<Response> {
     // --- 0. the two bounds, before anything that costs -----------------------
     //
     // The attempt limiter is keyed on the THREE path segments that name a
@@ -635,6 +636,13 @@ async fn handle(
     let output = build_output(&req, webhook.fetch_type, None)
         .map_err(|u| Error::Conflict(u.message(&trigger.id)))?;
 
+    // The trigger's `when:` (package 11c): a falsy condition, or one that does
+    // not render, answers 204 with no body and starts nothing -- and it is
+    // checked BEFORE `inputs` render, as Kestra does.
+    if !crate::trigger::webhook::when_passes(&output, trigger) {
+        return Ok((StatusCode::NO_CONTENT, ()).into_response());
+    }
+
     // `inputs:` render against a context that binds **no** `trigger` at all, so
     // the key comparison's private object is unreachable rather than merely
     // un-asked-for. See `trigger::webhook::InputContext` for why the previous
@@ -705,7 +713,8 @@ async fn handle(
         flow_id: parsed.id,
         trigger: record,
         state: "CREATED",
-    }))
+    })
+    .into_response())
 }
 
 /// `URIBuilder(uri).getQueryParams()` — split on `&`, then on the **first**

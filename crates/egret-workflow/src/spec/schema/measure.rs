@@ -89,7 +89,9 @@ const REFUSED_BY_NAME: &[&str] = &["unsupported_pause_property"];
 /// * `Flow` reads `when` and `labels` (`trigger::flow` `when_source`/`labels`);
 ///   a Schedule reads both too -- `labels` at fire time (Task 1,
 ///   `scheduler::fire::render_trigger_labels`) and `when` at fire time (package
-///   11b, `scheduler::fire`'s skip-and-advance); a Webhook's path reads neither.
+///   11b, `scheduler::fire`'s skip-and-advance); a Webhook reads `when` at
+///   request time (package 11c, `trigger::webhook::when_passes`) but not
+///   `labels`.
 ///
 /// `stopAfter`, `logToFile`, `failOnTriggerError` and `allowConcurrent` are
 /// parsed by `models::Trigger` and read by nothing.
@@ -99,6 +101,7 @@ fn trigger_base_read(t: &str) -> Vec<&'static str> {
         "io.kestra.plugin.core.trigger.Flow" | "io.kestra.plugin.core.trigger.Schedule" => {
             v.extend(["labels", "when"])
         }
+        "io.kestra.plugin.core.trigger.Webhook" => v.push("when"),
         _ => {}
     }
     v

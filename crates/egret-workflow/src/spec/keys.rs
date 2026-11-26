@@ -180,9 +180,8 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
             }
             match (t, key) {
                 (SCHEDULE | WEBHOOK, "labels") => Some(Package(11)),
-                // A Schedule `when` is honoured now (package 11b), so it has no
-                // lift; a Webhook `when` stays refused (a later package).
-                (WEBHOOK, "when") => Some(Package(11)),
+                // A Schedule `when` (package 11b) and a Webhook `when`
+                // (package 11c) are honoured now, so neither has a lift.
                 (WEBHOOK, "wait" | "returnOutputs" | "responseContentType" | "responseCode") => {
                     Some(Package(11))
                 }
@@ -2201,9 +2200,9 @@ mod tests {
     }
 
     #[test]
-    fn labels_warn_on_schedule_and_webhook_and_when_on_a_webhook() {
+    fn labels_warn_on_schedule_and_webhook() {
         let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: s\n    type: {SCHED}\n    cron: \"0 * * * *\"\n    labels:\n      a: b\n  - id: w\n    type: {HOOK}\n    key: k\n    labels:\n      a: b\n    when: \"{{{{ true }}}}\"\n"));
-        for p in ["triggers.s.labels", "triggers.w.labels", "triggers.w.when"] {
+        for p in ["triggers.s.labels", "triggers.w.labels"] {
             let f = at(&r, p);
             assert_eq!(f.len(), 1, "{p}: {r:?}");
             assert!(
@@ -2287,15 +2286,14 @@ mod tests {
         for (ty, key, want) in rows {
             assert_eq!(lift_of(Site::Input(ty), key), Some(want), "{ty}.{key}");
         }
-        // Trigger rows #11. A Schedule `when` is honoured now (package 11b),
-        // so it is no longer here; a Webhook `when` stays.
+        // Trigger rows #11. A Schedule `when` (package 11b) and a Webhook
+        // `when` (package 11c) are honoured now, so neither is here.
         for (t, key) in [
             (SCHED, "labels"),
             (HOOK, "wait"),
             (HOOK, "returnOutputs"),
             (HOOK, "responseContentType"),
             (HOOK, "responseCode"),
-            (HOOK, "when"),
             (HOOK, "labels"),
             (SCHED, "stopAfter"),
             (SCHED, "failOnTriggerError"),
