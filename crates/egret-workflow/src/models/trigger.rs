@@ -68,15 +68,21 @@ pub struct Trigger {
 /// leaf it must not -- same split `TaskKind` makes for tasks. Only
 /// `Schedule`, `Webhook`, and `Flow` (this checkout's three
 /// `io.kestra.plugin.core.trigger` types with a runnable `eval()`/`evaluate()`
-/// beyond `McpToolTrigger`, which is MCP-specific and out of scope) are typed;
-/// everything else -- third-party trigger plugins, `ScheduleOnDates` -- is an
-/// opaque `Leaf`.
+/// beyond `McpToolTrigger`, which is MCP-specific and out of scope) are typed,
+/// plus `ScheduleOnDates` (package 11e); everything else -- third-party
+/// trigger plugins -- is an opaque `Leaf`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TriggerKind {
     Schedule(Schedule),
+    /// Package 11e. Schedulable like [`Schedule`] (same queue, same fire path)
+    /// but over an explicit date list. Its publish warning is kept until the
+    /// package's reconcile task (`FeaturePresence::triggers` counts it).
+    ScheduleOnDates(ScheduleOnDates),
     Webhook(Webhook),
     Flow(FlowTrigger),
-    Leaf { spec: serde_json::Value },
+    Leaf {
+        spec: serde_json::Value,
+    },
 }
 
 /// `io.kestra.plugin.core.trigger.Schedule`. Cron-scheduled trigger.
@@ -138,6 +144,28 @@ pub struct Schedule {
     pub late_maximum_delay: Option<serde_json::Value>,
     // `Schedule.java`: `recoverMissedSchedules` (`ALL` | `NONE` | `LAST`).
     // Captured verbatim; interpreted by `trigger::RecoverMissed::from_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recover_missed_schedules: Option<serde_json::Value>,
+}
+
+/// `io.kestra.plugin.core.trigger.ScheduleOnDates`
+/// (`ScheduleOnDates.java:47`): fires once at each date of an explicit list.
+///
+/// `dates` is `@NotNull Property<List<ZonedDateTime>>` -- kept as the authored
+/// strings (parsed, sorted and truncated to whole seconds by
+/// `ScheduleTrigger::resolve`; `@NotNull` is not parsing, so an absent list
+/// parses and is refused there). `timezone` is `None` when absent and read as
+/// UTC, as for [`Schedule`]. `inputs` and `recoverMissedSchedules` are
+/// captured exactly as `Schedule` captures them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleOnDates {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dates: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<BTreeMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recover_missed_schedules: Option<serde_json::Value>,
 }
@@ -409,6 +437,7 @@ impl Serialize for Trigger {
 
         let kind_value = match &self.kind {
             TriggerKind::Schedule(v) => serde_json::to_value(v),
+            TriggerKind::ScheduleOnDates(v) => serde_json::to_value(v),
             TriggerKind::Webhook(v) => serde_json::to_value(v),
             TriggerKind::Flow(v) => serde_json::to_value(v),
             TriggerKind::Leaf { spec } => Ok(spec.clone()),
@@ -485,6 +514,7 @@ fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TriggerKind, serde_
 
     Ok(match canonical.as_deref() {
         Some("schedule") => TriggerKind::Schedule(serde_json::from_value(rest)?),
+        Some("scheduleondates") => TriggerKind::ScheduleOnDates(serde_json::from_value(rest)?),
         Some("webhook") => TriggerKind::Webhook(serde_json::from_value(rest)?),
         Some("flow") => TriggerKind::Flow(serde_json::from_value(rest)?),
         _ => TriggerKind::Leaf { spec: rest },
@@ -531,6 +561,40 @@ mod tests {
                 "when must default to Kestra's own \"true\""
             );
         }
+    }
+
+    /// Package 11e: `ScheduleOnDates` is typed under both spellings, keeps
+    /// its dates as authored, and re-serialises.
+    #[test]
+    fn schedule_on_dates_is_typed_under_both_spellings() {
+        for spelling in [
+            "io.kestra.plugin.core.trigger.ScheduleOnDates",
+            "core.scheduleOnDates",
+        ] {
+            let yaml = format!(
+                "id: d\ntype: {spelling}\ndates:\n  - \"2026-02-01T00:00:00Z\"\n  - \"2026-01-01T00:00:00Z\"\ntimezone: Asia/Ho_Chi_Minh\nrecoverMissedSchedules: NONE\n"
+            );
+            let t: Trigger = serde_norway::from_str(&yaml).unwrap();
+            let TriggerKind::ScheduleOnDates(s) = &t.kind else {
+                panic!("{spelling}: expected ScheduleOnDates, got {:?}", t.kind)
+            };
+            assert_eq!(
+                s.dates.as_deref(),
+                Some(
+                    &[
+                        "2026-02-01T00:00:00Z".to_string(),
+                        "2026-01-01T00:00:00Z".to_string()
+                    ][..]
+                )
+            );
+            assert_eq!(s.timezone.as_deref(), Some("Asia/Ho_Chi_Minh"));
+            let out = serde_json::to_value(&t).unwrap();
+            assert_eq!(out["dates"][0], "2026-02-01T00:00:00Z");
+            assert_eq!(out["recoverMissedSchedules"], "NONE");
+        }
+        // `@NotNull` is bean validation, not parsing.
+        let t: Trigger = serde_norway::from_str("id: d\ntype: core.scheduleOnDates\n").unwrap();
+        assert!(matches!(&t.kind, TriggerKind::ScheduleOnDates(s) if s.dates.is_none()));
     }
 
     /// Fix round 1 finding 2: `Schedule::cron` is `@NotNull` with no Java
@@ -582,7 +646,7 @@ mod tests {
         }
     }
 
-    /// Anything not registered (third-party plugin triggers, `ScheduleOnDates`)
+    /// Anything not registered (third-party plugin triggers)
     /// becomes an opaque `Leaf`, same as an unknown `Task` type.
     #[test]
     fn an_unknown_trigger_type_becomes_an_opaque_leaf() {

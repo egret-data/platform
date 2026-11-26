@@ -466,6 +466,7 @@ async fn a_webhook_or_flow_trigger_gets_no_row() {
         .iter()
         .map(|t| match t.kind {
             TriggerKind::Schedule(_) => "schedule",
+            TriggerKind::ScheduleOnDates(_) => "schedule_on_dates",
             TriggerKind::Webhook(_) => "webhook",
             TriggerKind::Flow(_) => "flow",
             TriggerKind::Leaf { .. } => "leaf",

@@ -29,6 +29,9 @@ fn db_err(e: sqlx::Error) -> Error {
 /// Kestra's `Schedule` type name, as stored in `execution_trigger.type` and
 /// matched by `workflow_executions_scheduled_date_iff_schedule`.
 pub(crate) const SCHEDULE_TYPE: &str = "io.kestra.plugin.core.trigger.Schedule";
+/// Package 11e: a `ScheduleOnDates` fire. Admitted by migration 0244's
+/// broadened `workflow_executions_scheduled_date_iff_schedule`.
+pub(crate) const SCHEDULE_ON_DATES_TYPE: &str = "io.kestra.plugin.core.trigger.ScheduleOnDates";
 
 /// Package 11b: the most `when` candidates one `fire_due` pass walks before it
 /// parks. A long-idle Schedule with an always-falsy `when` (a one-minute cron
@@ -241,7 +244,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     let trigger = flow
         .triggers
         .iter()
-        .find(|t| t.id == c.trigger_id && matches!(t.kind, TriggerKind::Schedule(_)));
+        .find(|t| t.id == c.trigger_id && super::sync::is_schedulable(&t.kind));
     // The source read under the lock is the authority and the row is a copy
     // (spec §4 point 5). When the copy says "on" and the source says "off" --
     // or no longer declares this schedule at all, or declares it with a cron
@@ -253,13 +256,17 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     // when a writer holds the flow row (see `resync`).
     let declared = trigger
         .filter(|t| !flow.disabled && !t.disabled)
-        .and_then(|t| match &t.kind {
-            TriggerKind::Schedule(s) if super::sync::spec_key(s) == c.spec_key => Some((t, s)),
-            _ => None,
-        });
-    let Some((trigger, schedule)) = declared else {
+        .filter(|t| super::sync::kind_spec_key(&t.kind).as_deref() == Some(c.spec_key.as_str()));
+    let Some(trigger) = declared else {
         resync(at.conn(), c.flow_id).await?;
         return Ok(Fate::Frozen);
+    };
+    // A backfill belongs to a `Schedule` only (W7f §3.9); `schedule` is `None`
+    // for a `ScheduleOnDates`, which has none to resume.
+    let (schedule, trigger_inputs, trigger_type) = match &trigger.kind {
+        TriggerKind::Schedule(s) => (Some(s), s.inputs.clone(), SCHEDULE_TYPE),
+        TriggerKind::ScheduleOnDates(o) => (None, o.inputs.clone(), SCHEDULE_ON_DATES_TYPE),
+        _ => unreachable!("filtered to schedulable kinds above"),
     };
     let resolved = match ScheduleTrigger::resolve(trigger) {
         Ok(r) => r,
@@ -275,7 +282,11 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     // lock is seen here.
     #[cfg(any(test, feature = "test-util"))]
     hold::after_claim(c.flow_id).await;
-    let backfill = super::backfill::read(at.conn(), c.flow_id, &c.trigger_id).await?;
+    let backfill = if schedule.is_some() {
+        super::backfill::read(at.conn(), c.flow_id, &c.trigger_id).await?
+    } else {
+        None
+    };
     if backfill.as_ref().is_some_and(|b| b.paused) {
         return Ok(Fate::Frozen);
     }
@@ -307,7 +318,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
 
     // The schedule's `inputs:` overlaid by the backfill's, key by key; the
     // template refusal applies to the merged result (§3.4).
-    let mut inputs = schedule.inputs.clone().unwrap_or_default();
+    let mut inputs = trigger_inputs.unwrap_or_default();
     if let Some(over) = backfill.as_ref().and_then(|b| b.inputs.as_object()) {
         inputs = overlay_inputs(&inputs, over);
     }
@@ -440,7 +451,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
                         return Ok(Fate::Errored);
                     }
                 };
-                match start(at, c, &e, backfill.as_ref(), trigger_labels).await? {
+                match start(at, c, &e, trigger_type, backfill.as_ref(), trigger_labels).await? {
                     Started::Yes => (Fate::Fired, None),
                     // A unique index (the per-tick one, or the per-backfill-tick one
                     // for a backfill's fire) says this tick already has its
@@ -483,7 +494,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     };
 
     let mut last_error = last_error;
-    if let Some(b) = &backfill {
+    if let (Some(b), Some(schedule)) = (&backfill, schedule) {
         let ended = match (&t.state.backfill, refused_backfill) {
             // A refused start ends the backfill as a delete does: the unfired
             // `current_tick` and the rest of the window are dropped.
@@ -607,6 +618,7 @@ async fn start(
     at: &mut Txn,
     c: &Claimed,
     e: &ScheduledExecution,
+    trigger_type: &str,
     backfill: Option<&BackfillRow>,
     trigger_labels: Vec<serde_json::Value>,
 ) -> Result<Started> {
@@ -625,7 +637,11 @@ async fn start(
             flow_id: Some(c.flow_id),
             source: &c.source,
             inputs: serde_json::to_value(&e.inputs).map_err(|e| Error::Internal(e.into()))?,
-            trigger: Some(schedule_trigger_record(e)),
+            trigger: Some({
+                let mut record = schedule_trigger_record(e);
+                record["type"] = trigger_type.into();
+                record
+            }),
             scheduled_date: Some(e.scheduled_date),
             // A `Schedule` fire has no source execution and starts a chain.
             trigger_execution_id: None,

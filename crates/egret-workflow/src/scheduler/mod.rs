@@ -201,8 +201,8 @@ mod sync;
 /// read of the backfill row. See `fire::hold`.
 #[cfg(any(test, feature = "test-util"))]
 pub use fire::hold as test_hold;
-pub(crate) use fire::SCHEDULE_TYPE;
 pub use fire::{fire_due, PassReport, MAX_WHEN_WALK_PER_PASS};
+pub(crate) use fire::{SCHEDULE_ON_DATES_TYPE, SCHEDULE_TYPE};
 // The backfill routes (`triggers::backfill`) check a backfill's inputs as a
 // fire merges them, and end a deleted backfill as a refused fire does (D26).
 pub(crate) use fire::{backfill_ended, overlay_inputs, refuse_templated, templated};

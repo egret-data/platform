@@ -112,7 +112,7 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
     let schedules: Vec<&Trigger> = all_triggers
         .iter()
         .copied()
-        .filter(|t| matches!(t.kind, TriggerKind::Schedule(_)))
+        .filter(|t| is_schedulable(&t.kind))
         .collect();
     let flow_triggers: Vec<&Trigger> = all_triggers
         .iter()
@@ -149,6 +149,12 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         .collect();
 
     let keep: Vec<String> = schedules.iter().map(|t| t.id.clone()).collect();
+    // Backfills belong to `Schedule` triggers only (W7f §3.9).
+    let keep_backfill: Vec<String> = schedules
+        .iter()
+        .filter(|t| matches!(t.kind, TriggerKind::Schedule(_)))
+        .map(|t| t.id.clone())
+        .collect();
     sqlx::query("DELETE FROM workflow.triggers WHERE flow_id = $1 AND NOT (trigger_id = ANY($2))")
         .bind(flow.id)
         .bind(&keep)
@@ -157,10 +163,7 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         .map_err(db_err)?;
 
     for t in schedules {
-        let TriggerKind::Schedule(s) = &t.kind else {
-            unreachable!("filtered to schedules above")
-        };
-        let key = spec_key(s);
+        let key = kind_spec_key(&t.kind).expect("filtered to schedulable kinds above");
         let disabled = effective_disabled(flow_disabled, t.disabled, runtime_off(&t.id));
         // `initialise` reads only the trigger and the clock for the date; the
         // namespace/flow_id strings it copies are read from the flow at fire
@@ -171,18 +174,31 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
             None => true,
             Some((k, next)) => *k != key || next.is_none(),
         };
-        let (next, err) = match (ScheduleTrigger::resolve(t), backfills.get(&t.id)) {
-            (Ok(st), Some(b)) if reinit => rederive(conn, &st, s, b, now).await?,
-            (Ok(st), _) => {
+        // A backfill belongs to a `Schedule` only (W7f §3.9); a
+        // `ScheduleOnDates` goes straight to the plain init below.
+        let (next, err) = match (ScheduleTrigger::resolve(t), backfills.get(&t.id), &t.kind) {
+            (Ok(st), Some(b), TriggerKind::Schedule(s)) if reinit => {
+                rederive(conn, &st, s, b, now).await?
+            }
+            (Ok(st), _, kind) => {
                 match TriggerState::initialise(&st, "", "", &FixedClock(now)).next_evaluation_date {
                     Some(next) => (Some(next), None),
                     // Off the queue like a refusal, and for the same reason it
                     // must say so: otherwise the author sees a schedule that
-                    // is simply never due (final review I4).
-                    None => (None, Some(never_fires(s.cron.as_deref(), now))),
+                    // is simply never due (final review I4). A `ScheduleOnDates`
+                    // whose dates are all past parks here too -- the deliberate
+                    // divergence from Kestra's `now + 1 year`
+                    // (`trigger::schedule_on_dates`).
+                    None => (
+                        None,
+                        Some(match kind {
+                            TriggerKind::Schedule(s) => never_fires(s.cron.as_deref(), now),
+                            _ => format!("the schedule never fires: every date is before {now}"),
+                        }),
+                    ),
                 }
             }
-            (Err(e), _) => (None, Some(e.to_string())),
+            (Err(e), _, _) => (None, Some(e.to_string())),
         };
         // Dates are kept only when the spec_key is unchanged AND the row is on
         // the queue. A row off the queue (refused, or taken off by `fire_due`
@@ -257,7 +273,7 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
             "DELETE FROM workflow.trigger_backfills WHERE flow_id = $1 AND NOT (trigger_id = ANY($2))",
         )
         .bind(flow.id)
-        .bind(&keep)
+        .bind(&keep_backfill)
         .execute(&mut *conn)
         .await
         .map_err(db_err)?;
@@ -604,15 +620,16 @@ async fn recover_missed(conn: &mut PgConnection, flow: &FlowRow) -> Result<()> {
         let Some(trigger) = parsed
             .triggers
             .iter()
-            .find(|t| t.id == trigger_id && matches!(t.kind, TriggerKind::Schedule(_)))
+            .find(|t| t.id == trigger_id && is_schedulable(&t.kind))
         else {
             continue;
         };
-        let TriggerKind::Schedule(schedule) = &trigger.kind else {
-            continue;
+        let recover = match &trigger.kind {
+            TriggerKind::Schedule(s) => s.recover_missed_schedules.as_ref(),
+            TriggerKind::ScheduleOnDates(o) => o.recover_missed_schedules.as_ref(),
+            _ => continue,
         };
-        let Ok(policy) = RecoverMissed::from_model(schedule.recover_missed_schedules.as_ref())
-        else {
+        let Ok(policy) = RecoverMissed::from_model(recover) else {
             continue;
         };
         let Ok(resolved) = ScheduleTrigger::resolve(trigger) else {
@@ -635,6 +652,39 @@ async fn recover_missed(conn: &mut PgConnection, flow: &FlowRow) -> Result<()> {
         .map_err(db_err)?;
     }
     Ok(())
+}
+
+/// The kinds that live on the date queue (`workflow.triggers`): a cron
+/// `Schedule` and, from package 11e, a `ScheduleOnDates`.
+pub(super) fn is_schedulable(kind: &TriggerKind) -> bool {
+    matches!(
+        kind,
+        TriggerKind::Schedule(_) | TriggerKind::ScheduleOnDates(_)
+    )
+}
+
+/// The `spec_key` of a schedulable kind, `None` for any other.
+pub(super) fn kind_spec_key(kind: &TriggerKind) -> Option<String> {
+    match kind {
+        TriggerKind::Schedule(s) => Some(spec_key(s)),
+        TriggerKind::ScheduleOnDates(o) => Some(spec_key_on_dates(o)),
+        _ => None,
+    }
+}
+
+/// `ScheduleOnDates`: the sorted, truncated dates plus the timezone. Dates
+/// that do not parse fall back to the authored strings, so the key still
+/// changes when the author edits them (the trigger is refused at resolve).
+pub(super) fn spec_key_on_dates(o: &crate::models::ScheduleOnDates) -> String {
+    let raw = o.dates.as_deref().unwrap_or(&[]);
+    match crate::trigger::schedule_on_dates::parse_dates(raw) {
+        Ok(d) => crate::trigger::schedule_on_dates::spec_key_of(&d, o.timezone.as_deref()),
+        Err(_) => format!(
+            "dates-raw:{}|{}",
+            raw.join(","),
+            o.timezone.as_deref().unwrap_or("")
+        ),
+    }
 }
 
 /// `cron|withSeconds|timezone` -- the three fields that decide WHEN. A string,

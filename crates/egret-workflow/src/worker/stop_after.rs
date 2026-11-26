@@ -51,7 +51,12 @@ pub(super) async fn on_terminal(
     // route reads, and a Flow trigger's listener row is disabled further down.
     if !matches!(
         trigger.get("type").and_then(|t| t.as_str()),
-        Some(crate::scheduler::SCHEDULE_TYPE | WEBHOOK_TYPE | FLOW_TYPE)
+        Some(
+            crate::scheduler::SCHEDULE_TYPE
+                | crate::scheduler::SCHEDULE_ON_DATES_TYPE
+                | WEBHOOK_TYPE
+                | FLOW_TYPE
+        )
     ) {
         return Ok(());
     }

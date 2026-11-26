@@ -76,7 +76,9 @@ fn entry(
         TriggerKind::Schedule(_) => TriggerKindDto::Schedule,
         TriggerKind::Webhook(_) => TriggerKindDto::Webhook,
         TriggerKind::Flow(_) => TriggerKindDto::Flow,
-        TriggerKind::Leaf { .. } => TriggerKindDto::Other,
+        // Package 11e: the trigger routes do not know `ScheduleOnDates` yet
+        // (reconcile task); it reads as an unsupported kind, as before.
+        TriggerKind::ScheduleOnDates(_) | TriggerKind::Leaf { .. } => TriggerKindDto::Other,
     };
     let yaml_disabled = parsed.disabled || t.disabled;
     let switch = state.switches.get(&key);

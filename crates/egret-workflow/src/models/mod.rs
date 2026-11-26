@@ -36,6 +36,6 @@ pub use task::{
     Task, TaskKind,
 };
 pub use trigger::{
-    Dependency, FetchType, FlowTrigger, FlowTriggerMode, Schedule, Trigger, TriggerKind, Webhook,
-    Window,
+    Dependency, FetchType, FlowTrigger, FlowTriggerMode, Schedule, ScheduleOnDates, Trigger,
+    TriggerKind, Webhook, Window,
 };

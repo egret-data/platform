@@ -836,10 +836,15 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
         quotas: !flow.quotas.is_empty(),
         // Narrowed at W7a's final review: Schedule, Webhook and Flow fire;
         // only a trigger of another type (`Leaf`) is declared and unenforced.
-        triggers: flow
-            .triggers
-            .iter()
-            .any(|t| matches!(t.kind, TriggerKind::Leaf { .. })),
+        // Package 11e: `ScheduleOnDates` is typed and scheduled (Task 1) but
+        // stays WARNED until the package's reconcile task, so the census and
+        // this warning move together, not mid-feature (the 9a discipline).
+        triggers: flow.triggers.iter().any(|t| {
+            matches!(
+                t.kind,
+                TriggerKind::Leaf { .. } | TriggerKind::ScheduleOnDates(_)
+            )
+        }),
     };
 
     check_retry(&flow.retry, "retry", &mut report);
@@ -4014,6 +4019,11 @@ mod tests {
                 "egret fires this trigger, so `not yet enforced` would be false:\n{yaml}"
             );
         }
+
+        // Package 11e: `ScheduleOnDates` is typed and scheduled, but stays
+        // WARNED until the reconcile task (the census must not move mid-feature).
+        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n  - id: d\n    type: io.kestra.plugin.core.trigger.ScheduleOnDates\n    dates:\n      - \"2030-01-01T00:00:00Z\"\n";
+        assert_eq!(triggers_warning(yaml).len(), 1, "{yaml}");
 
         // POSITIVE CONTROL: a trigger egret does not fire, alone and beside a Schedule.
         let leaf = "  - id: q\n    type: io.kestra.plugin.aws.sqs.Trigger\n    queueUrl: https://example\n";
