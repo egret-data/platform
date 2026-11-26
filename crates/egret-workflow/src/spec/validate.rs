@@ -591,6 +591,10 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
         /// The (`id`, `type`) of every Flow trigger: its `when:` and `inputs:`
         /// resolve `secret()` (package 10a Task 4).
         flow_trigger: HashSet<(&'a str, &'a str)>,
+        /// The (`id`, `type`) of every `http.Trigger` (package 11e Task 3): its
+        /// request fields and `responseCondition` resolve `secret()` in the
+        /// scheduler's poll, so they are not walked as "outside".
+        http_trigger: HashSet<(&'a str, &'a str)>,
         report: &'a mut ValidationReport,
     }
 
@@ -666,6 +670,7 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                     let in_webhook =
                         matches!((id, ty), (Some(i), Some(t)) if self.webhook.contains(&(i, t)));
                     let in_flow_trigger = matches!((id, ty), (Some(i), Some(t)) if self.flow_trigger.contains(&(i, t)));
+                    let in_http_trigger = matches!((id, ty), (Some(i), Some(t)) if self.http_trigger.contains(&(i, t)));
                     // W9c spec §7: a `Set` or `Put` task's `value`.
                     let kv_value_of = match (id, ty) {
                         (Some(i), Some(t)) if t == kv::SET || t == kv::PUT => Some(i),
@@ -732,6 +737,21 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
                             // Flow trigger's `when:`, resolve `secret()`
                             // (package 10a Task 4). `key:` and a Schedule's
                             // `inputs:` / `when:` stay refused; a
+                            // `namespace=` / `full=` in the call still is.
+                            let mut found = Vec::new();
+                            strings(v, here, &mut found);
+                            for (p, text) in found {
+                                self.property(p, text);
+                            }
+                        } else if is_trigger_property
+                            && in_http_trigger
+                            && HTTP_TRIGGER_SECRET_KEYS.contains(&k.as_str())
+                        {
+                            // An http.Trigger's request fields and
+                            // `responseCondition` resolve `secret()` in the
+                            // scheduler's poll (package 11e Task 3). `options`,
+                            // `encryptBody` and `formData` are refused before
+                            // the poll, so a `secret()` in them stays refused; a
                             // `namespace=` / `full=` in the call still is.
                             let mut found = Vec::new();
                             strings(v, here, &mut found);
@@ -807,10 +827,30 @@ fn secret_findings(flow: &Flow, report: &mut ValidationReport) {
             .filter(|t| matches!(t.kind, TriggerKind::Flow(_)))
             .map(|t| (t.id.as_str(), t.r#type.as_str()))
             .collect(),
+        http_trigger: flow
+            .triggers
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::HttpTrigger(_)))
+            .map(|t| (t.id.as_str(), t.r#type.as_str()))
+            .collect(),
         report,
     };
     walk.value(&doc, String::new());
 }
+
+/// The `http.Trigger` property keys whose `secret()` the scheduler's poll
+/// resolves (package 11e Task 3): the request fields and `responseCondition`.
+/// `options`/`encryptBody`/`formData` are refused before the poll, so they are
+/// not here.
+const HTTP_TRIGGER_SECRET_KEYS: &[&str] = &[
+    "uri",
+    "method",
+    "body",
+    "params",
+    "headers",
+    "contentType",
+    "responseCondition",
+];
 
 /// **The run-time gate** (`executor::build_plan`'s third gate): every
 /// structural, semantic and not-yet-enforced finding -- everything

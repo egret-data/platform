@@ -34,6 +34,7 @@ mod tests;
 
 pub use mask::{log_request_lines, log_response_lines, MaskSet};
 pub use request::{build_request, BuiltRequest, FormFiles, HttpEgress};
+pub use request::{current as egress_current, install as install_egress};
 pub use response::{
     check_status, ensure_allowed, failure_message, headers_output, read_capped, read_prefix,
     transport_message, BodyTooLarge, ReadError, FAILURE_BODY_BYTES,
