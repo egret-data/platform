@@ -552,7 +552,14 @@ async fn handle(
     ) {
         return Err(Error::TooManyRequests);
     }
-    let _permit = guard
+    // The bulkhead bounds the EXPENSIVE start path (key match, render, the
+    // `start_execution_with_trigger_labels` write) — the work it was sized for,
+    // in milliseconds. It is a real binding, not `_permit`, because a `wait:
+    // true` response then DROPS it before the poll: holding this global
+    // `WEBHOOK_MAX_CONCURRENCY` permit across the up-to-cap wait would let 16
+    // slow waited requests starve every other webhook (fast fire-and-forget
+    // ones included) across all workspaces with a 429.
+    let permit = guard
         .bulkhead
         .try_acquire()
         .map_err(|_| Error::TooManyRequests)?;
@@ -744,6 +751,13 @@ async fn handle(
         labels,
     )
     .await?;
+
+    // The expensive start path is done. Release the bulkhead permit HERE, before
+    // either response path: the `wait: true` poll below is cheap (one
+    // `execution_is_idle` read per interval, bounded by the cap) and must not
+    // occupy a global permit for up to the cap — that would turn 16 slow waited
+    // requests into a 429 for every other webhook across all workspaces.
+    drop(permit);
 
     // --- 7. the response ------------------------------------------------------
     //
