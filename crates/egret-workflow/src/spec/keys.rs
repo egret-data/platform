@@ -118,7 +118,8 @@ const FLOW_TRIGGER: &str = "io.kestra.plugin.core.trigger.Flow";
 /// `deleted` column is generated from the stored JSON, `baseline-postgres.sql:117`).
 const DELETED_REASON: &str =
     "egret deletes a flow through its own delete action, never through a key in the source";
-const FAIL_ON_TRIGGER_ERROR_REASON: &str = "it is a Kestra divergence egret does not act on: Kestra consults it only for worker/polling triggers, which egret has none of, so no package will honour it";
+const FAIL_ON_TRIGGER_ERROR_REASON: &str = "Kestra consults it only for worker/polling triggers, which egret has none of, so no package will honour it";
+const ALLOW_CONCURRENT_REASON: &str = "egret never locks a trigger while its execution runs; Kestra honours allowConcurrent only on Schedule and polling triggers, which this is not, so no package will honour it";
 const DRAFT_REASON: &str =
     "egret's draft and publish split replaces it: a published version runs whatever `draft:` says";
 
@@ -184,7 +185,7 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
                 // `stopAfter` is honoured on every trigger type (11b Schedule,
                 // 11c Webhook, 11d Flow).
                 (_, "stopAfter") | (SCHEDULE, "allowConcurrent") => return None,
-                (_, "allowConcurrent") => return Some(Package(11)),
+                (_, "allowConcurrent") => return Some(Lift::Inert(ALLOW_CONCURRENT_REASON)),
                 (_, "failOnTriggerError") => {
                     return Some(Lift::Inert(FAIL_ON_TRIGGER_ERROR_REASON))
                 }
@@ -732,11 +733,6 @@ impl Walk<'_> {
                 continue;
             }
             if let Some(lift) = lift_of(Site::Trigger(row), key) {
-                let said = if key == "allowConcurrent" {
-                    "egret never locks a trigger while its execution runs; "
-                } else {
-                    ""
-                };
                 let yet = if matches!(lift, Lift::Inert(_)) {
                     ""
                 } else {
@@ -745,7 +741,7 @@ impl Walk<'_> {
                 self.report.warnings.push(Finding {
                     code: "not_honoured",
                     message: format!(
-                        "trigger '{id}': property '{key}' is accepted by Kestra on {row} but egret does not act on it{yet}: {said}{}",
+                        "trigger '{id}': property '{key}' is accepted by Kestra on {row} but egret does not act on it{yet}: {}",
                         lift.sentence()
                     ),
                     path: format!("{path}.{key}"),
@@ -2116,9 +2112,13 @@ mod tests {
             ])
         );
         for p in ["triggers.e.allowConcurrent", "triggers.g.allowConcurrent"] {
-            assert!(at(&r, p)[0]
-                .message
-                .contains("egret never locks a trigger while its execution runs"));
+            let m = &at(&r, p)[0].message;
+            assert!(
+                m.contains("egret never locks a trigger while its execution runs"),
+                "{m}"
+            );
+            assert!(m.contains("only on Schedule and polling triggers"), "{m}");
+            assert!(!m.contains("package #11") && !m.contains(" yet"), "{m}");
         }
         let f = at(&r, "triggers.e.failOnTriggerError")[0];
         assert!(
@@ -2128,6 +2128,7 @@ mod tests {
         );
         assert!(!f.message.contains("package #11"), "{}", f.message);
         assert!(!f.message.contains(" yet"), "{}", f.message);
+        assert_eq!(f.message.matches("does not act on it").count(), 1);
     }
 
     #[test]
@@ -2221,12 +2222,7 @@ mod tests {
         // Webhook sync-response keys `wait`/`returnOutputs`/
         // `responseContentType`/`responseCode` (11c) are honoured now, so none
         // of them is here; `labels` keeps its lift on both trigger kinds.
-        for (t, key) in [
-            (SCHED, "labels"),
-            (HOOK, "labels"),
-            (HOOK, "allowConcurrent"),
-            (FLOWT, "allowConcurrent"),
-        ] {
+        for (t, key) in [(SCHED, "labels"), (HOOK, "labels")] {
             assert_eq!(
                 lift_of(Site::Trigger(t), key),
                 Some(Package(11)),
@@ -2238,11 +2234,21 @@ mod tests {
         for t in [SCHED, HOOK, FLOWT] {
             assert_eq!(lift_of(Site::Trigger(t), "stopAfter"), None, "{t}");
         }
-        // `failOnTriggerError` is inert on every trigger type and no package lifts it.
+        // `failOnTriggerError` is inert on every trigger type, and
+        // `allowConcurrent` on a Flow/Webhook: no package lifts either.
         for t in [SCHED, HOOK, FLOWT] {
             assert!(
                 matches!(
                     lift_of(Site::Trigger(t), "failOnTriggerError"),
+                    Some(Lift::Inert(_))
+                ),
+                "{t}"
+            );
+        }
+        for t in [HOOK, FLOWT] {
+            assert!(
+                matches!(
+                    lift_of(Site::Trigger(t), "allowConcurrent"),
                     Some(Lift::Inert(_))
                 ),
                 "{t}"
