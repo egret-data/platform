@@ -2156,3 +2156,101 @@ async fn a_foreach_is_refused_and_starts_nothing() {
         1
     );
 }
+
+// ---- package 11c Task 1: the trigger's own `labels` ----
+
+fn labelled_hook_flow(ns: &str, trigger_labels: &str) -> String {
+    format!(
+        "\
+id: fx-flow
+namespace: {ns}
+labels:
+  team: data
+tasks:
+  - id: fx-task
+    type: core.log
+    message: hello
+triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+    labels:
+{trigger_labels}"
+    )
+}
+
+async fn only_execution_labels(db: &egret_metastore::Db, ws: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT labels FROM workflow.executions WHERE workspace_id = $1")
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read labels")
+}
+
+/// The trigger's `labels:` reach the execution, a templated value rendered
+/// against the webhook record, in declaration order. The flow's own `labels:`
+/// stay on the flow and are merged first by every reader
+/// (`labels::visible_labels`), so the stored own-labels hold the trigger's only.
+#[tokio::test]
+async fn webhook_trigger_labels_reach_the_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let flow = labelled_hook_flow(
+        &ns,
+        "      env: prod\n      src: \"{{ trigger.parameters.who[0] }}\"\n",
+    );
+    common::seed_flow(&db, ws, user, &flow, "draft").await;
+    let app = common::webhook_app(&db).await;
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &format!("{}?who=alice", hook_url(ws, &ns, "fx-key")),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    assert_eq!(
+        only_execution_labels(&db, ws).await,
+        Some(json!([
+            {"key": "env", "value": "prod"},
+            {"key": "src", "value": "alice"}
+        ]))
+    );
+}
+
+/// Kestra OMITS a webhook label whose template does not render and still starts
+/// the execution -- the opposite of the Schedule fail-safe.
+#[tokio::test]
+async fn an_unrenderable_webhook_label_is_omitted_and_the_execution_starts() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let flow = labelled_hook_flow(
+        &ns,
+        "      env: prod\n      bad: \"{{ nosuchroot.nothing }}\"\n      last: z\n",
+    );
+    common::seed_flow(&db, ws, user, &flow, "draft").await;
+    let app = common::webhook_app(&db).await;
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+    assert_eq!(
+        only_execution_labels(&db, ws).await,
+        Some(json!([
+            {"key": "env", "value": "prod"},
+            {"key": "last", "value": "z"}
+        ]))
+    );
+}

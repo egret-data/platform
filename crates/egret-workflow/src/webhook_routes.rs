@@ -683,13 +683,18 @@ async fn handle(
     let trigger_json = serde_json::to_value(&record)
         .map_err(|e| Error::Internal(anyhow::anyhow!("serialising the trigger record: {e}")))?;
 
-    let id = crate::worker::start_execution_with_trigger(
+    // The trigger's own `labels:`; one that does not render is omitted and the
+    // execution still starts (Kestra parity, unlike a Schedule's).
+    let labels = crate::trigger::webhook::render_webhook_labels(&record.variables, &trigger.labels);
+
+    let id = crate::worker::start_execution_with_trigger_labels(
         &st.db.pool,
         ws_id,
         Some(flow_uuid),
         &source,
         inputs,
         Some(trigger_json),
+        labels,
     )
     .await?;
 

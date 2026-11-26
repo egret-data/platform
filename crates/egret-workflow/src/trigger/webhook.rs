@@ -697,6 +697,31 @@ pub fn build_output(
     Ok(out)
 }
 
+/// The trigger's own `labels:`, each value rendered against the webhook record
+/// (`{body, headers, parameters, uri}`) bound under both `trigger` and
+/// `webhook`. Keys stay literal.
+///
+/// A label whose template does not render is **omitted** and the rest proceed:
+/// Kestra starts the execution without it, the opposite of the Schedule
+/// trigger's fail-safe. So there is no `Result`.
+#[must_use]
+pub fn render_webhook_labels(record: &Output, labels: &[crate::models::Label]) -> Vec<Value> {
+    if labels.is_empty() {
+        return Vec::new();
+    }
+    let vars = serde_json::to_value(record).unwrap_or(Value::Null);
+    let mut cx = RenderContext::new();
+    cx.insert("trigger", vars.clone());
+    cx.insert("webhook", vars);
+    labels
+        .iter()
+        .filter_map(|l| {
+            let value = render_str(&l.value, &cx).ok()?;
+            Some(json!({"key": l.key, "value": value}))
+        })
+        .collect()
+}
+
 /// Is this a `multipart/form-data` request?
 ///
 /// Separate from [`is_textual`] because Micronaut routes multipart to a

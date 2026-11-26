@@ -4090,7 +4090,44 @@ pub async fn start_execution_with_trigger(
     inputs: serde_json::Value,
     trigger: Option<serde_json::Value>,
 ) -> Result<Uuid> {
-    start_with(pool, workspace_id, flow_id, source, inputs, trigger, None).await
+    start_with(
+        pool,
+        workspace_id,
+        flow_id,
+        source,
+        inputs,
+        trigger,
+        None,
+        None,
+    )
+    .await
+}
+
+/// [`start_execution_with_trigger`] for a trigger that carries its own
+/// rendered `labels` (a webhook's): they are stored as the execution's own
+/// labels, which every reader merges AFTER the flow's (`labels::visible_labels`).
+/// An empty list stores NULL, as for a start with none.
+pub async fn start_execution_with_trigger_labels(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    flow_id: Option<Uuid>,
+    source: &str,
+    inputs: serde_json::Value,
+    trigger: Option<serde_json::Value>,
+    labels: Vec<serde_json::Value>,
+) -> Result<Uuid> {
+    let labels = (!labels.is_empty()).then(|| serde_json::Value::Array(labels));
+    start_with(
+        pool,
+        workspace_id,
+        flow_id,
+        source,
+        inputs,
+        trigger,
+        None,
+        labels,
+    )
+    .await
 }
 
 /// [`start_execution`] for a start a **person** made: the API start route.
@@ -4112,10 +4149,12 @@ pub async fn start_execution_by(
         inputs,
         None,
         Some(started_by),
+        None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_with(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -4124,6 +4163,7 @@ async fn start_with(
     inputs: serde_json::Value,
     trigger: Option<serde_json::Value>,
     started_by: Option<Uuid>,
+    labels: Option<serde_json::Value>,
 ) -> Result<Uuid> {
     transaction!(pool, |at| {
         start_execution_in_with(
@@ -4152,9 +4192,9 @@ async fn start_with(
                 // `start_execution_in` itself with the id it uploaded under.
                 id: None,
                 input_files: Vec::new(),
-                // The API, a webhook and the tests start with the flow's labels
-                // only; a backfill is the scheduler's.
-                labels: None,
+                // The API and the tests start with the flow's labels only; a
+                // webhook adds its trigger's; a backfill is the scheduler's.
+                labels: labels.clone(),
                 backfill_id: None,
                 variables: None,
                 started_by,
