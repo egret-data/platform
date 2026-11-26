@@ -1,6 +1,6 @@
 import { Fragment, useId, type ComponentType } from "react";
 import { Link } from "react-router-dom";
-import { Clock, Info, Loader2, Puzzle, Webhook, Workflow } from "lucide-react";
+import { CalendarClock, Clock, Globe, Info, Loader2, Puzzle, Webhook, Workflow } from "lucide-react";
 import type { TriggerKindDto } from "@/api/generated/model";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -27,6 +27,8 @@ const KIND_ICONS: Record<TriggerKindDto, ComponentType<{ className?: string; "ar
   schedule: Clock,
   webhook: Webhook,
   flow: Workflow,
+  schedule_on_dates: CalendarClock,
+  http_trigger: Globe,
   other: Puzzle,
 };
 
