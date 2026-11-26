@@ -21,7 +21,7 @@ const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
 
 fn flow_src(stop_after: &str) -> String {
     format!(
-        "id: sa\nnamespace: t\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n{stop_after}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        "id: sa\nnamespace: t\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n    allowConcurrent: true\n{stop_after}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     )
 }
 

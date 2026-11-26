@@ -42,7 +42,7 @@ fn parsed(src: String) -> String {
 /// A flow `id` with one `*/1 * * * *` schedule `s`.
 fn scheduled(id: &str) -> String {
     parsed(format!(
-        "id: {id}\nnamespace: w7e\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        "id: {id}\nnamespace: w7e\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n    allowConcurrent: true\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     ))
 }
 
@@ -265,7 +265,7 @@ async fn the_listener_select_skips_a_switched_off_listener() {
 /// (`*/1 * * * *`, the one a pass claims).
 fn two_schedules(id: &str) -> String {
     parsed(format!(
-        "id: {id}\nnamespace: w7e\ntriggers:\n  - id: x\n    type: {SCHEDULE}\n    cron: \"0 2 * * *\"\n  - id: y\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        "id: {id}\nnamespace: w7e\ntriggers:\n  - id: x\n    type: {SCHEDULE}\n    cron: \"0 2 * * *\"\n  - id: y\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n    allowConcurrent: true\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     ))
 }
 

@@ -1658,3 +1658,59 @@ async fn allow_concurrent_true_does_not_hold() {
     assert_eq!((r.fired, r.held), (1, 0), "both ticks fire");
     assert_eq!(executions_of(&fx.db, flow).await, 2);
 }
+
+/// A BACKFILL tick of an `allowConcurrent: false` trigger is held too, while
+/// an execution the trigger started is live (Kestra serialises backfill ticks
+/// the same way). The backfill row does not move; it resumes once the
+/// execution is terminal.
+#[tokio::test]
+async fn allow_concurrent_false_holds_a_backfill_tick_too() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml("hold-bf", "", "    allowConcurrent: false\n"))
+        .await;
+    let w0: DateTime<Utc> =
+        sqlx::query_scalar("SELECT date_trunc('minute', now()) - interval '10 minutes'")
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    common::stage_backfill(
+        &fx.db,
+        flow,
+        "s",
+        (w0, w0 + Duration::minutes(2)),
+        w0,
+        3,
+        serde_json::json!({}),
+        serde_json::json!([]),
+    )
+    .await;
+
+    assert_eq!(fx.pass().await.fired, 1, "the first backfill tick fires");
+    let staged = common::backfill_row(&fx.db, flow, "s").await;
+    assert!(staged.is_some(), "the backfill is still running");
+
+    let r = fx.pass().await;
+    assert_eq!((r.fired, r.held), (0, 1), "the next backfill tick is held");
+    assert_eq!(executions_of(&fx.db, flow).await, 1);
+    assert_eq!(
+        common::backfill_row(&fx.db, flow, "s").await,
+        staged,
+        "a held backfill tick leaves the backfill row alone"
+    );
+
+    sqlx::query(
+        "UPDATE workflow.task_runs SET state = 'SUCCESS' \
+          WHERE execution_id IN (SELECT id FROM workflow.executions WHERE flow_id = $1)",
+    )
+    .bind(flow)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE workflow.executions SET state = 'SUCCESS' WHERE flow_id = $1")
+        .bind(flow)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(fx.pass().await.fired, 1, "it resumes after completion");
+}
