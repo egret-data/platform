@@ -28,7 +28,7 @@ fn db_err(e: sqlx::Error) -> Error {
 
 /// Kestra's `Schedule` type name, as stored in `execution_trigger.type` and
 /// matched by `workflow_executions_scheduled_date_iff_schedule`.
-const SCHEDULE_TYPE: &str = "io.kestra.plugin.core.trigger.Schedule";
+pub(crate) const SCHEDULE_TYPE: &str = "io.kestra.plugin.core.trigger.Schedule";
 
 /// Package 11b: the most `when` candidates one `fire_due` pass walks before it
 /// parks. A long-idle Schedule with an always-falsy `when` (a one-minute cron

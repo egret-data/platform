@@ -3737,6 +3737,11 @@ async fn advance_frame(conn: &mut PgConnection, frame: &mut Frame<'_>) -> Result
             if became_terminal(before, state) {
                 super::concurrency::on_terminal(conn, ctx).await?;
             }
+            // Package 11b: a Schedule-started execution that ended in one of
+            // its trigger's `stopAfter` states switches that trigger off.
+            if became_terminal(before, state) {
+                super::stop_after::on_terminal(conn, ctx, state).await?;
+            }
             // Step 4 is the tail ([`walk`]): if this settle reached a
             // terminal, tell the parent. `was != is` reads `state` -- this
             // settle's in-memory copy, which a nested settle deliberately does

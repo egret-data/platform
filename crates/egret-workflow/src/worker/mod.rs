@@ -97,6 +97,7 @@ mod release;
 mod render;
 mod replay;
 mod restart;
+mod stop_after;
 mod unqueue;
 // Plan Task 4 is the pure half; plan Task 6 calls it from the runner seam, and
 // this allowance goes with that call.
