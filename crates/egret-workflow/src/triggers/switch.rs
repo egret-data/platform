@@ -127,7 +127,10 @@ pub(crate) async fn set_disabled(
         return Ok(Err(SwitchRefusal::NotFound));
     };
     let table = match &t.kind {
-        TriggerKind::Schedule(_) => StateTable::Schedule,
+        // `ScheduleOnDates` and `http.Trigger` ride the same queue row.
+        TriggerKind::Schedule(_)
+        | TriggerKind::ScheduleOnDates(_)
+        | TriggerKind::HttpTrigger(_) => StateTable::Schedule,
         TriggerKind::Flow(_) => StateTable::Listener,
         TriggerKind::Webhook(_) => StateTable::None,
         TriggerKind::Leaf { .. } => return Ok(Err(SwitchRefusal::NotSupported)),

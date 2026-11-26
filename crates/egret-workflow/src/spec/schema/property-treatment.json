@@ -855,6 +855,34 @@
       "version": "ignored",
       "workerSelector": "ignored"
     },
+    "io.kestra.plugin.core.http.Trigger": {
+      "allowConcurrent": "honoured",
+      "assets": "ignored",
+      "body": "honoured",
+      "contentType": "honoured",
+      "description": "honoured",
+      "disabled": "honoured",
+      "encryptBody": "refused",
+      "failOnTriggerError": "honoured",
+      "formData": "refused",
+      "headers": "honoured",
+      "id": "honoured",
+      "interval": "honoured",
+      "labels": "honoured",
+      "logLevel": "ignored",
+      "logToFile": "ignored",
+      "method": "honoured",
+      "options": "refused",
+      "params": "honoured",
+      "policyRefs": "ignored",
+      "responseCondition": "honoured",
+      "stopAfter": "honoured",
+      "type": "honoured",
+      "uri": "honoured",
+      "version": "ignored",
+      "when": "honoured",
+      "workerSelector": "ignored"
+    },
     "io.kestra.plugin.core.kv.Delete": {
       "allowFailure": "honoured",
       "allowWarning": "honoured",
@@ -1391,6 +1419,27 @@
       "version": "ignored",
       "when": "honoured",
       "withSeconds": "honoured",
+      "workerSelector": "ignored"
+    },
+    "io.kestra.plugin.core.trigger.ScheduleOnDates": {
+      "allowConcurrent": "honoured",
+      "assets": "ignored",
+      "dates": "honoured",
+      "description": "honoured",
+      "disabled": "honoured",
+      "failOnTriggerError": "ignored",
+      "id": "honoured",
+      "inputs": "honoured",
+      "labels": "honoured",
+      "logLevel": "ignored",
+      "logToFile": "ignored",
+      "policyRefs": "ignored",
+      "recoverMissedSchedules": "honoured",
+      "stopAfter": "honoured",
+      "timezone": "honoured",
+      "type": "honoured",
+      "version": "ignored",
+      "when": "honoured",
       "workerSelector": "ignored"
     },
     "io.kestra.plugin.core.trigger.Webhook": {
@@ -1953,6 +2002,11 @@
     }
   },
   "refused_downstream": {
+    "io.kestra.plugin.core.http.Trigger": {
+      "encryptBody": "trigger::http_trigger::refusals: http.Trigger `encryptBody` is not supported (it needs Kestra's key-encrypted outputs, which egret does not model)",
+      "formData": "trigger::http_trigger::refusals: http.Trigger `formData` is not supported; multipart bodies belong to package #4's http.Request, not the trigger poll",
+      "options": "trigger::http_trigger::refusals: http.Trigger `options` (proxy, ssl, auth, timeouts) is not supported; package #4's http.Request refusals apply and the request configuration is not modelled for triggers until the trigger poll lifts it"
+    },
     "io.kestra.plugin.core.trigger.Schedule": {
       "timezone=\"ACT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"ACT\"",
       "timezone=\"AET\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"AET\"",

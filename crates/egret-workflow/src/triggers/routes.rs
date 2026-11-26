@@ -26,7 +26,7 @@ use crate::namespaces::dependencies::{off_runtime, DraftRow, MAX_FLOWS};
 use crate::repo::{FlowRepo, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use crate::routes::{caller_may_manage, WorkflowState, WF_MANAGE, WF_READ};
 
-/// What a trigger is, as egret runs it: one of the three kinds it fires, or
+/// What a trigger is, as egret runs it: one of the kinds it fires, or
 /// `other` (a `Leaf`: any other type, which egret never fires).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +34,10 @@ pub enum TriggerKindDto {
     Schedule,
     Webhook,
     Flow,
+    /// `ScheduleOnDates` (package 11e): fires at listed dates.
+    ScheduleOnDates,
+    /// `http.Trigger` (package 11e): polls a URL every `interval`.
+    HttpTrigger,
     Other,
 }
 
@@ -74,6 +78,9 @@ pub struct ScheduleInfoDto {
     /// `true`: no next date; the schedule does not fire until a save
     /// re-initialises it (`last_error` says why).
     pub off_queue: bool,
+    /// An `http.Trigger`'s authored polling `interval` (ISO-8601); `null` for
+    /// every other kind, and for an `http.Trigger` that sets none (60 s).
+    pub interval: Option<String>,
     /// On the queue and overdue (`next_evaluation_date <= now`, which a
     /// switched-off schedule becomes, since it keeps its date): the ticks from
     /// `next_evaluation_date` through now. During a backfill, the regular
@@ -496,9 +503,11 @@ impl RowFilter {
                         "schedule" => Ok(TriggerKindDto::Schedule),
                         "webhook" => Ok(TriggerKindDto::Webhook),
                         "flow" => Ok(TriggerKindDto::Flow),
+                        "schedule_on_dates" => Ok(TriggerKindDto::ScheduleOnDates),
+                        "http_trigger" => Ok(TriggerKindDto::HttpTrigger),
                         "other" => Ok(TriggerKindDto::Other),
                         other => Err(Error::InvalidInput(format!(
-                            "unknown trigger kind '{other}': send schedule, webhook, flow or other"
+                            "unknown trigger kind '{other}': send schedule, schedule_on_dates, http_trigger, webhook, flow or other"
                         ))),
                     })
                     .collect::<egret_core::Result<Vec<_>>>()?,

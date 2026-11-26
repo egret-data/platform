@@ -59,7 +59,7 @@ const EnableTriggerDialog = lazy(() =>
 /** Rows per page (spec §4.4). */
 export const TRIGGERS_PAGE_SIZE = 50;
 
-const KINDS: TriggerKindDto[] = ["schedule", "webhook", "flow", "other"];
+const KINDS: TriggerKindDto[] = ["schedule", "schedule_on_dates", "http_trigger", "webhook", "flow", "other"];
 const STATES = [
   { value: "enabled", label: "Enabled" },
   { value: "disabled", label: "Disabled" },

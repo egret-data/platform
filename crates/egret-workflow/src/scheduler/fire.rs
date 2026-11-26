@@ -8,12 +8,17 @@ use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::models::{Schedule, TriggerKind};
+use crate::http::{
+    build_request, headers_output, read_capped, transport_message, HttpSpec, MaskSet,
+};
+use crate::models::{HttpTrigger, Schedule, Trigger, TriggerKind};
 use crate::repo::{flow_cols, FlowRow};
+use crate::runners::secrets::{render_with_secrets, SecretSource};
 use crate::trigger::{
     tick, BackfillEnd, FixedClock, RecoverMissed, ScheduleTrigger, ScheduledExecution, TickOutcome,
     TriggerState,
 };
+use crate::worker::handlers::http::MAX_BODY_BYTES;
 use crate::worker::txn::{transaction, Ended, Fetched, Finish, Isolation, Txn};
 use crate::worker::{start_execution_in_with, NewExecution};
 
@@ -29,6 +34,9 @@ fn db_err(e: sqlx::Error) -> Error {
 /// Kestra's `Schedule` type name, as stored in `execution_trigger.type` and
 /// matched by `workflow_executions_scheduled_date_iff_schedule`.
 pub(crate) const SCHEDULE_TYPE: &str = "io.kestra.plugin.core.trigger.Schedule";
+/// Package 11e: a `ScheduleOnDates` fire. Admitted by migration 0244's
+/// broadened `workflow_executions_scheduled_date_iff_schedule`.
+pub(crate) const SCHEDULE_ON_DATES_TYPE: &str = "io.kestra.plugin.core.trigger.ScheduleOnDates";
 
 /// Package 11b: the most `when` candidates one `fire_due` pass walks before it
 /// parks. A long-idle Schedule with an always-falsy `when` (a one-minute cron
@@ -101,6 +109,36 @@ enum Fate {
     Held,
 }
 
+/// What one claimed trigger resolved to under the claim's transaction.
+///
+/// A `Schedule`/`ScheduleOnDates` tick settles entirely inside the lock, so it
+/// is always [`Step::Settled`]. A due `http.Trigger`, by contrast, must not
+/// hold the row lock across its HTTP call (package 11e Task 3, the Task-2
+/// load-bearing flag): the claim advances `next_evaluation_date += interval`
+/// and COMMITS, then [`Step::Poll`] carries everything the poll needs so
+/// [`fire_due`] can run it **outside** any transaction and start the execution
+/// it fires in a fresh one. A poll error never rolls the interval advance back:
+/// the tick is consumed either way, as Kestra's next-interval scheduling does.
+enum Step {
+    Settled(Fate),
+    Poll(Box<HttpPollJob>),
+}
+
+/// Everything the out-of-lock `http.Trigger` poll needs, read under the claim
+/// (so the source is the one the lock vouched for) and carried out of the
+/// committed transaction.
+struct HttpPollJob {
+    flow_id: Uuid,
+    trigger_id: String,
+    workspace_id: Uuid,
+    source: String,
+    namespace: String,
+    flow_key: String,
+    /// The declared trigger (its `id`, `type`, `labels`, `failOnTriggerError`).
+    trigger: Trigger,
+    http: HttpTrigger,
+}
+
 /// One pass: every due trigger evaluated at most once. Returns when none is
 /// left.
 ///
@@ -146,11 +184,19 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
                 "a schedule fire's plain fetch cannot give up"
             )));
         };
-        let Some((flow_id, trigger_id, fate)) = fired else {
+        let Some((flow_id, trigger_id, step)) = fired else {
             return Ok(report);
         };
         seen_flows.push(flow_id);
         seen_ids.push(trigger_id);
+        // Package 11e Task 3: a due `http.Trigger` committed its interval
+        // advance inside the claim above; the poll and the execution it fires
+        // happen here, OUTSIDE the lock, so the row is not held across the HTTP
+        // call. A poll error is already an advanced tick; it is never retried.
+        let fate = match step {
+            Step::Settled(fate) => fate,
+            Step::Poll(job) => run_http_poll(pool, *job).await?,
+        };
         match fate {
             Fate::Fired => report.fired += 1,
             Fate::Skipped => report.skipped += 1,
@@ -167,7 +213,7 @@ async fn claim_and_fire(
     at: &mut Txn,
     seen_flows: &[Uuid],
     seen_ids: &[String],
-) -> Result<Finish<Option<(Uuid, String, Fate)>>> {
+) -> Result<Finish<Option<(Uuid, String, Step)>>> {
     let claimed: Option<Claimed> = sqlx::query_as(concat!(
         "SELECT t.flow_id, t.trigger_id, t.spec_key, t.next_evaluation_date, t.evaluated_at, \
                     f.workspace_id, f.source, f.namespace, f.flow_id AS flow_key, \
@@ -201,8 +247,16 @@ async fn claim_and_fire(
     at.gate()
         .prefetch()
         .bind(&format!("{}/{}", c.flow_id, c.trigger_id));
-    let fate = fire_one(at, &c).await?;
-    Ok(Finish::Commit(Some((c.flow_id, c.trigger_id, fate))))
+    // `poll` is set only by a due `http.Trigger` that advanced and wants to be
+    // polled outside the lock; then its returned `Fate` is a placeholder the
+    // poll replaces, and the committed transaction carries only the advance.
+    let mut poll = None;
+    let fate = fire_one(at, &c, &mut poll).await?;
+    let step = match poll {
+        Some(job) => Step::Poll(Box::new(job)),
+        None => Step::Settled(fate),
+    };
+    Ok(Finish::Commit(Some((c.flow_id, c.trigger_id, step))))
 }
 
 /// Everything that happens to one claimed trigger, inside its transaction.
@@ -225,7 +279,7 @@ async fn claim_and_fire(
 /// regular schedule's resume (§3.6). A refused start of a backfill tick ends
 /// the backfill the same way, resuming as a delete does (D25). The early
 /// returns (`take_off_queue`, `record_error`) leave the backfill row alone.
-async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
+async fn fire_one(at: &mut Txn, c: &Claimed, poll_out: &mut Option<HttpPollJob>) -> Result<Fate> {
     let flow = match crate::spec::parse(&c.source) {
         Ok(f) => f,
         Err(e) => {
@@ -238,10 +292,10 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
             return Ok(Fate::Errored);
         }
     };
-    let trigger = flow
-        .triggers
-        .iter()
-        .find(|t| t.id == c.trigger_id && matches!(t.kind, TriggerKind::Schedule(_)));
+    let trigger = flow.triggers.iter().find(|t| {
+        t.id == c.trigger_id
+            && (super::sync::is_schedulable(&t.kind) || super::sync::is_poller(&t.kind))
+    });
     // The source read under the lock is the authority and the row is a copy
     // (spec §4 point 5). When the copy says "on" and the source says "off" --
     // or no longer declares this schedule at all, or declares it with a cron
@@ -253,13 +307,24 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     // when a writer holds the flow row (see `resync`).
     let declared = trigger
         .filter(|t| !flow.disabled && !t.disabled)
-        .and_then(|t| match &t.kind {
-            TriggerKind::Schedule(s) if super::sync::spec_key(s) == c.spec_key => Some((t, s)),
-            _ => None,
+        .filter(|t| match &t.kind {
+            TriggerKind::HttpTrigger(h) => crate::trigger::http_trigger::spec_key(h) == c.spec_key,
+            kind => super::sync::kind_spec_key(kind).as_deref() == Some(c.spec_key.as_str()),
         });
-    let Some((trigger, schedule)) = declared else {
+    let Some(trigger) = declared else {
         resync(at.conn(), c.flow_id).await?;
         return Ok(Fate::Frozen);
+    };
+    // Package 11e: a polling trigger takes the interval path, not a date tick.
+    if let TriggerKind::HttpTrigger(h) = &trigger.kind {
+        return fire_http_tick(at, c, trigger, h, poll_out).await;
+    }
+    // A backfill belongs to a `Schedule` only (W7f §3.9); `schedule` is `None`
+    // for a `ScheduleOnDates`, which has none to resume.
+    let (schedule, trigger_inputs, trigger_type) = match &trigger.kind {
+        TriggerKind::Schedule(s) => (Some(s), s.inputs.clone(), SCHEDULE_TYPE),
+        TriggerKind::ScheduleOnDates(o) => (None, o.inputs.clone(), SCHEDULE_ON_DATES_TYPE),
+        _ => unreachable!("filtered to schedulable kinds above"),
     };
     let resolved = match ScheduleTrigger::resolve(trigger) {
         Ok(r) => r,
@@ -275,7 +340,11 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     // lock is seen here.
     #[cfg(any(test, feature = "test-util"))]
     hold::after_claim(c.flow_id).await;
-    let backfill = super::backfill::read(at.conn(), c.flow_id, &c.trigger_id).await?;
+    let backfill = if schedule.is_some() {
+        super::backfill::read(at.conn(), c.flow_id, &c.trigger_id).await?
+    } else {
+        None
+    };
     if backfill.as_ref().is_some_and(|b| b.paused) {
         return Ok(Fate::Frozen);
     }
@@ -307,7 +376,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
 
     // The schedule's `inputs:` overlaid by the backfill's, key by key; the
     // template refusal applies to the merged result (§3.4).
-    let mut inputs = schedule.inputs.clone().unwrap_or_default();
+    let mut inputs = trigger_inputs.unwrap_or_default();
     if let Some(over) = backfill.as_ref().and_then(|b| b.inputs.as_object()) {
         inputs = overlay_inputs(&inputs, over);
     }
@@ -440,7 +509,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
                         return Ok(Fate::Errored);
                     }
                 };
-                match start(at, c, &e, backfill.as_ref(), trigger_labels).await? {
+                match start(at, c, &e, trigger_type, backfill.as_ref(), trigger_labels).await? {
                     Started::Yes => (Fate::Fired, None),
                     // A unique index (the per-tick one, or the per-backfill-tick one
                     // for a backfill's fire) says this tick already has its
@@ -483,7 +552,7 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     };
 
     let mut last_error = last_error;
-    if let Some(b) = &backfill {
+    if let (Some(b), Some(schedule)) = (&backfill, schedule) {
         let ended = match (&t.state.backfill, refused_backfill) {
             // A refused start ends the backfill as a delete does: the unfired
             // `current_tick` and the rest of the window are dropped.
@@ -607,6 +676,7 @@ async fn start(
     at: &mut Txn,
     c: &Claimed,
     e: &ScheduledExecution,
+    trigger_type: &str,
     backfill: Option<&BackfillRow>,
     trigger_labels: Vec<serde_json::Value>,
 ) -> Result<Started> {
@@ -625,7 +695,11 @@ async fn start(
             flow_id: Some(c.flow_id),
             source: &c.source,
             inputs: serde_json::to_value(&e.inputs).map_err(|e| Error::Internal(e.into()))?,
-            trigger: Some(schedule_trigger_record(e)),
+            trigger: Some({
+                let mut record = schedule_trigger_record(e);
+                record["type"] = trigger_type.into();
+                record
+            }),
             scheduled_date: Some(e.scheduled_date),
             // A `Schedule` fire has no source execution and starts a chain.
             trigger_execution_id: None,
@@ -719,6 +793,474 @@ async fn record_error(conn: &mut PgConnection, c: &Claimed, why: &str) -> Result
     .await
     .map_err(db_err)?;
     Ok(())
+}
+
+/// Package 11e Task 3: a due `http.Trigger` is an interval tick, and its poll
+/// must not hold the trigger row lock across the HTTP call.
+///
+/// So, inside the claim's transaction, this only: refuses an unmodelled
+/// sub-key (off the queue), applies the 11d `allowConcurrent` hold **before**
+/// polling (the derived `execution_is_idle` test, race-free under the row
+/// lock), then advances `next_evaluation_date = db_now + interval` (Kestra's
+/// `PollingTriggerInterface.computeNextEvaluationDate`; no `scheduled_date`)
+/// and hands a [`HttpPollJob`] up through `poll_out`. The transaction commits
+/// the advance, and [`fire_due`] runs the poll + any fire outside the lock
+/// ([`run_http_poll`]). A poll error does not roll the advance back: the tick
+/// is consumed either way, as Kestra schedules the next interval regardless.
+async fn fire_http_tick(
+    at: &mut Txn,
+    c: &Claimed,
+    trigger: &Trigger,
+    http: &HttpTrigger,
+    poll_out: &mut Option<HttpPollJob>,
+) -> Result<Fate> {
+    let refused = crate::trigger::http_trigger::refusals(http);
+    if !refused.is_empty() {
+        take_off_queue(at.conn(), c, &refused.join("; ")).await?;
+        return Ok(Fate::Errored);
+    }
+    let interval = crate::trigger::http_trigger::interval(http)
+        .expect("a refusal-free trigger has a valid interval");
+
+    // Package 11d: `allowConcurrent` (Kestra default `false`) holds the poll
+    // while any execution this trigger started is non-terminal -- applied
+    // BEFORE polling, as Kestra skips evaluation while a prior fire is live.
+    // Nothing is advanced: the row stays due and the hold is re-checked next
+    // pass, one poll per completion, exactly as the schedule tick is held.
+    if !trigger.allow_concurrent {
+        let live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM workflow.executions \
+               WHERE flow_id = $1 AND workspace_id = $2 \
+                 AND execution_trigger ->> 'id' = $3 \
+                 AND NOT workflow.execution_is_idle(id))",
+        )
+        .bind(c.flow_id)
+        .bind(c.workspace_id)
+        .bind(&c.trigger_id)
+        .fetch_one(at.conn())
+        .await
+        .map_err(db_err)?;
+        if live {
+            return Ok(Fate::Held);
+        }
+    }
+
+    // Advance and COMMIT (with the claim's transaction) before the poll runs.
+    // `last_error` is cleared for this fresh attempt; the poll re-sets it on an
+    // error it does not turn into a born-failed execution.
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $3, evaluated_at = $4, \
+                last_error = NULL, updated_at = now() \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(c.flow_id)
+    .bind(&c.trigger_id)
+    .bind(c.db_now + interval)
+    .bind(c.db_now)
+    .execute(at.conn())
+    .await
+    .map_err(db_err)?;
+
+    *poll_out = Some(HttpPollJob {
+        flow_id: c.flow_id,
+        trigger_id: c.trigger_id.clone(),
+        workspace_id: c.workspace_id,
+        source: c.source.clone(),
+        namespace: c.namespace.clone(),
+        flow_key: c.flow_key.clone(),
+        trigger: trigger.clone(),
+        http: http.clone(),
+    });
+    // Ignored by `claim_and_fire` because `poll_out` is now `Some`: the real
+    // fate is the poll's, decided outside the lock.
+    Ok(Fate::Skipped)
+}
+
+/// The out-of-lock half of an `http.Trigger` tick: render the request fields
+/// (with `secret()` resolving, #10a), send it through the shared `egret-egress`
+/// policy (the `workflow.http.allow_hosts` guard, #4's chain), evaluate
+/// `responseCondition` against `{{ response.* }}`, and -- when it holds -- start
+/// one execution with `Request.Output` bound as `{{ trigger.* }}` (11a).
+///
+/// Runs under NO transaction: the interval advance has already committed. Only
+/// the fire opens a fresh transaction. A failed HTTP *status* is not an error
+/// (Kestra forces `allowFailed`): the status reaches `responseCondition`, whose
+/// falsy result is a silent no-fire. Only a transport error (or a render/eval
+/// failure) is a "trigger error", routed through `failOnTriggerError`.
+async fn run_http_poll(pool: &PgPool, job: HttpPollJob) -> Result<Fate> {
+    let Some(egress) = crate::http::egress_current() else {
+        // No deployment egress installed (no worker, or a test that does not
+        // poll). Nothing to poll against; the interval already advanced.
+        tracing::debug!(
+            flow_id = %job.flow_id,
+            trigger_id = %job.trigger_id,
+            "http.Trigger due but no egress policy is installed; poll skipped"
+        );
+        return Ok(Fate::Skipped);
+    };
+    let secrets = crate::runners::secrets::current()
+        .unwrap_or_else(|| std::sync::Arc::new(NoPollSecrets) as std::sync::Arc<dyn SecretSource>);
+
+    // 1. Render the request fields (uri/method/body/params/headers/contentType)
+    //    with `secret()` resolving, then read the shared http model and build
+    //    the request -- the exact chain `http.Request` uses.
+    let props = http_request_props(&job.http);
+    let cx = poll_context(&job);
+    let (rendered, resolved) =
+        match render_with_secrets(&props, &cx, job.workspace_id, secrets.as_ref()).await {
+            Ok(r) => r,
+            Err(message) => return on_trigger_error(pool, &job, &message).await,
+        };
+    let mut masks = MaskSet::new(resolved.values.iter());
+    let spec = match HttpSpec::from_value(&serde_json::Value::Object(rendered)) {
+        Ok(s) => s,
+        Err(m) => return on_trigger_error(pool, &job, &masks.mask(&m)).await,
+    };
+    let opts = match spec.options() {
+        Ok(o) => o,
+        Err(m) => return on_trigger_error(pool, &job, &masks.mask(&m)).await,
+    };
+    let built = match build_request(&spec, None).await {
+        Ok(b) => b,
+        Err(m) => return on_trigger_error(pool, &job, &masks.mask(&m)).await,
+    };
+    masks.extend(built.credentials.iter());
+    let uri = built.uri.clone();
+
+    // 2. Send. A transport/guard error is the trigger error; a bad STATUS is
+    //    not (no `ensure_allowed`), so the status flows into responseCondition.
+    let res = match egress.client(&opts, None).send(built.request).await {
+        Ok(r) => r,
+        Err(e) => return on_trigger_error(pool, &job, &transport_message(&e, &masks)).await,
+    };
+    let status = res.status();
+    let headers = res.headers().clone();
+    let bytes = match read_capped(res, MAX_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(e) => return on_trigger_error(pool, &job, &masks.mask(&e.to_string())).await,
+    };
+    let body = if http_has_no_entity(status) {
+        serde_json::Value::Null
+    } else {
+        match crate::worker::handlers::http::decode_body(&bytes) {
+            Ok(s) => serde_json::Value::String(s),
+            Err(m) => return on_trigger_error(pool, &job, &masks.mask(&m)).await,
+        }
+    };
+    let headers_out = headers_output(&headers);
+
+    // 3. responseCondition, bound against ONE `response` var (statusCode:
+    //    Integer, body: String, headers: Map<String,List<String>>), default
+    //    `{{ response.statusCode < 400 }}`, with `secret()` resolving. A
+    //    rendered value is read by egret's own truthiness (0/''/false falsy).
+    let condition = job
+        .http
+        .response_condition
+        .as_ref()
+        .map(|p| p.source().to_string())
+        .unwrap_or_else(|| DEFAULT_RESPONSE_CONDITION.to_string());
+    let mut cond_props = serde_json::Map::new();
+    cond_props.insert(RESPONSE_CONDITION_KEY.into(), condition.into());
+    let mut cond_cx = poll_context(&job);
+    cond_cx.insert(
+        "response",
+        serde_json::json!({
+            "statusCode": status.as_u16(),
+            "body": body,
+            "headers": headers_out,
+        }),
+    );
+    let (cond_rendered, cond_resolved) = match render_with_secrets(
+        &cond_props,
+        &cond_cx,
+        job.workspace_id,
+        secrets.as_ref(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(message) => return on_trigger_error(pool, &job, &message).await,
+    };
+    masks.extend(cond_resolved.values.iter());
+    let truthy = cond_rendered
+        .get(RESPONSE_CONDITION_KEY)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(crate::executor::is_truthy);
+    if !truthy {
+        // A silent no-fire: the interval has advanced, nothing else to do.
+        return Ok(Fate::Skipped);
+    }
+
+    // 4. `when` (package 11e): the trigger's base condition, honoured the same
+    //    way egret honours it on a Schedule -- render, then `is_truthy`; a falsy
+    //    or unrenderable result fires nothing. It renders against the poll
+    //    context plus the bound `response` and the `trigger.*` variables the
+    //    fired execution sees (11a), so both `{{ response.* }}` and
+    //    `{{ trigger.code }}` resolve, matching what the execution would see.
+    //    `responseCondition` truthy AND `when` truthy => fire. The interval has
+    //    already advanced, so any no-fire here is a silent `Skipped`.
+    let variables = serde_json::json!({
+        "uri": uri,
+        "code": status.as_u16(),
+        "headers": headers_out,
+        "body": body,
+    });
+    if let Some(when) = job
+        .trigger
+        .when
+        .as_ref()
+        .map(|w| w.source().to_string())
+        .filter(|s| s != "true")
+    {
+        let mut when_props = serde_json::Map::new();
+        when_props.insert(WHEN_KEY.into(), when.into());
+        let mut when_cx = poll_context(&job);
+        when_cx.insert(
+            "response",
+            serde_json::json!({
+                "statusCode": status.as_u16(),
+                "body": body,
+                "headers": headers_out,
+            }),
+        );
+        // `trigger.*` as the fired execution sees it: the record's id/type plus
+        // the `Request.Output` variables, so `{{ trigger.code }}` resolves to
+        // the polled status exactly as it will in the execution.
+        when_cx.insert(
+            "trigger",
+            serde_json::json!({
+                "id": job.trigger.id,
+                "type": job.trigger.r#type,
+                "uri": uri,
+                "code": status.as_u16(),
+                "headers": headers_out,
+                "body": body,
+            }),
+        );
+        let when_rendered =
+            match render_with_secrets(&when_props, &when_cx, job.workspace_id, secrets.as_ref())
+                .await
+            {
+                Ok((rendered, _)) => rendered,
+                // Fail-safe, as the Schedule `when` and the labels: an unrenderable
+                // `when` fires nothing; the interval has already advanced.
+                Err(_) => return Ok(Fate::Skipped),
+            };
+        let when_truthy = when_rendered
+            .get(WHEN_KEY)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(crate::executor::is_truthy);
+        if !when_truthy {
+            return Ok(Fate::Skipped);
+        }
+    }
+
+    // 5. Fire. `Request.Output` is bound as the trigger record's `variables`,
+    //    so 11a's `{{ trigger.* }}` binding exposes `trigger.uri`,
+    //    `trigger.code`, `trigger.headers`, `trigger.body`. No `scheduled_date`
+    //    (not a date tick): the `workflow_executions_scheduled_date_iff_schedule`
+    //    CHECK is satisfied by NULL for a non-Schedule type.
+    fire_http_execution(pool, &job, variables, false).await
+}
+
+/// Kestra's default `responseCondition`.
+const DEFAULT_RESPONSE_CONDITION: &str = "{{ response.statusCode < 400 }}";
+/// The one-key map the condition is rendered through.
+const RESPONSE_CONDITION_KEY: &str = "responseCondition";
+/// The one-key map the trigger's base `when` is rendered through (package 11e).
+const WHEN_KEY: &str = "when";
+
+/// Package 11e: a transport/render/eval failure is a "trigger error". With
+/// `failOnTriggerError: true` it starts a born-failed execution (11d's
+/// `NewExecution.born_failed`); otherwise it is logged to the trigger row's
+/// `last_error`. Either way the interval has already advanced.
+async fn on_trigger_error(pool: &PgPool, job: &HttpPollJob, why: &str) -> Result<Fate> {
+    if job.trigger.fail_on_trigger_error {
+        // The record identifies the trigger (its `id` keeps the allowConcurrent
+        // test correct); a born-failed execution carries no response.
+        fire_http_execution(pool, job, serde_json::json!({}), true).await
+    } else {
+        set_last_error(pool, job, why).await?;
+        tracing::debug!(
+            flow_id = %job.flow_id,
+            trigger_id = %job.trigger_id,
+            "http.Trigger poll error recorded to last_error"
+        );
+        Ok(Fate::Errored)
+    }
+}
+
+/// Start the execution an `http.Trigger` fires, in a FRESH transaction (the
+/// interval advance is already committed). `born_failed` marks a trigger-error
+/// execution. The trigger record is `{id, type, variables}` -- `variables` is
+/// the `Request.Output` on a real fire, empty on a born-failed one.
+async fn fire_http_execution(
+    pool: &PgPool,
+    job: &HttpPollJob,
+    variables: serde_json::Value,
+    born_failed: bool,
+) -> Result<Fate> {
+    let record = serde_json::json!({
+        "id": job.trigger.id,
+        "type": job.trigger.r#type,
+        "variables": variables,
+    });
+    // Package 11e: the trigger's own `labels`, each value RENDERED against the
+    // poll/fire context -- `flow` plus the `trigger.*` the execution sees (its
+    // id/type and the `Request.Output` variables) -- exactly as Schedule and
+    // Webhook render theirs, so `{{ trigger.code }}` resolves. A label whose
+    // template does not render is OMITTED and the rest proceed (Kestra, as the
+    // webhook path), so there is no fail-safe here. A born-failed execution
+    // carries empty `variables`, so `{{ trigger.* }}` labels drop out there.
+    let labels = {
+        let mut label_cx = crate::runners::RenderContext::new();
+        label_cx.insert(
+            "flow",
+            serde_json::json!({"id": job.flow_key, "namespace": job.namespace}),
+        );
+        let mut trigger_vars = serde_json::json!({
+            "id": job.trigger.id,
+            "type": job.trigger.r#type,
+        });
+        if let (Some(dst), Some(src)) = (trigger_vars.as_object_mut(), variables.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        label_cx.insert("trigger", trigger_vars);
+        let rendered: Vec<serde_json::Value> = job
+            .trigger
+            .labels
+            .iter()
+            .filter_map(|l| {
+                let value = crate::render_str(&l.value, &label_cx).ok()?;
+                Some(serde_json::json!({"key": l.key, "value": value}))
+            })
+            .collect();
+        (!rendered.is_empty()).then_some(serde_json::Value::Array(rendered))
+    };
+    let source = job.source.clone();
+    let started: Result<Uuid> = transaction!(pool, |at| {
+        start_execution_in_with(
+            at,
+            NewExecution {
+                workspace_id: job.workspace_id,
+                flow_id: Some(job.flow_id),
+                source: &source,
+                inputs: serde_json::json!({}),
+                trigger: Some(record.clone()),
+                // Not a date tick (a polling trigger). NULL satisfies the
+                // Schedule-only double-fire CHECK/unique index.
+                scheduled_date: None,
+                trigger_execution_id: None,
+                execution_depth: 0,
+                flow_trigger_event_id: None,
+                born_failed,
+                replayed_from_execution_id: None,
+                id: None,
+                input_files: Vec::new(),
+                labels: labels.clone(),
+                backfill_id: None,
+                variables: None,
+                started_by: None,
+            },
+        )
+        .await
+    });
+    match started {
+        Ok(_) if born_failed => Ok(Fate::Errored),
+        Ok(_) => Ok(Fate::Fired),
+        Err(e) => {
+            // The fire itself failed (not a poll error): keep the reason. The
+            // interval already advanced, so the next pass polls afresh.
+            set_last_error(pool, job, &e.to_string()).await?;
+            Ok(Fate::Errored)
+        }
+    }
+}
+
+/// The request-field props an `http.Trigger` renders, in the shape
+/// [`HttpSpec`] reads (Kestra's names). `options`/`encryptBody`/`formData` are
+/// refused before the poll, so they are never built here.
+fn http_request_props(http: &HttpTrigger) -> serde_json::Map<String, serde_json::Value> {
+    let mut props = serde_json::Map::new();
+    let mut put_str = |key: &str, p: &Option<crate::models::Property<String>>| {
+        if let Some(v) = p {
+            props.insert(
+                key.to_string(),
+                serde_json::Value::String(v.source().into()),
+            );
+        }
+    };
+    put_str("uri", &http.uri);
+    put_str("method", &http.method);
+    put_str("body", &http.body);
+    put_str("contentType", &http.content_type);
+    if let Some(params) = &http.params {
+        props.insert("params".into(), params.clone());
+    }
+    if let Some(headers) = &http.headers {
+        props.insert("headers".into(), headers.clone());
+    }
+    props
+}
+
+/// The render context an `http.Trigger`'s fields and `responseCondition` see:
+/// `flow` and `trigger`, as the Webhook key render binds them. The poll has no
+/// execution yet, so no `execution`/`outputs` roots.
+fn poll_context(job: &HttpPollJob) -> crate::runners::RenderContext {
+    let mut cx = crate::runners::RenderContext::new();
+    cx.insert(
+        "flow",
+        serde_json::json!({"id": job.flow_key, "namespace": job.namespace}),
+    );
+    cx.insert(
+        "trigger",
+        serde_json::json!({"id": job.trigger.id, "type": job.trigger.r#type}),
+    );
+    cx
+}
+
+/// A response with no entity (Kestra's `body` is then `null`): a 1xx, a 204 or
+/// a 304. The trigger poll never issues a HEAD, so that case does not arise.
+fn http_has_no_entity(status: reqwest::StatusCode) -> bool {
+    status.is_informational()
+        || status == reqwest::StatusCode::NO_CONTENT
+        || status == reqwest::StatusCode::NOT_MODIFIED
+}
+
+/// Keep a poll error on the trigger row without touching its advanced dates.
+async fn set_last_error(pool: &PgPool, job: &HttpPollJob, why: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE workflow.triggers SET last_error = $3, updated_at = now() \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(job.flow_id)
+    .bind(&job.trigger_id)
+    .bind(why)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
+/// A `SecretSource` for a poll in a process with none installed: every read is
+/// a miss, so a trigger that calls `secret()` fails the render (never a leak,
+/// never a silent empty). `secret()`-free fields never reach it.
+struct NoPollSecrets;
+
+#[async_trait::async_trait]
+impl SecretSource for NoPollSecrets {
+    async fn get(
+        &self,
+        _workspace: Uuid,
+        name: &str,
+    ) -> std::result::Result<
+        std::collections::BTreeMap<String, String>,
+        crate::runners::secrets::SecretError,
+    > {
+        Err(crate::runners::secrets::SecretError::NotFound { name: name.into() })
+    }
 }
 
 /// Spec §4 point 6: a trigger that cannot be evaluated leaves the queue

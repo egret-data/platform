@@ -267,7 +267,7 @@ async fn each_kind_reads_every_field_in_declaration_order() {
             "schedule": {
                 "cron": "*/1 * * * *", "with_seconds": false, "timezone": "UTC",
                 "next_evaluation_date": null, "evaluated_at": null, "last_error": null,
-                "off_queue": false, "missed_ticks": null, "recover_missed_schedules": null
+                "off_queue": false, "interval": null, "missed_ticks": null, "recover_missed_schedules": null
             },
             "flow": null, "webhook": null, "last_execution": null,
             "backfill": null, "can_backfill": true, "backfill_refusal": null
@@ -2291,5 +2291,48 @@ async fn a_bad_body_is_coded_after_the_permission_check() {
     let (status, got) = answer(common::put(&app, &bulk_path(ws), user, huge).await).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(got["code"], json!("body_too_large"), "{got}");
+    assert!(common::switched_off(&db, flow).await.is_empty());
+}
+
+// ── 12. package 11e: ScheduleOnDates and http.Trigger are first-class ─────────
+
+#[tokio::test]
+async fn dates_and_http_triggers_list_and_switch_like_a_schedule() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = manager(&db).await;
+    let triggers = "  - id: days\n    type: io.kestra.plugin.core.trigger.ScheduleOnDates\n    dates:\n      - \"2099-01-01T00:00:00Z\"\n  - id: poll\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://example.test/health\n    interval: PT30S\n";
+    let flow = common::seed_flow(&db, ws, user, &src("company.a", "p11e", triggers), "draft").await;
+    let app = flagged_app(&db).await;
+
+    let body = flow_triggers(&app, ws, user, flow).await;
+    let days = entry(&body, "days");
+    assert_eq!(days["kind"], json!("schedule_on_dates"), "{days}");
+    assert_eq!(days["can_toggle"], json!(true), "{days}");
+    assert_eq!(days["toggle_refusal"], json!(null), "{days}");
+    assert_eq!(days["can_backfill"], json!(false), "{days}");
+    assert!(
+        days["schedule"]["next_evaluation_date"].is_string(),
+        "{days}"
+    );
+    assert_eq!(days["schedule"]["off_queue"], json!(false), "{days}");
+    let poll = entry(&body, "poll");
+    assert_eq!(poll["kind"], json!("http_trigger"), "{poll}");
+    assert_eq!(poll["can_toggle"], json!(true), "{poll}");
+    assert_eq!(poll["schedule"]["interval"], json!("PT30S"), "{poll}");
+    assert_eq!(poll["can_backfill"], json!(false), "{poll}");
+
+    for trig in ["days", "poll"] {
+        let e = switch(&app, ws, user, flow, trig, true, false).await;
+        assert_eq!(e["runtime_disabled"], json!(true), "{e}");
+        assert_eq!(e["effective_disabled"], json!(true), "{e}");
+        assert!(schedule_copy(&db, flow, trig).await, "{trig}: the copy");
+    }
+    assert_eq!(common::switched_off(&db, flow).await, vec!["days", "poll"]);
+    for trig in ["days", "poll"] {
+        let e = switch(&app, ws, user, flow, trig, false, false).await;
+        assert_eq!(e["runtime_disabled"], json!(false), "{e}");
+        assert_eq!(e["effective_disabled"], json!(false), "{e}");
+        assert!(!schedule_copy(&db, flow, trig).await, "{trig}: the copy");
+    }
     assert!(common::switched_off(&db, flow).await.is_empty());
 }

@@ -1714,3 +1714,218 @@ async fn allow_concurrent_false_holds_a_backfill_tick_too() {
         .unwrap();
     assert_eq!(fx.pass().await.fired, 1, "it resumes after completion");
 }
+
+// ---------------------------------------------------------------------------
+// Package 11e Task 1: `ScheduleOnDates`.
+// ---------------------------------------------------------------------------
+
+const ON_DATES: &str = "io.kestra.plugin.core.trigger.ScheduleOnDates";
+
+/// A flow with one `ScheduleOnDates` trigger `s` over `dates` (authored order).
+/// Parsed directly: publish still refuses the type until the reconcile task.
+fn on_dates_yaml(id: &str, dates: &[&str], extra: &str) -> String {
+    let list: String = dates.iter().map(|d| format!("      - \"{d}\"\n")).collect();
+    let concurrent = if extra.contains("allowConcurrent") {
+        ""
+    } else {
+        "    allowConcurrent: true\n"
+    };
+    let src = format!(
+        "id: {id}\nnamespace: w12\ntriggers:\n  - id: s\n    type: {ON_DATES}\n    dates:\n{list}{concurrent}{extra}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    egret_workflow::spec::parse(&src)
+        .unwrap_or_else(|e| panic!("fixture must parse: {e:?}\n{src}"));
+    src
+}
+
+async fn set_next(db: &Db, flow: Uuid, at: &str) {
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $2::timestamptz \
+         WHERE flow_id = $1 AND trigger_id = 's'",
+    )
+    .bind(flow)
+    .bind(at)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn schedule_on_dates_fires_each_date_in_order_then_leaves_the_queue() {
+    let Some(fx) = fx().await else { return };
+    // Authored out of order, one with sub-second precision (truncated).
+    let flow = fx
+        .flow(&on_dates_yaml(
+            "ond",
+            &["2026-01-01T00:05:00.700Z", "2026-01-01T00:00:00Z"],
+            "",
+        ))
+        .await;
+    // Every date is past, so `sync` parks the row off the queue with a reason
+    // (Kestra's `now + 1 year` is deliberately not copied).
+    let parked = row(&fx.db, flow).await.expect("a trigger row");
+    assert_eq!(parked.next_evaluation_date, None);
+    assert!(parked.last_error.is_some(), "{parked:?}");
+
+    // Downtime recovery (`recoverMissedSchedules: ALL`) is what puts a past
+    // first date on the queue in production; drive it the same way.
+    set_next(&fx.db, flow, "2026-01-01T00:00:00Z").await;
+    let d1: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
+    let d2: DateTime<Utc> = "2026-01-01T00:05:00Z".parse().unwrap();
+
+    assert_eq!(fx.pass().await.fired, 1);
+    assert_eq!(
+        row(&fx.db, flow).await.unwrap().next_evaluation_date,
+        Some(d2),
+        "advance is strictly after the fired date, sorted"
+    );
+    assert_eq!(fx.pass().await.fired, 1);
+    assert_eq!(fx.pass().await, PassReport::default(), "nothing is left");
+
+    assert_eq!(common::scheduled_dates(&fx.db, flow).await, vec![d1, d2]);
+    let triggers: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT execution_trigger FROM workflow.executions WHERE flow_id = $1 ORDER BY scheduled_date",
+    )
+    .bind(flow)
+    .fetch_all(&fx.db.pool)
+    .await
+    .unwrap();
+    assert!(
+        triggers
+            .iter()
+            .all(|t| t["type"] == ON_DATES && t["id"] == "s"),
+        "{triggers:?}"
+    );
+    assert_eq!(
+        triggers[0]["variables"]["next"],
+        "2026-01-01T00:05:00.000000Z"
+    );
+    assert_eq!(triggers[1]["variables"]["next"], serde_json::Value::Null);
+    let after = row(&fx.db, flow).await.unwrap();
+    assert_eq!(
+        after.next_evaluation_date, None,
+        "off the queue once exhausted"
+    );
+    assert_eq!(after.evaluated_at, Some(d2));
+}
+
+#[tokio::test]
+async fn schedule_on_dates_honours_inputs_and_the_allow_concurrent_hold() {
+    let Some(fx) = fx().await else { return };
+    // The flow declares the input the trigger supplies.
+    let src = on_dates_yaml(
+        "ond-hold",
+        &["2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z"],
+        "    allowConcurrent: false\n    inputs:\n      who: dates\n",
+    )
+    .replace(
+        "triggers:",
+        "inputs:\n  - id: who\n    type: STRING\ntriggers:",
+    );
+    let flow = fx.flow(&src).await;
+    set_next(&fx.db, flow, "2026-01-01T00:00:00Z").await;
+    assert_eq!(fx.pass().await.fired, 1);
+    let inputs: serde_json::Value =
+        sqlx::query_scalar("SELECT inputs FROM workflow.executions WHERE flow_id = $1")
+            .bind(flow)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(inputs["who"], "dates");
+    // The first execution is still live: the second date is held, not lost.
+    let r = fx.pass().await;
+    assert_eq!((r.fired, r.held), (0, 1));
+    assert_eq!(executions_of(&fx.db, flow).await, 1);
+}
+
+#[tokio::test]
+async fn schedule_on_dates_editing_the_dates_reinitialises_the_row() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&on_dates_yaml("ond-edit", &["2026-01-01T00:00:00Z"], ""))
+        .await;
+    let before = spec_key_of(&fx.db, flow, "s").await.unwrap();
+    fx.update(
+        flow,
+        &on_dates_yaml("ond-edit", &["2099-01-01T00:00:00Z"], ""),
+    )
+    .await;
+    let after = spec_key_of(&fx.db, flow, "s").await.unwrap();
+    assert_ne!(before, after);
+    let next = row(&fx.db, flow).await.unwrap().next_evaluation_date;
+    assert_eq!(next, Some("2099-01-01T00:00:00Z".parse().unwrap()));
+}
+
+// ---------------------------------------------------------------------------
+// Package 11e Task 2: `http.Trigger` interval scheduling (the poll is Task 3).
+// ---------------------------------------------------------------------------
+
+const HTTP_TRIGGER: &str = "io.kestra.plugin.core.http.Trigger";
+
+/// A flow with one `http.Trigger` `s`.
+fn http_yaml(id: &str, extra: &str) -> String {
+    let src = format!(
+        "id: {id}\nnamespace: w12\ntriggers:\n  - id: s\n    type: {HTTP_TRIGGER}\n    uri: https://example.test/health\n{extra}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    egret_workflow::spec::parse(&src)
+        .unwrap_or_else(|e| panic!("fixture must parse: {e:?}\n{src}"));
+    src
+}
+
+#[tokio::test]
+async fn http_trigger_is_queued_at_now_plus_interval_and_advances_without_firing() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&http_yaml("http-tick", "    interval: PT30S\n"))
+        .await;
+    let first = due_date(&fx.db, flow).await;
+    let now = db_now(&fx.db).await;
+    assert!(
+        first > now && first <= now + Duration::seconds(31),
+        "now + interval: {first} vs {now}"
+    );
+    assert_eq!(fx.pass().await, PassReport::default(), "not due yet");
+
+    set_next(&fx.db, flow, "2026-01-01T00:00:00Z").await;
+    let r = fx.pass().await;
+    assert_eq!((r.fired, r.errored, r.frozen), (0, 0, 0), "{r:?}");
+    let next = due_date(&fx.db, flow).await;
+    let now = db_now(&fx.db).await;
+    assert!(
+        next > now + Duration::seconds(25) && next <= now + Duration::seconds(31),
+        "advanced by the interval from now: {next} vs {now}"
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0, "no poll yet");
+    assert_eq!(fx.pass().await, PassReport::default());
+}
+
+#[tokio::test]
+async fn http_trigger_interval_defaults_to_sixty_seconds() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&http_yaml("http-default", "")).await;
+    let next = due_date(&fx.db, flow).await;
+    let now = db_now(&fx.db).await;
+    assert!(
+        next > now + Duration::seconds(55) && next <= now + Duration::seconds(61),
+        "{next} vs {now}"
+    );
+}
+
+#[tokio::test]
+async fn http_trigger_unmodelled_keys_are_taken_off_the_queue_with_their_reason() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&http_yaml(
+            "http-refused",
+            "    options:\n      timeout: {}\n",
+        ))
+        .await;
+    let r = row(&fx.db, flow).await.expect("a trigger row");
+    assert_eq!(r.next_evaluation_date, None);
+    assert!(
+        r.last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("options")),
+        "{r:?}"
+    );
+}

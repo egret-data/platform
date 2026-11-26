@@ -107,6 +107,25 @@ impl HttpEgress {
     }
 }
 
+/// The process's egress policy for the http.Trigger poll, installed once by
+/// `runtime::handlers_for` beside the secret source. The scheduler's poll path
+/// (`scheduler::fire`) reads it here, because `fire_due` takes only a pool and
+/// the poll runs outside the claim transaction. Mirrors
+/// `runners::secrets::install`/`current` and `storage::install`/`current`.
+static INSTALLED: std::sync::OnceLock<HttpEgress> = std::sync::OnceLock::new();
+
+/// Install the process's http.Trigger egress policy. A second call hands its
+/// argument back and the first stays.
+pub fn install(egress: HttpEgress) -> Result<(), HttpEgress> {
+    INSTALLED.set(egress)
+}
+
+/// The installed egress policy, `None` when this process has none (no worker
+/// deployment, or a test that does not poll).
+pub fn current() -> Option<HttpEgress> {
+    INSTALLED.get().cloned()
+}
+
 /// Build the request from the RENDERED spec. Runs [`refusals`] first, so a
 /// stored flow that slipped past publish still fails naming the property.
 /// Every `Err` is a message for the task run; it may quote the URI, so the

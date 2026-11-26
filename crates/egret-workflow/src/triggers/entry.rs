@@ -76,6 +76,8 @@ fn entry(
         TriggerKind::Schedule(_) => TriggerKindDto::Schedule,
         TriggerKind::Webhook(_) => TriggerKindDto::Webhook,
         TriggerKind::Flow(_) => TriggerKindDto::Flow,
+        TriggerKind::ScheduleOnDates(_) => TriggerKindDto::ScheduleOnDates,
+        TriggerKind::HttpTrigger(_) => TriggerKindDto::HttpTrigger,
         TriggerKind::Leaf { .. } => TriggerKindDto::Other,
     };
     let yaml_disabled = parsed.disabled || t.disabled;
@@ -123,6 +125,18 @@ fn entry(
     };
 
     let schedule = match &t.kind {
+        // Package 11e: both ride the schedule queue, so the same row fields
+        // read; neither has a cron.
+        TriggerKind::ScheduleOnDates(d) => Some(queue_info(
+            schedule_row,
+            d.timezone.clone().unwrap_or_else(|| "UTC".to_string()),
+            None,
+        )),
+        TriggerKind::HttpTrigger(h) => Some(queue_info(
+            schedule_row,
+            "UTC".to_string(),
+            h.interval.clone(),
+        )),
         TriggerKind::Schedule(s) => {
             let row = schedule_row;
             let next = row.and_then(|r| r.next_evaluation_date);
@@ -133,6 +147,7 @@ fn entry(
                 next_evaluation_date: next,
                 evaluated_at: row.and_then(|r| r.evaluated_at),
                 last_error: row.and_then(|r| r.last_error.clone()),
+                interval: None,
                 off_queue: next.is_none(),
                 missed_ticks: match detail {
                     Detail::Full => missed_ticks(t, missed_from(next, backfill_row), state.db_now),
@@ -242,6 +257,28 @@ fn entry(
         backfill: backfill_row.map(backfill_dto),
         can_backfill: backfill_refusal.is_none(),
         backfill_refusal,
+    }
+}
+
+/// The schedule info of a trigger that rides the schedule queue without a
+/// cron (`ScheduleOnDates`, `http.Trigger`): the row's dates, no missed ticks.
+fn queue_info(
+    row: Option<&super::state::ScheduleRow>,
+    timezone: String,
+    interval: Option<String>,
+) -> ScheduleInfoDto {
+    let next = row.and_then(|r| r.next_evaluation_date);
+    ScheduleInfoDto {
+        cron: None,
+        with_seconds: false,
+        timezone,
+        next_evaluation_date: next,
+        evaluated_at: row.and_then(|r| r.evaluated_at),
+        last_error: row.and_then(|r| r.last_error.clone()),
+        interval,
+        off_queue: next.is_none(),
+        missed_ticks: None,
+        recover_missed_schedules: None,
     }
 }
 

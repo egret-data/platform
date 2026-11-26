@@ -1253,8 +1253,12 @@ pub struct ScheduleDates {
 /// Why a `Schedule` cannot be scheduled at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduleError {
-    /// The trigger is not a `Schedule`.
+    /// The trigger is not a `Schedule` (or a `ScheduleOnDates`).
     NotASchedule,
+    /// `ScheduleOnDates.dates` is `@NotNull` in Java; absent or empty here.
+    MissingDates,
+    /// A `ScheduleOnDates.dates` entry is not an RFC 3339 timestamp.
+    MalformedDate(String),
     /// `Schedule.cron` is `@NotNull` in Java. W1 modelled it `Option` because
     /// bean validation is not parsing; this is the check that owes.
     MissingCron,
@@ -1277,6 +1281,8 @@ impl fmt::Display for ScheduleError {
         match self {
             Self::NotASchedule => write!(f, "trigger is not a core.schedule"),
             Self::MissingCron => write!(f, "core.schedule requires a `cron`"),
+            Self::MissingDates => write!(f, "core.scheduleOnDates requires a non-empty `dates`"),
+            Self::MalformedDate(why) => write!(f, "core.scheduleOnDates `dates`: {why}"),
             Self::Cron(e) => write!(f, "invalid cron: {e}"),
             Self::UnknownTimezone(tz) => write!(f, "unknown timezone {tz:?}"),
             // Key names only (spec D10): the author's `when` value is never
@@ -1314,11 +1320,45 @@ impl RecoverMissed {
     }
 }
 
+/// Where a [`ScheduleTrigger`]'s ticks come from: a cron expression
+/// (`Schedule`) or an explicit date list (`ScheduleOnDates`, package 11e).
+/// Both answer the same three questions in the same strictness, so every
+/// date-math method of the trigger is shared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ticks {
+    Cron(Cron),
+    /// Sorted, whole-second instants.
+    Dates(Vec<DateTime<Utc>>),
+}
+
+impl Ticks {
+    fn next_after(&self, after: DateTime<Tz>) -> Option<DateTime<Tz>> {
+        match self {
+            Self::Cron(c) => c.next_after(after),
+            Self::Dates(d) => super::schedule_on_dates::next_after(d, after.timezone(), after),
+        }
+    }
+
+    fn last_before(&self, before: DateTime<Tz>) -> Option<DateTime<Tz>> {
+        match self {
+            Self::Cron(c) => c.last_before(before),
+            Self::Dates(d) => super::schedule_on_dates::last_before(d, before.timezone(), before),
+        }
+    }
+
+    fn count_through(&self, after: DateTime<Tz>, until: DateTime<Tz>, cap: u32) -> (u32, bool) {
+        match self {
+            Self::Cron(c) => c.count_through(after, until, cap),
+            Self::Dates(d) => super::schedule_on_dates::count_through(d, after, until, cap),
+        }
+    }
+}
+
 /// A `Schedule` resolved far enough to be driven by a clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleTrigger {
     pub trigger_id: String,
-    cron: Cron,
+    cron: Ticks,
     timezone: Tz,
     late_maximum_delay: Option<Duration>,
     disabled: bool,
@@ -1328,6 +1368,9 @@ impl ScheduleTrigger {
     /// Resolves a parsed `Trigger` into something schedulable, or says why it
     /// is not.
     pub fn resolve(trigger: &Trigger) -> Result<Self, ScheduleError> {
+        if let TriggerKind::ScheduleOnDates(on_dates) = &trigger.kind {
+            return Self::from_dates(&trigger.id, on_dates, trigger.disabled);
+        }
         let TriggerKind::Schedule(schedule) = &trigger.kind else {
             return Err(ScheduleError::NotASchedule);
         };
@@ -1339,6 +1382,35 @@ impl ScheduleTrigger {
         // so a `when`, absent or not, no longer changes whether a Schedule
         // resolves.
         Self::from_schedule(&trigger.id, schedule, trigger.disabled)
+    }
+
+    /// A `ScheduleOnDates`: the dates parsed, truncated and sorted; no
+    /// `lateMaximumDelay` (the type has none).
+    fn from_dates(
+        trigger_id: &str,
+        on_dates: &crate::models::ScheduleOnDates,
+        disabled: bool,
+    ) -> Result<Self, ScheduleError> {
+        let raw = on_dates
+            .dates
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .ok_or(ScheduleError::MissingDates)?;
+        let dates =
+            super::schedule_on_dates::parse_dates(raw).map_err(ScheduleError::MalformedDate)?;
+        let timezone = match on_dates.timezone.as_deref() {
+            None => Tz::UTC,
+            Some(name) => {
+                Tz::from_str(name).map_err(|_| ScheduleError::UnknownTimezone(name.to_string()))?
+            }
+        };
+        Ok(Self {
+            trigger_id: trigger_id.to_string(),
+            cron: Ticks::Dates(dates),
+            timezone,
+            late_maximum_delay: None,
+            disabled,
+        })
     }
 
     fn from_schedule(
@@ -1373,7 +1445,7 @@ impl ScheduleTrigger {
 
         Ok(Self {
             trigger_id: trigger_id.to_string(),
-            cron,
+            cron: Ticks::Cron(cron),
             timezone,
             late_maximum_delay,
             disabled,

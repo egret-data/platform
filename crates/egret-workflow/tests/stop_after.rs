@@ -18,10 +18,18 @@ use uuid::Uuid;
 mod common;
 
 const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
+const HTTP_TRIGGER: &str = "io.kestra.plugin.core.http.Trigger";
 
 fn flow_src(stop_after: &str) -> String {
     format!(
         "id: sa\nnamespace: t\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n    allowConcurrent: true\n{stop_after}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    )
+}
+
+/// Package 11e: a flow with one polling `http.Trigger` `s`.
+fn http_flow_src(stop_after: &str) -> String {
+    format!(
+        "id: sa\nnamespace: t\ntriggers:\n  - id: s\n    type: {HTTP_TRIGGER}\n    uri: https://example.test/\n    interval: PT30S\n    allowConcurrent: true\n{stop_after}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     )
 }
 
@@ -57,6 +65,40 @@ async fn start(pool: &sqlx::PgPool, ws: Uuid, flow: Uuid, src: &str, trigger: bo
             inputs: json!({}),
             trigger: trigger.then(|| json!({"id": "s", "type": SCHEDULE, "variables": {}})),
             scheduled_date: trigger.then(Utc::now),
+            trigger_execution_id: None,
+            execution_depth: 0,
+            flow_trigger_event_id: None,
+            born_failed: false,
+            replayed_from_execution_id: None,
+            id: None,
+            input_files: Vec::new(),
+            labels: None,
+            backfill_id: None,
+            variables: None,
+            started_by: None,
+        },
+    )
+    .await
+    .expect("start");
+    tx.commit().await.unwrap();
+    id
+}
+
+/// Start the execution an `http.Trigger` poll fires: its `execution_trigger`
+/// carries the http.Trigger type and NO `scheduled_date` (a poll is not a date
+/// tick), as [`fire_http_execution`](egret_workflow) builds it.
+async fn start_http(pool: &sqlx::PgPool, ws: Uuid, flow: Uuid, src: &str) -> Uuid {
+    let mut tx = pool.begin().await.unwrap();
+    let id = egret_workflow::worker::start_execution_in(
+        &mut tx,
+        egret_workflow::worker::NewExecution {
+            workspace_id: ws,
+            flow_id: Some(flow),
+            source: src,
+            inputs: json!({}),
+            trigger: Some(json!({"id": "s", "type": HTTP_TRIGGER, "variables": {}})),
+            // A poll is not a date tick: NULL satisfies the Schedule-only CHECK.
+            scheduled_date: None,
             trigger_execution_id: None,
             execution_depth: 0,
             flow_trigger_event_id: None,
@@ -221,6 +263,38 @@ async fn a_killed_execution_disables_a_trigger_that_stops_after_killed(pool: sql
     // Assert
     assert_eq!(state(&pool, id).await, "KILLED");
     assert_eq!(trigger(&pool, flow).await, (true, false, 1));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_http_trigger_terminal_in_stop_after_disables_it(pool: sqlx::PgPool) {
+    // Package 11e: an http.Trigger with `stopAfter: [SUCCESS]` whose fired
+    // execution ends SUCCESS must be switched off -- `disabled_triggers` row
+    // plus `triggers.disabled` with a NULL next date (off the poll queue), so
+    // it never polls again. Before the fix the settle's allowlist omitted
+    // http.Trigger, so it polled forever.
+    let src = http_flow_src("    stopAfter: [SUCCESS]\n");
+    let (_db, ws, flow) = setup(&pool, &src).await;
+    let id = start_http(&pool, ws, flow, &src).await;
+
+    tick(&pool, true).await;
+
+    assert_eq!(state(&pool, id).await, "SUCCESS");
+    // (disabled, next_date set, disabled_triggers rows)
+    assert_eq!(trigger(&pool, flow).await, (true, false, 1));
+}
+
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_http_trigger_terminal_outside_stop_after_leaves_it_enabled(pool: sqlx::PgPool) {
+    // A control: SUCCESS is not in `stopAfter: [FAILED]`, so the trigger stays
+    // on the queue.
+    let src = http_flow_src("    stopAfter: [FAILED]\n");
+    let (_db, ws, flow) = setup(&pool, &src).await;
+    let id = start_http(&pool, ws, flow, &src).await;
+
+    tick(&pool, true).await;
+
+    assert_eq!(state(&pool, id).await, "SUCCESS");
+    assert_eq!(trigger(&pool, flow).await, (false, true, 0));
 }
 
 /// A registry whose only work is the kill-only claim's cancel.

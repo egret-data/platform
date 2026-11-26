@@ -84,9 +84,18 @@ pub const SECRET_TYPES: &[&str] = &[
     SSE_REQUEST,
 ];
 
-/// Whether `secret()` resolves in the properties of a task of type `t`.
+/// `io.kestra.plugin.core.http.Trigger` (package 11e): its request fields and
+/// `responseCondition` resolve `secret()` in the scheduler's poll
+/// (`scheduler::fire::run_http_poll`), so `spec::validate` must exempt them as
+/// a secret-resolving surface. It is a trigger, not one of the http *tasks*, so
+/// it is kept out of [`SECRET_TYPES`] (the task list, every spelling) and added
+/// only here.
+pub const HTTP_TRIGGER: &str = "io.kestra.plugin.core.http.Trigger";
+
+/// Whether `secret()` resolves in the properties of a task (or the
+/// [`HTTP_TRIGGER`]) of type `t`.
 pub fn resolves_secrets(t: &str) -> bool {
-    SECRET_TYPES.contains(&t)
+    SECRET_TYPES.contains(&t) || t == HTTP_TRIGGER
 }
 
 /// The largest response body `Request` stores as its `body` output (spec D6).
@@ -566,12 +575,11 @@ mod tests {
         ] {
             assert!(resolves_secrets(t), "{t}");
         }
-        for t in [
-            "io.kestra.plugin.core.log.Log",
-            "core.http",
-            "io.kestra.plugin.core.http.Trigger",
-        ] {
+        for t in ["io.kestra.plugin.core.log.Log", "core.http"] {
             assert!(!resolves_secrets(t), "{t}");
         }
+        // Package 11e: the http.Trigger poll renders its fields and
+        // `responseCondition` with `secret()` resolving, so this is now TRUE.
+        assert!(resolves_secrets("io.kestra.plugin.core.http.Trigger"));
     }
 }

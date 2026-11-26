@@ -1,6 +1,6 @@
-//! Schedule, Webhook and Flow `stopAfter` (packages 11b, 11c, 11d): when an
-//! execution a Schedule, Webhook or Flow trigger started ends in one of the
-//! trigger's `stopAfter` states, the trigger is switched off.
+//! Schedule, Webhook, Flow and http.Trigger `stopAfter` (packages 11b, 11c,
+//! 11d, 11e): when an execution one of those triggers started ends in one of
+//! the trigger's `stopAfter` states, the trigger is switched off.
 //!
 //! Webhook and Flow are a deliberate egret divergence: Kestra's executor
 //! no-ops `stopAfter` for both (`sendTriggerExecutionTerminated` excludes
@@ -24,6 +24,8 @@ use crate::models::State;
 
 /// `execution_trigger.type` of a webhook-started execution.
 const WEBHOOK_TYPE: &str = "io.kestra.plugin.core.trigger.Webhook";
+/// `execution_trigger.type` of an http.Trigger-started execution (package 11e).
+const HTTP_TRIGGER_TYPE: &str = crate::worker::handlers::http::HTTP_TRIGGER;
 
 /// The settle's hook: `ctx`'s execution just became terminal in `state`.
 pub(super) async fn on_terminal(
@@ -49,9 +51,18 @@ pub(super) async fn on_terminal(
     // A webhook or Flow trigger has no `workflow.triggers` row, so the UPDATE
     // below is a no-op for it; the `disabled_triggers` row is what a webhook
     // route reads, and a Flow trigger's listener row is disabled further down.
+    // An http.Trigger (package 11e) HAS a `workflow.triggers` row and uses
+    // `StateTable::Schedule`, so the UPDATE + `disabled_triggers` INSERT below
+    // disable it exactly as a Schedule's `stopAfter` does.
     if !matches!(
         trigger.get("type").and_then(|t| t.as_str()),
-        Some(crate::scheduler::SCHEDULE_TYPE | WEBHOOK_TYPE | FLOW_TYPE)
+        Some(
+            crate::scheduler::SCHEDULE_TYPE
+                | crate::scheduler::SCHEDULE_ON_DATES_TYPE
+                | HTTP_TRIGGER_TYPE
+                | WEBHOOK_TYPE
+                | FLOW_TYPE
+        )
     ) {
         return Ok(());
     }

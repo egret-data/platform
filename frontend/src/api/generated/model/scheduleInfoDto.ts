@@ -36,6 +36,12 @@ export interface ScheduleInfoDto {
      * re-initialises it (`last_error` says why).
      */
   off_queue: boolean;
+  /**
+     * An `http.Trigger`'s authored polling `interval` (ISO-8601); `null` for
+     * every other kind, and for an `http.Trigger` that sets none (60 s).
+     * @nullable
+     */
+  interval?: string | null;
   missed_ticks?: null | MissedTicksDto;
   /**
      * The YAML's `recoverMissedSchedules` as written (`ALL`, `NONE`, `LAST`);

@@ -853,10 +853,16 @@ pub async fn handlers_for(
     // `http.SseRequest`, which need no pool: the egress policy and caps
     // (`workflow.http`), the secret source (`secret()` resolves on the http
     // tasks, spec D5) and the store (multipart file parts; Download's file).
+    let http_egress =
+        crate::http::HttpEgress::from_config(&cfg.http, Arc::new(egret_egress::SystemResolver));
+    // Package 11e Task 3: the scheduler's `http.Trigger` poll reaches the same
+    // egress policy through this process-wide handle, because `fire_due` takes
+    // only a pool and the poll runs outside the claim transaction.
+    let _ = crate::http::install_egress(http_egress.clone());
     crate::worker::handlers::http::register(
         &mut handlers,
         &cfg.http,
-        crate::http::HttpEgress::from_config(&cfg.http, Arc::new(egret_egress::SystemResolver)),
+        http_egress,
         secrets.clone(),
         crate::storage::current(),
     );
