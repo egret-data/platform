@@ -590,7 +590,7 @@ async fn recover_missed(conn: &mut PgConnection, flow: &FlowRow) -> Result<()> {
         .map_err(db_err)?;
     let rows: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
         "SELECT t.trigger_id, t.next_evaluation_date FROM workflow.triggers t \
-         WHERE t.flow_id = $1 AND t.next_evaluation_date IS NOT NULL \
+         WHERE t.flow_id = $1 AND NOT t.disabled AND t.next_evaluation_date IS NOT NULL \
            AND t.next_evaluation_date < $2 \
            AND NOT EXISTS (SELECT 1 FROM workflow.trigger_backfills b \
                            WHERE b.flow_id = t.flow_id AND b.trigger_id = t.trigger_id)",

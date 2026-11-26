@@ -1555,3 +1555,32 @@ async fn recover_skips_a_trigger_with_an_active_backfill() {
         "backfill keeps its own resume"
     );
 }
+
+/// The switch route's state: enabled in YAML, a `disabled_triggers` row, and a
+/// non-null (past) date -- the only disabled state still on the queue by date.
+#[tokio::test]
+async fn recover_skips_a_switch_disabled_trigger() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let (flow, past) = recover_flow(&fx, "    recoverMissedSchedules: NONE\n").await;
+    sqlx::query(
+        "INSERT INTO workflow.disabled_triggers (flow_id, trigger_id, workspace_id) \
+         VALUES ($1, 's', $2)",
+    )
+    .bind(flow)
+    .bind(fx.ws)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    reconcile_now(&fx).await;
+    let (date, disabled): (Option<DateTime<Utc>>, bool) = sqlx::query_as(
+        "SELECT next_evaluation_date, disabled FROM workflow.triggers \
+         WHERE flow_id = $1 AND trigger_id = 's'",
+    )
+    .bind(flow)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert!(disabled, "control: sync kept the switch-off");
+    assert_eq!(date, Some(past), "disabled: not recovered");
+}
