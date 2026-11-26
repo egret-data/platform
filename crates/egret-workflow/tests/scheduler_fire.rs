@@ -1855,3 +1855,78 @@ async fn schedule_on_dates_editing_the_dates_reinitialises_the_row() {
     let next = row(&fx.db, flow).await.unwrap().next_evaluation_date;
     assert_eq!(next, Some("2099-01-01T00:00:00Z".parse().unwrap()));
 }
+
+// ---------------------------------------------------------------------------
+// Package 11e Task 2: `http.Trigger` interval scheduling (the poll is Task 3).
+// ---------------------------------------------------------------------------
+
+const HTTP_TRIGGER: &str = "io.kestra.plugin.core.http.Trigger";
+
+/// A flow with one `http.Trigger` `s`. Parsed directly: publish still refuses
+/// the type until the reconcile task.
+fn http_yaml(id: &str, extra: &str) -> String {
+    let src = format!(
+        "id: {id}\nnamespace: w12\ntriggers:\n  - id: s\n    type: {HTTP_TRIGGER}\n    uri: https://example.test/health\n{extra}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    );
+    egret_workflow::spec::parse(&src)
+        .unwrap_or_else(|e| panic!("fixture must parse: {e:?}\n{src}"));
+    src
+}
+
+#[tokio::test]
+async fn http_trigger_is_queued_at_now_plus_interval_and_advances_without_firing() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&http_yaml("http-tick", "    interval: PT30S\n"))
+        .await;
+    let first = due_date(&fx.db, flow).await;
+    let now = db_now(&fx.db).await;
+    assert!(
+        first > now && first <= now + Duration::seconds(31),
+        "now + interval: {first} vs {now}"
+    );
+    assert_eq!(fx.pass().await, PassReport::default(), "not due yet");
+
+    set_next(&fx.db, flow, "2026-01-01T00:00:00Z").await;
+    let r = fx.pass().await;
+    assert_eq!((r.fired, r.errored, r.frozen), (0, 0, 0), "{r:?}");
+    let next = due_date(&fx.db, flow).await;
+    let now = db_now(&fx.db).await;
+    assert!(
+        next > now + Duration::seconds(25) && next <= now + Duration::seconds(31),
+        "advanced by the interval from now: {next} vs {now}"
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 0, "no poll yet");
+    assert_eq!(fx.pass().await, PassReport::default());
+}
+
+#[tokio::test]
+async fn http_trigger_interval_defaults_to_sixty_seconds() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx.flow(&http_yaml("http-default", "")).await;
+    let next = due_date(&fx.db, flow).await;
+    let now = db_now(&fx.db).await;
+    assert!(
+        next > now + Duration::seconds(55) && next <= now + Duration::seconds(61),
+        "{next} vs {now}"
+    );
+}
+
+#[tokio::test]
+async fn http_trigger_unmodelled_keys_are_taken_off_the_queue_with_their_reason() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&http_yaml(
+            "http-refused",
+            "    options:\n      timeout: {}\n",
+        ))
+        .await;
+    let r = row(&fx.db, flow).await.expect("a trigger row");
+    assert_eq!(r.next_evaluation_date, None);
+    assert!(
+        r.last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("options")),
+        "{r:?}"
+    );
+}

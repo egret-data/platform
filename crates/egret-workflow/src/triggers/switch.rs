@@ -132,9 +132,9 @@ pub(crate) async fn set_disabled(
         TriggerKind::Webhook(_) => StateTable::None,
         // Package 11e: the switch route learns `ScheduleOnDates` at the
         // reconcile task; until then it is unsupported, as before.
-        TriggerKind::ScheduleOnDates(_) | TriggerKind::Leaf { .. } => {
-            return Ok(Err(SwitchRefusal::NotSupported))
-        }
+        TriggerKind::ScheduleOnDates(_)
+        | TriggerKind::HttpTrigger(_)
+        | TriggerKind::Leaf { .. } => return Ok(Err(SwitchRefusal::NotSupported)),
     };
 
     // 3. Off is always accepted (D4); on is refused while the YAML disables.

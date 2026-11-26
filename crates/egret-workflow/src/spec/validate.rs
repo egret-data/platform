@@ -842,7 +842,9 @@ pub fn validate_for_run(flow: &Flow) -> ValidationReport {
         triggers: flow.triggers.iter().any(|t| {
             matches!(
                 t.kind,
-                TriggerKind::Leaf { .. } | TriggerKind::ScheduleOnDates(_)
+                TriggerKind::Leaf { .. }
+                    | TriggerKind::ScheduleOnDates(_)
+                    | TriggerKind::HttpTrigger(_)
             )
         }),
     };
@@ -4023,6 +4025,11 @@ mod tests {
         // Package 11e: `ScheduleOnDates` is typed and scheduled, but stays
         // WARNED until the reconcile task (the census must not move mid-feature).
         let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n  - id: d\n    type: io.kestra.plugin.core.trigger.ScheduleOnDates\n    dates:\n      - \"2030-01-01T00:00:00Z\"\n";
+        assert_eq!(triggers_warning(yaml).len(), 1, "{yaml}");
+
+        // Package 11e: `http.Trigger` is typed and scheduled (no poll yet), but
+        // stays WARNED until the reconcile task.
+        let yaml = "id: f\nnamespace: a.b\ntasks:\n  - id: t\n    type: core.log\ntriggers:\n  - id: h\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://example.test/\n";
         assert_eq!(triggers_warning(yaml).len(), 1, "{yaml}");
 
         // POSITIVE CONTROL: a trigger egret does not fire, alone and beside a Schedule.

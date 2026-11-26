@@ -78,6 +78,10 @@ pub enum TriggerKind {
     /// but over an explicit date list. Its publish warning is kept until the
     /// package's reconcile task (`FeaturePresence::triggers` counts it).
     ScheduleOnDates(ScheduleOnDates),
+    /// Package 11e. A polling trigger (`io.kestra.plugin.core.http.Trigger`):
+    /// scheduled every `interval`, not by a date. Its publish warning is kept
+    /// until the package's reconcile task (`FeaturePresence::triggers`).
+    HttpTrigger(HttpTrigger),
     Webhook(Webhook),
     Flow(FlowTrigger),
     Leaf {
@@ -168,6 +172,42 @@ pub struct ScheduleOnDates {
     pub inputs: Option<BTreeMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recover_missed_schedules: Option<serde_json::Value>,
+}
+
+/// `io.kestra.plugin.core.http.Trigger` (`http/Trigger.java:88`): polls a URL
+/// every `interval` (Java default 60s) and fires when `responseCondition`
+/// holds. Package 11e Task 2 models and schedules it; the poll is Task 3.
+///
+/// The fields egret will honour are typed. `options`, `encryptBody` and
+/// `formData` are captured verbatim so the flow round-trips, and refused by
+/// [`crate::trigger::http_trigger::refusals`] (each names the package that
+/// would lift it). `interval` stays the authored ISO-8601 string.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpTrigger {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<Property<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<Property<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Property<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<Property<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_condition: Option<Property<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    /// Not modelled: refused (package #4's `HttpConfiguration`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypt_body: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_data: Option<serde_json::Value>,
 }
 
 /// `io.kestra.plugin.core.trigger.Webhook` + its
@@ -438,6 +478,7 @@ impl Serialize for Trigger {
         let kind_value = match &self.kind {
             TriggerKind::Schedule(v) => serde_json::to_value(v),
             TriggerKind::ScheduleOnDates(v) => serde_json::to_value(v),
+            TriggerKind::HttpTrigger(v) => serde_json::to_value(v),
             TriggerKind::Webhook(v) => serde_json::to_value(v),
             TriggerKind::Flow(v) => serde_json::to_value(v),
             TriggerKind::Leaf { spec } => Ok(spec.clone()),
@@ -507,6 +548,13 @@ impl Serialize for Trigger {
 /// `kind_for` -- both the FQCN and the `core.` short alias resolve to the
 /// same three typed variants.
 fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TriggerKind, serde_json::Error> {
+    // Package 11e: the http trigger lives in `core.http`, not `core.trigger`.
+    if matches!(
+        r#type.to_ascii_lowercase().as_str(),
+        "io.kestra.plugin.core.http.trigger" | "core.http.trigger"
+    ) {
+        return Ok(TriggerKind::HttpTrigger(serde_json::from_value(rest)?));
+    }
     let canonical = r#type
         .strip_prefix("io.kestra.plugin.core.trigger.")
         .map(str::to_ascii_lowercase)
@@ -595,6 +643,22 @@ mod tests {
         // `@NotNull` is bean validation, not parsing.
         let t: Trigger = serde_norway::from_str("id: d\ntype: core.scheduleOnDates\n").unwrap();
         assert!(matches!(&t.kind, TriggerKind::ScheduleOnDates(s) if s.dates.is_none()));
+    }
+
+    /// Package 11e: `http.Trigger` is typed, keeps its fields and re-serialises.
+    #[test]
+    fn http_trigger_is_typed_and_round_trips() {
+        let yaml = "id: h\ntype: io.kestra.plugin.core.http.Trigger\nuri: https://x.test/a\ninterval: PT30S\nresponseCondition: \"{{ response.statusCode < 400 }}\"\nheaders:\n  A: b\noptions:\n  proxy: {}\n";
+        let t: Trigger = serde_norway::from_str(yaml).unwrap();
+        let TriggerKind::HttpTrigger(h) = &t.kind else {
+            panic!("expected HttpTrigger, got {:?}", t.kind)
+        };
+        assert_eq!(h.interval.as_deref(), Some("PT30S"));
+        assert!(h.options.is_some());
+        let out = serde_json::to_value(&t).unwrap();
+        assert_eq!(out["uri"], "https://x.test/a");
+        assert_eq!(out["interval"], "PT30S");
+        assert_eq!(out["headers"]["A"], "b");
     }
 
     /// Fix round 1 finding 2: `Schedule::cron` is `@NotNull` with no Java

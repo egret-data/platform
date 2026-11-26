@@ -8,7 +8,7 @@ use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use crate::models::{Schedule, TriggerKind};
+use crate::models::{HttpTrigger, Schedule, Trigger, TriggerKind};
 use crate::repo::{flow_cols, FlowRow};
 use crate::trigger::{
     tick, BackfillEnd, FixedClock, RecoverMissed, ScheduleTrigger, ScheduledExecution, TickOutcome,
@@ -241,10 +241,10 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
             return Ok(Fate::Errored);
         }
     };
-    let trigger = flow
-        .triggers
-        .iter()
-        .find(|t| t.id == c.trigger_id && super::sync::is_schedulable(&t.kind));
+    let trigger = flow.triggers.iter().find(|t| {
+        t.id == c.trigger_id
+            && (super::sync::is_schedulable(&t.kind) || super::sync::is_poller(&t.kind))
+    });
     // The source read under the lock is the authority and the row is a copy
     // (spec §4 point 5). When the copy says "on" and the source says "off" --
     // or no longer declares this schedule at all, or declares it with a cron
@@ -256,11 +256,18 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     // when a writer holds the flow row (see `resync`).
     let declared = trigger
         .filter(|t| !flow.disabled && !t.disabled)
-        .filter(|t| super::sync::kind_spec_key(&t.kind).as_deref() == Some(c.spec_key.as_str()));
+        .filter(|t| match &t.kind {
+            TriggerKind::HttpTrigger(h) => crate::trigger::http_trigger::spec_key(h) == c.spec_key,
+            kind => super::sync::kind_spec_key(kind).as_deref() == Some(c.spec_key.as_str()),
+        });
     let Some(trigger) = declared else {
         resync(at.conn(), c.flow_id).await?;
         return Ok(Fate::Frozen);
     };
+    // Package 11e: a polling trigger takes the interval path, not a date tick.
+    if let TriggerKind::HttpTrigger(h) = &trigger.kind {
+        return fire_http_tick(at, c, trigger, h).await;
+    }
     // A backfill belongs to a `Schedule` only (W7f §3.9); `schedule` is `None`
     // for a `ScheduleOnDates`, which has none to resume.
     let (schedule, trigger_inputs, trigger_type) = match &trigger.kind {
@@ -735,6 +742,52 @@ async fn record_error(conn: &mut PgConnection, c: &Claimed, why: &str) -> Result
     .await
     .map_err(db_err)?;
     Ok(())
+}
+
+/// Package 11e: a due `http.Trigger` is an interval tick. The poll (and any
+/// execution it fires) is [`poll_and_fire`]; the date then advances to
+/// `now + interval` in the same transaction (Kestra's
+/// `PollingTriggerInterface.computeNextEvaluationDate`). No `scheduled_date`.
+async fn fire_http_tick(
+    at: &mut Txn,
+    c: &Claimed,
+    trigger: &Trigger,
+    http: &HttpTrigger,
+) -> Result<Fate> {
+    let refused = crate::trigger::http_trigger::refusals(http);
+    if !refused.is_empty() {
+        take_off_queue(at.conn(), c, &refused.join("; ")).await?;
+        return Ok(Fate::Errored);
+    }
+    let interval = crate::trigger::http_trigger::interval(http)
+        .expect("a refusal-free trigger has a valid interval");
+    let fate = poll_and_fire(at, c, trigger, http).await?;
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $3, evaluated_at = $4, \
+                last_error = NULL, updated_at = now() \
+          WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(c.flow_id)
+    .bind(&c.trigger_id)
+    .bind(c.db_now + interval)
+    .bind(c.db_now)
+    .execute(at.conn())
+    .await
+    .map_err(db_err)?;
+    Ok(fate)
+}
+
+/// The seam Task 3 fills: poll the URL, evaluate `responseCondition`, and
+/// start an execution when it holds. Runs inside the claim's transaction,
+/// before the date advances. Returns `Fired` when it started one, `Skipped`
+/// when the tick was consumed without one. A no-op in Task 2.
+async fn poll_and_fire(
+    _at: &mut Txn,
+    _c: &Claimed,
+    _trigger: &Trigger,
+    _http: &HttpTrigger,
+) -> Result<Fate> {
+    Ok(Fate::Skipped)
 }
 
 /// Spec §4 point 6: a trigger that cannot be evaluated leaves the queue

@@ -114,6 +114,13 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         .copied()
         .filter(|t| is_schedulable(&t.kind))
         .collect();
+    // Package 11e: a polling `http.Trigger` shares the queue table, with
+    // `now + interval` as its date and no `scheduled_date` on its executions.
+    let pollers: Vec<&Trigger> = all_triggers
+        .iter()
+        .copied()
+        .filter(|t| matches!(t.kind, TriggerKind::HttpTrigger(_)))
+        .collect();
     let flow_triggers: Vec<&Trigger> = all_triggers
         .iter()
         .copied()
@@ -148,7 +155,11 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         .map(|b| (b.trigger_id.clone(), b))
         .collect();
 
-    let keep: Vec<String> = schedules.iter().map(|t| t.id.clone()).collect();
+    let keep: Vec<String> = schedules
+        .iter()
+        .chain(pollers.iter())
+        .map(|t| t.id.clone())
+        .collect();
     // Backfills belong to `Schedule` triggers only (W7f §3.9).
     let keep_backfill: Vec<String> = schedules
         .iter()
@@ -208,6 +219,50 @@ pub async fn sync(conn: &mut PgConnection, flow: &FlowRow, gone: bool) -> Result
         // after the author fixed it. The term is keyed on the date, not on
         // `last_error`, because `fire_due` also writes `last_error` for a
         // consumed tick, and re-initialising that row would drop its backlog.
+        sqlx::query(
+            "INSERT INTO workflow.triggers \
+               (flow_id, trigger_id, workspace_id, spec_key, disabled, next_evaluation_date, last_error) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (flow_id, trigger_id) DO UPDATE SET \
+               disabled = EXCLUDED.disabled, updated_at = now(), \
+               spec_key = EXCLUDED.spec_key, \
+               next_evaluation_date = CASE WHEN workflow.triggers.spec_key = EXCLUDED.spec_key \
+                      AND workflow.triggers.next_evaluation_date IS NOT NULL \
+                 THEN workflow.triggers.next_evaluation_date ELSE EXCLUDED.next_evaluation_date END, \
+               evaluated_at = CASE WHEN workflow.triggers.spec_key = EXCLUDED.spec_key \
+                      AND workflow.triggers.next_evaluation_date IS NOT NULL \
+                 THEN workflow.triggers.evaluated_at ELSE NULL END, \
+               last_error = CASE WHEN workflow.triggers.spec_key = EXCLUDED.spec_key \
+                      AND workflow.triggers.next_evaluation_date IS NOT NULL \
+                 THEN workflow.triggers.last_error ELSE EXCLUDED.last_error END",
+        )
+        .bind(flow.id)
+        .bind(&t.id)
+        .bind(flow.workspace_id)
+        .bind(&key)
+        .bind(disabled)
+        .bind(next)
+        .bind(err)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    }
+
+    for t in pollers {
+        let TriggerKind::HttpTrigger(h) = &t.kind else {
+            unreachable!("filtered to http triggers above")
+        };
+        let key = crate::trigger::http_trigger::spec_key(h);
+        let disabled = effective_disabled(flow_disabled, t.disabled, runtime_off(&t.id));
+        let refused = crate::trigger::http_trigger::refusals(h);
+        let (next, err) = if refused.is_empty() {
+            let interval = crate::trigger::http_trigger::interval(h)
+                .expect("a refusal-free trigger has a valid interval");
+            (Some(now + interval), None)
+        } else {
+            (None, Some(refused.join("; ")))
+        };
+        // Same keep-unless-changed rule as a schedule (see above).
         sqlx::query(
             "INSERT INTO workflow.triggers \
                (flow_id, trigger_id, workspace_id, spec_key, disabled, next_evaluation_date, last_error) \
@@ -661,6 +716,11 @@ pub(super) fn is_schedulable(kind: &TriggerKind) -> bool {
         kind,
         TriggerKind::Schedule(_) | TriggerKind::ScheduleOnDates(_)
     )
+}
+
+/// Package 11e: the polling kind that shares the queue table.
+pub(super) fn is_poller(kind: &TriggerKind) -> bool {
+    matches!(kind, TriggerKind::HttpTrigger(_))
 }
 
 /// The `spec_key` of a schedulable kind, `None` for any other.

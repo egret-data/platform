@@ -110,6 +110,7 @@
 pub mod depends_on;
 pub mod duration;
 pub mod flow;
+pub mod http_trigger;
 pub mod schedule;
 pub mod schedule_on_dates;
 pub mod webhook;

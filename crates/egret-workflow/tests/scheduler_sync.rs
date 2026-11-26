@@ -469,6 +469,7 @@ async fn a_webhook_or_flow_trigger_gets_no_row() {
             TriggerKind::ScheduleOnDates(_) => "schedule_on_dates",
             TriggerKind::Webhook(_) => "webhook",
             TriggerKind::Flow(_) => "flow",
+            TriggerKind::HttpTrigger(_) => "http_trigger",
             TriggerKind::Leaf { .. } => "leaf",
         })
         .collect();
