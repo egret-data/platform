@@ -180,11 +180,12 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
             }
             match (t, key) {
                 (SCHEDULE | WEBHOOK, "labels") => Some(Package(11)),
-                // A Schedule `when` (package 11b) and a Webhook `when`
-                // (package 11c) are honoured now, so neither has a lift.
-                (WEBHOOK, "wait" | "returnOutputs" | "responseContentType" | "responseCode") => {
-                    Some(Package(11))
-                }
+                // A Schedule `when` (package 11b), a Webhook `when` and the
+                // Webhook sync-response keys `wait`/`returnOutputs`/
+                // `responseContentType`/`responseCode` (package 11c) are
+                // honoured now, so none of them has a lift. `labels` keeps its
+                // lift even though the firing path renders it, exactly as the
+                // Schedule row does: it still warns at save time.
                 _ => None,
             }
         }
@@ -430,14 +431,6 @@ pub(crate) fn trigger_keys(t: &str) -> Vec<&'static str> {
 // Objects checked: the flow document, every task at every depth (paths are
 // `spec::path`'s, `tasks.a.b`), a task's or the flow's `retry`, every trigger.
 
-/// Webhook keys whose use the route refuses with a 409 (`webhook::Unsupported`).
-const WEBHOOK_REFUSED: &[&str] = &[
-    "wait",
-    "returnOutputs",
-    "responseContentType",
-    "responseCode",
-];
-
 #[derive(Clone, Copy)]
 enum Kind {
     Input,
@@ -465,7 +458,6 @@ pub(crate) fn findings(source: &str, model: &Flow, report: &mut ValidationReport
     Walk {
         report,
         seen: Seen::default(),
-        flow: model,
         reached: Vec::new(),
     }
     .flow(&flow);
@@ -509,7 +501,7 @@ fn after_execution_retry(flow: &Flow, report: &mut ValidationReport) {
 
 /// What the walk of `source` examined (the corpus test's floors).
 #[cfg(test)]
-pub(crate) fn seen(source: &str, flow: &Flow) -> Seen {
+pub(crate) fn seen(source: &str) -> Seen {
     let Ok(Value::Object(doc)) = serde_norway::from_str::<Value>(source) else {
         return Seen::default();
     };
@@ -517,7 +509,6 @@ pub(crate) fn seen(source: &str, flow: &Flow) -> Seen {
     let mut walk = Walk {
         report: &mut scratch,
         seen: Seen::default(),
-        flow,
         reached: Vec::new(),
     };
     walk.flow(&doc);
@@ -540,7 +531,6 @@ pub(crate) fn unpaired(source: &str, flow: &Flow) -> Vec<String> {
     let mut walk = Walk {
         report: &mut scratch,
         seen: Seen::default(),
-        flow,
         reached: Vec::new(),
     };
     walk.flow(&doc);
@@ -649,9 +639,6 @@ struct Walk<'a> {
     report: &'a mut ValidationReport,
     /// What the walk examined so far.
     seen: Seen,
-    /// The parsed model of the same source, for the predicates that read it
-    /// (`webhook::declared_unsupported`).
-    flow: &'a Flow,
     /// The path of every task the walk reached (for [`unpaired`]).
     reached: Vec<String>,
 }
@@ -708,12 +695,10 @@ impl Walk<'_> {
 
     /// A typed trigger's keys (spec 3.4). Read: the base keys and the kind's
     /// own. A key Kestra has and egret does not act on warns with its package
-    /// (`lift_of`); any other is `unknown_property`. Webhook `wait`,
-    /// `returnOutputs`, `responseContentType` and `responseCode` are said by
-    /// the predicate that refuses them below (`webhook::declared_unsupported`),
-    /// so each has one finding. (A Schedule `when` is honoured now, package
-    /// 11b, so it is neither skipped nor warned.) The predicate renders
-    /// nothing: it reads the parsed model only (spec 7).
+    /// (`lift_of`); any other is `unknown_property`. The Webhook sync-response
+    /// keys `wait`/`returnOutputs`/`responseContentType`/`responseCode` are
+    /// honoured now (package 11c Task 4) and are in `trigger_keys`, so each is
+    /// `allowed` and silent -- as a Schedule `when` has been since package 11b.
     fn trigger(&mut self, row: &str, id: &str, t: &serde_json::Map<String, Value>) {
         let allowed = |key: &str| {
             TRIGGER_BASE_KEYS.contains(&key)
@@ -724,9 +709,6 @@ impl Walk<'_> {
         let path = format!("triggers.{id}");
         for (key, value) in t {
             let key = key.as_str();
-            if row == WEBHOOK && WEBHOOK_REFUSED.contains(&key) {
-                continue;
-            }
             // Kestra's default is `false`; only a written `false` diverges (D16)
             // from egret, which never locks.
             if key == "allowConcurrent" && *value != Value::Bool(false) {
@@ -755,9 +737,6 @@ impl Walk<'_> {
                     path: format!("{path}.{key}"),
                 });
             }
-        }
-        if row == WEBHOOK {
-            self.webhook_refusals(id, &path);
         }
         // A Flow trigger's `dependsOn` entries are `Flow.Dependency`
         // (`k/core/plugin/core/trigger/Flow.java:364-386`); `flowRef` is
@@ -817,74 +796,6 @@ impl Walk<'_> {
                 ),
                 path: path.to_string(),
             });
-        }
-    }
-
-    /// Webhook `wait`, `returnOutputs`, `responseContentType`, `responseCode`:
-    /// the route answers 409 to every call that reaches one
-    /// (`webhook::declared_unsupported`). `declared_unsupported` names the first
-    /// only, so each key is asked on a copy that declares that key alone.
-    fn webhook_refusals(&mut self, id: &str, path: &str) {
-        use crate::models::{TriggerKind, Webhook};
-        use crate::trigger::webhook::declared_unsupported;
-        let Some(TriggerKind::Webhook(w)) = self
-            .flow
-            .triggers
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| &t.kind)
-        else {
-            return;
-        };
-        let blank = Webhook {
-            wait: false,
-            return_outputs: false,
-            response_content_type: None,
-            response_code: None,
-            ..w.clone()
-        };
-        let alone: [(&str, Webhook); 4] = [
-            (
-                "wait",
-                Webhook {
-                    wait: w.wait,
-                    ..blank.clone()
-                },
-            ),
-            (
-                "returnOutputs",
-                Webhook {
-                    return_outputs: w.return_outputs,
-                    ..blank.clone()
-                },
-            ),
-            (
-                "responseContentType",
-                Webhook {
-                    response_content_type: w.response_content_type.clone(),
-                    ..blank.clone()
-                },
-            ),
-            (
-                "responseCode",
-                Webhook {
-                    response_code: w.response_code.clone(),
-                    ..blank
-                },
-            ),
-        ];
-        for (key, only) in alone {
-            if let Some(u) = declared_unsupported(&only) {
-                self.report.warnings.push(Finding {
-                    code: "not_honoured",
-                    message: format!(
-                        "{}; every call to this webhook answers 409. {}",
-                        u.message(id),
-                        "Roadmap package #11 lifts it"
-                    ),
-                    path: format!("{path}.{key}"),
-                });
-            }
         }
     }
 
@@ -2136,41 +2047,24 @@ mod tests {
         assert_eq!(at(&r, "triggers.s")[0].code, "schedule_not_resolvable");
     }
 
+    /// Package 11c Task 4: the four sync-response keys are honoured now, so a
+    /// webhook declaring them draws **no** finding -- neither an error nor a
+    /// `not_honoured` warning -- exactly as a Schedule `when` has since 11b.
     #[test]
-    fn a_webhook_wait_warns_at_publish_that_every_call_answers_409() {
-        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: w\n    type: {HOOK}\n    key: k\n    wait: true\n"));
+    fn the_sync_response_webhook_keys_are_silent_at_publish() {
+        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: w\n    type: {HOOK}\n    key: k\n    wait: true\n    returnOutputs: true\n    responseContentType: text/plain\n    responseCode: 201\n"));
         assert!(r.errors.is_empty(), "{r:?}");
-        let w = r
-            .warnings
-            .iter()
-            .find(|w| w.path == "triggers.w.wait")
-            .unwrap_or_else(|| panic!("{r:?}"));
-        assert!(
-            w.message.contains("answers 409")
-                && w.message.ends_with("Roadmap package #11 lifts it"),
-            "{}",
-            w.message
-        );
-        assert_eq!(at(&r, "triggers.w.wait").len(), 1, "{r:?}");
-    }
-
-    #[test]
-    fn every_unsupported_webhook_key_is_warned_once_and_false_is_silent() {
-        let r = report(&format!("id: f\nnamespace: a.b\n{LOG}triggers:\n  - id: w\n    type: {HOOK}\n    key: k\n    wait: true\n    returnOutputs: true\n    responseContentType: text/plain\n    responseCode: 201\n  - id: q\n    type: {HOOK}\n    key: k2\n    wait: false\n    returnOutputs: false\n"));
         for key in [
             "wait",
             "returnOutputs",
             "responseContentType",
             "responseCode",
         ] {
-            assert_eq!(
-                at(&r, &format!("triggers.w.{key}")).len(),
-                1,
-                "{key}: {r:?}"
+            assert!(
+                at(&r, &format!("triggers.w.{key}")).is_empty(),
+                "{key} drew a finding though it is honoured now: {r:?}"
             );
         }
-        assert!(at(&r, "triggers.q.wait").is_empty(), "{r:?}");
-        assert!(at(&r, "triggers.q.returnOutputs").is_empty(), "{r:?}");
     }
 
     #[test]
@@ -2286,14 +2180,12 @@ mod tests {
         for (ty, key, want) in rows {
             assert_eq!(lift_of(Site::Input(ty), key), Some(want), "{ty}.{key}");
         }
-        // Trigger rows #11. A Schedule `when` (package 11b) and a Webhook
-        // `when` (package 11c) are honoured now, so neither is here.
+        // Trigger rows #11. A Schedule `when` (11b), a Webhook `when` and the
+        // Webhook sync-response keys `wait`/`returnOutputs`/
+        // `responseContentType`/`responseCode` (11c) are honoured now, so none
+        // of them is here; `labels` keeps its lift on both trigger kinds.
         for (t, key) in [
             (SCHED, "labels"),
-            (HOOK, "wait"),
-            (HOOK, "returnOutputs"),
-            (HOOK, "responseContentType"),
-            (HOOK, "responseCode"),
             (HOOK, "labels"),
             (SCHED, "stopAfter"),
             (SCHED, "failOnTriggerError"),
@@ -2895,7 +2787,7 @@ mod corpus {
                     continue;
                 };
                 parsed[n] += 1;
-                let s = super::seen(&src, &flow);
+                let s = super::seen(&src);
                 seen[n].triggers += s.triggers;
                 seen[n].inputs += s.inputs;
                 seen[n].outputs += s.outputs;

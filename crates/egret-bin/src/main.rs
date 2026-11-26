@@ -3728,6 +3728,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
             webhooks_enabled: config.workflow.webhooks_enabled,
         },
         follow_poll_interval: egret_workflow::http::follow::FOLLOW_POLL_INTERVAL,
+        webhook_wait_poll_interval: egret_workflow::webhook_routes::WEBHOOK_WAIT_POLL_INTERVAL,
+        webhook_wait_cap: egret_workflow::webhook_routes::WEBHOOK_WAIT_CAP,
     });
 
     // Data Apps query gateway (`POST /api/apps/query`). Same query engine `Arc`,

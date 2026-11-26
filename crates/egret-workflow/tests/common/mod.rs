@@ -442,6 +442,8 @@ fn app_with_dbs_and_pdp(
         // so a test that drives a RUNNING execution to terminal, or waits for a
         // log to drain, resolves in tens of milliseconds rather than seconds.
         follow_poll_interval: std::time::Duration::from_millis(20),
+        webhook_wait_poll_interval: std::time::Duration::from_millis(20),
+        webhook_wait_cap: egret_workflow::webhook_routes::WEBHOOK_WAIT_CAP,
     };
     let router = axum::Router::new()
         .nest("/api", egret_workflow::management_router())
@@ -840,6 +842,19 @@ pub async fn webhook_app(db: &Db) -> WebhookApp {
     .await
 }
 
+/// [`webhook_app`] with the `wait: true` cap supplied, so a "cap elapsed" test
+/// can reach the cap without the full wall-clock wait (package 11c Task 4).
+pub async fn webhook_app_with_wait_cap(db: &Db, cap: std::time::Duration) -> WebhookApp {
+    webhook_app_inner(
+        db,
+        std::sync::Arc::new(egret_workflow::WebhookGuard::new(
+            egret_workflow::WEBHOOK_MAX_CONCURRENCY,
+        )),
+        cap,
+    )
+    .await
+}
+
 /// [`webhook_app`] with the guard supplied, so a test can drive a bound it
 /// genuinely exceeds.
 ///
@@ -849,6 +864,14 @@ pub async fn webhook_app(db: &Db) -> WebhookApp {
 pub async fn webhook_app_with_guard(
     db: &Db,
     guard: std::sync::Arc<egret_workflow::WebhookGuard>,
+) -> WebhookApp {
+    webhook_app_inner(db, guard, egret_workflow::webhook_routes::WEBHOOK_WAIT_CAP).await
+}
+
+async fn webhook_app_inner(
+    db: &Db,
+    guard: std::sync::Arc<egret_workflow::WebhookGuard>,
+    webhook_wait_cap: std::time::Duration,
 ) -> WebhookApp {
     install_served_default();
     let sessions = egret_auth::session::SessionService::new(
@@ -881,6 +904,10 @@ pub async fn webhook_app_with_guard(
         export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
         trigger_flags: Default::default(),
         follow_poll_interval: egret_workflow::http::follow::FOLLOW_POLL_INTERVAL,
+        // A short poll so a `wait: true` test resolves in tens of milliseconds
+        // once the execution is driven to terminal; the cap is the caller's.
+        webhook_wait_poll_interval: std::time::Duration::from_millis(20),
+        webhook_wait_cap,
     };
     WebhookApp {
         router: axum::Router::new()

@@ -287,6 +287,16 @@ pub struct WorkflowState {
     /// field so a test can drive the loop in milliseconds, exactly as
     /// [`Self::upload_idle_timeout`] does.
     pub follow_poll_interval: std::time::Duration,
+    /// Package 11c Task 4: how often a `wait: true` webhook re-reads
+    /// `workflow.execution_is_idle` while it holds the response open --
+    /// [`crate::webhook_routes::WEBHOOK_WAIT_POLL_INTERVAL`] (1 s) in
+    /// production; a field so a test can drive the wait in milliseconds.
+    pub webhook_wait_poll_interval: std::time::Duration,
+    /// Package 11c Task 4: how long a `wait: true` webhook holds the response
+    /// open before degrading to the fire-and-forget shape --
+    /// [`crate::webhook_routes::WEBHOOK_WAIT_CAP`] (55 s) in production; a field
+    /// so a "cap elapsed" test can reach the cap without the wall-clock wait.
+    pub webhook_wait_cap: std::time::Duration,
 }
 
 impl FromRef<WorkflowState> for SessionService {

@@ -360,7 +360,11 @@ fn webhook_info(
     WebhookInfoDto {
         url_path,
         key_error,
-        unsupported: crate::trigger::webhook::declared_unsupported(w).map(|u| u.message(&t.id)),
+        // No webhook *declaration* is unsupported any more: the sync-response
+        // keys are implemented (package 11c Task 4), and `fetchType: STORE` /
+        // multipart are refused at request time by `build_output`, not from the
+        // declaration. So this UI hint is always `None` now.
+        unsupported: None,
     }
 }
 
@@ -727,6 +731,8 @@ mod tests {
             (w.url_path, w.key_error.as_deref()),
             (None, Some("the key does not render"))
         );
+        // Package 11c Task 4: `wait` is implemented, so a webhook declaring it
+        // is no longer flagged `unsupported`.
         let w = one(
             &format!("  - id: h\n    type: {WEBHOOK}\n    key: k\n    wait: true\n"),
             &st,
@@ -735,7 +741,7 @@ mod tests {
         )
         .webhook
         .unwrap();
-        assert!(w.unsupported.unwrap().contains("wait"));
+        assert!(w.unsupported.is_none());
     }
 
     #[test]
