@@ -586,3 +586,56 @@ async fn the_last_execution_per_trigger_is_served_by_its_index(pool: sqlx::PgPoo
         "{control}"
     );
 }
+
+/// Package 11d: `stopAfter` on a Flow trigger (an egret divergence: Kestra
+/// no-ops it). Once the listener's own execution settles in a `stopAfter`
+/// state, the switch row is written AND the listener row is off, so a second
+/// matching event does not fire it again.
+#[tokio::test]
+async fn flow_trigger_stop_after_disables_the_listener() {
+    let Some(fx) = fx().await else { return };
+    let up_src = plain("up");
+    let up = fx.flow(&up_src).await;
+    let listener = fx
+        .flow(&parsed(
+            "id: lis\nnamespace: w7e\ntriggers:\n  - id: on_done\n    type: io.kestra.plugin.core.trigger.Flow\n    states: [SUCCESS]\n    stopAfter: [SUCCESS]\n    when: \"{{ flow.id == 'up' }}\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+                .to_string(),
+        ))
+        .await;
+    fx.reconcile().await;
+
+    let first = fx.run(up, &up_src).await;
+    process_events(&fx.db.pool).await.expect("a pass");
+    assert_eq!(
+        common::fired_by(&fx.db, first).await.len(),
+        1,
+        "the listener fires once"
+    );
+    let child: Uuid =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE trigger_execution_id = $1")
+            .bind(first)
+            .fetch_one(&fx.db.pool)
+            .await
+            .unwrap();
+    common::drive_to(&fx.db, child, "SUCCESS").await;
+
+    assert_eq!(
+        common::switched_off(&fx.db, listener).await,
+        vec!["on_done"]
+    );
+    let off: bool = sqlx::query_scalar(
+        "SELECT disabled FROM workflow.flow_listeners WHERE flow_id = $1 AND trigger_id = 'on_done'",
+    )
+    .bind(listener)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert!(off, "the listener row is off");
+
+    let second = fx.run(up, &up_src).await;
+    process_events(&fx.db.pool).await.expect("a pass");
+    assert!(
+        common::fired_by(&fx.db, second).await.is_empty(),
+        "a disabled listener does not fire again"
+    );
+}

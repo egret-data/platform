@@ -333,6 +333,7 @@
 
 mod process;
 
+pub(crate) use process::FLOW_TYPE;
 pub use process::{
     process_events, process_events_with, sweep_expired_windows, EventReport, PassLimits,
     DEFAULT_RETRY_BACKOFF, DEPENDS_ON_REFUSED, MAX_ATTEMPTS, MAX_EVENTS_PER_PASS,
