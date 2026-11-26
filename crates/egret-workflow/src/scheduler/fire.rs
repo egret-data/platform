@@ -67,6 +67,11 @@ pub struct PassReport {
     /// A trigger whose backfill is paused **before** the pass is not claimed
     /// at all (W7f D7) and is counted nowhere.
     pub frozen: usize,
+    /// A due tick was held, nothing written: the trigger declares
+    /// `allowConcurrent: false` (Kestra's default) and an execution it
+    /// started is still live. The dates are left alone, so the tick is worked
+    /// off, one per completion, by a later pass. Silent: no `last_error`.
+    pub held: usize,
 }
 
 /// The claimed trigger and what the claim read with it, all under the row lock.
@@ -92,6 +97,8 @@ enum Fate {
     Skipped,
     Errored,
     Frozen,
+    /// `allowConcurrent: false` and a live execution of this trigger.
+    Held,
 }
 
 /// One pass: every due trigger evaluated at most once. Returns when none is
@@ -149,6 +156,7 @@ pub async fn fire_due(pool: &PgPool) -> Result<PassReport> {
             Fate::Skipped => report.skipped += 1,
             Fate::Errored => report.errored += 1,
             Fate::Frozen => report.frozen += 1,
+            Fate::Held => report.held += 1,
         }
     }
 }
@@ -270,6 +278,31 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     let backfill = super::backfill::read(at.conn(), c.flow_id, &c.trigger_id).await?;
     if backfill.as_ref().is_some_and(|b| b.paused) {
         return Ok(Fate::Frozen);
+    }
+
+    // Package 11d: `allowConcurrent` (Kestra default `false`) serialises a
+    // trigger's executions. A due tick is HELD -- not fired, not advanced --
+    // while any execution this trigger started is non-terminal; it is worked
+    // off one tick per completion. Derived, no stored lock: `execution_is_idle`
+    // (migration 0210) is the terminal test, its negation is "live". The
+    // trigger row lock the claim holds makes the read race-free against a
+    // second fire of the same trigger.
+    if !trigger.allow_concurrent {
+        let live: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM workflow.executions \
+               WHERE flow_id = $1 AND workspace_id = $2 \
+                 AND execution_trigger ->> 'id' = $3 \
+                 AND NOT workflow.execution_is_idle(id))",
+        )
+        .bind(c.flow_id)
+        .bind(c.workspace_id)
+        .bind(&c.trigger_id)
+        .fetch_one(at.conn())
+        .await
+        .map_err(db_err)?;
+        if live {
+            return Ok(Fate::Held);
+        }
     }
 
     // The schedule's `inputs:` overlaid by the backfill's, key by key; the

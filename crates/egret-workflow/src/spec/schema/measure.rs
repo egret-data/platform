@@ -96,15 +96,20 @@ const REFUSED_BY_NAME: &[&str] = &["unsupported_pause_property"];
 ///   read straight off the typed model (`trigger_keys`), so they need no entry
 ///   here.
 ///
-/// `stopAfter`, `logToFile`, `failOnTriggerError` and `allowConcurrent` are
-/// parsed by `models::Trigger` and read by nothing.
+/// Package 11d: a Schedule reads `allowConcurrent` (the derived hold in
+/// `scheduler::fire`), and all three trigger types read `stopAfter` at the
+/// settle seam (`worker::stop_after`: 11b Schedule, 11c Webhook, 11d Flow).
+/// `logToFile` and `failOnTriggerError` are parsed by `models::Trigger` and
+/// read by nothing; `allowConcurrent` on a Flow/Webhook is likewise not in
+/// this read-set.
 fn trigger_base_read(t: &str) -> Vec<&'static str> {
     let mut v = vec!["description", "disabled", "id", "type"];
     match t {
-        "io.kestra.plugin.core.trigger.Flow" | "io.kestra.plugin.core.trigger.Schedule" => {
-            v.extend(["labels", "when"])
+        "io.kestra.plugin.core.trigger.Flow" => v.extend(["labels", "stopAfter", "when"]),
+        "io.kestra.plugin.core.trigger.Schedule" => {
+            v.extend(["allowConcurrent", "labels", "stopAfter", "when"])
         }
-        "io.kestra.plugin.core.trigger.Webhook" => v.extend(["labels", "when"]),
+        "io.kestra.plugin.core.trigger.Webhook" => v.extend(["labels", "stopAfter", "when"]),
         _ => {}
     }
     v

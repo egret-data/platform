@@ -1,19 +1,25 @@
-//! Schedule and Webhook `stopAfter` (packages 11b, 11c): when an execution a
-//! Schedule or Webhook trigger started ends in one of the trigger's
-//! `stopAfter` states, the trigger is switched off.
+//! Schedule, Webhook and Flow `stopAfter` (packages 11b, 11c, 11d): when an
+//! execution a Schedule, Webhook or Flow trigger started ends in one of the
+//! trigger's `stopAfter` states, the trigger is switched off.
+//!
+//! Webhook and Flow are a deliberate egret divergence: Kestra's executor
+//! no-ops `stopAfter` for both (`sendTriggerExecutionTerminated` excludes
+//! them); egret honours it, so the declared property does what it says.
 //!
 //! The off switch is the manual one (`triggers::switch`): a
 //! `workflow.disabled_triggers` row, which `scheduler::sync` re-derives
 //! `workflow.triggers.disabled` from on every save and restart, so the
 //! disable survives them. `disabled_by` is NULL: a system disable. The
-//! trigger's own row is also written, so firing stops at once. Runs in the
-//! settle's transaction; the caller owns it.
+//! trigger's own row is also written, so firing stops at once; a Flow
+//! trigger's is its `workflow.flow_listeners` row. Runs in the settle's
+//! transaction; the caller owns it.
 
 use egret_core::{Error, Result};
 use sqlx::PgConnection;
 
 use super::claim::ExecutionCtx;
 use crate::executor::ExecutionState;
+use crate::flow_trigger::FLOW_TYPE;
 use crate::models::State;
 
 /// `execution_trigger.type` of a webhook-started execution.
@@ -40,11 +46,12 @@ pub(super) async fn on_terminal(
     let Some(trigger) = trigger else {
         return Ok(());
     };
-    // A webhook has no `workflow.triggers` row, so the UPDATE below is a
-    // no-op for it; the `disabled_triggers` row is what its route reads.
+    // A webhook or Flow trigger has no `workflow.triggers` row, so the UPDATE
+    // below is a no-op for it; the `disabled_triggers` row is what a webhook
+    // route reads, and a Flow trigger's listener row is disabled further down.
     if !matches!(
         trigger.get("type").and_then(|t| t.as_str()),
-        Some(crate::scheduler::SCHEDULE_TYPE | WEBHOOK_TYPE)
+        Some(crate::scheduler::SCHEDULE_TYPE | WEBHOOK_TYPE | FLOW_TYPE)
     ) {
         return Ok(());
     }
@@ -82,6 +89,18 @@ pub(super) async fn on_terminal(
     sqlx::query(
         "UPDATE workflow.triggers SET disabled = true, next_evaluation_date = NULL, \
          updated_at = now() WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow_id)
+    .bind(trigger_id)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    // A Flow trigger fires off `workflow.flow_listeners`, whose `disabled` is
+    // re-derived from `disabled_triggers` only at sync. Disable it now so the
+    // listener stops firing within this settle, as sync would on the next save.
+    sqlx::query(
+        "UPDATE workflow.flow_listeners SET disabled = true \
+           WHERE flow_id = $1 AND trigger_id = $2",
     )
     .bind(flow_id)
     .bind(trigger_id)

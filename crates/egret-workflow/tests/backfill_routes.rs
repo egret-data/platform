@@ -45,7 +45,7 @@ fn src(id: &str, triggers: &str) -> String {
 }
 
 fn schedule(id: &str) -> String {
-    format!("  - id: {id}\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n")
+    format!("  - id: {id}\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n    allowConcurrent: true\n")
 }
 
 struct Fx {
@@ -624,7 +624,7 @@ fn src_inputs(id: &str, inputs: &str, triggers: &str) -> String {
 const INPUTS: &str = "  - id: region\n    type: STRING\n    defaults: us\n  - id: req\n    type: STRING\n  - id: upload\n    type: FILE\n    required: false\n";
 
 fn cron(id: &str, cron: &str, extra: &str) -> String {
-    format!("  - id: {id}\n    type: {SCHEDULE}\n    cron: \"{cron}\"\n{extra}")
+    format!("  - id: {id}\n    type: {SCHEDULE}\n    cron: \"{cron}\"\n    allowConcurrent: true\n{extra}")
 }
 
 fn rfc(t: DateTime<Utc>) -> String {

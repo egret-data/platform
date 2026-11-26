@@ -34,7 +34,7 @@ const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
 /// before `triggers:`, `extra` is appended to the trigger (4-space indented).
 fn flow_yaml(id: &str, prelude: &str, extra: &str) -> String {
     let src = format!(
-        "id: {id}\nnamespace: w7f\n{prelude}triggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n{extra}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        "id: {id}\nnamespace: w7f\n{prelude}triggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n    allowConcurrent: true\n{extra}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     );
     egret_workflow::spec::parse(&src)
         .unwrap_or_else(|e| panic!("fixture must parse: {e:?}\n{src}"));
@@ -788,7 +788,7 @@ async fn a_refused_backfill_start_ends_the_backfill() {
 async fn a_paused_backfill_does_not_hold_back_a_sibling_schedule() {
     let Some(fx) = fx().await else { return };
     let src = format!(
-        "id: siblings\nnamespace: w7f\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n  - id: t\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        "id: siblings\nnamespace: w7f\ntriggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n    allowConcurrent: true\n  - id: t\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n    allowConcurrent: true\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     );
     let flow = fx.flow(&src).await;
     let w0 = fx.w0().await;

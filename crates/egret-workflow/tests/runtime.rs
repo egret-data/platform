@@ -1044,7 +1044,7 @@ fn the_config_default_working_timeout_equals_the_workers_own() {
 fn cron_flow(id: &str) -> String {
     format!(
         "id: {id}\nnamespace: t\ntriggers:\n  - id: s\n    type: io.kestra.plugin.core.trigger.Schedule\n\
-         \x20   cron: \"*/1 * * * *\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   cron: \"*/1 * * * *\"\n    allowConcurrent: true\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
          \x20   message: hi\n"
     )
 }
