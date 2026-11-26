@@ -7,7 +7,7 @@
  */
 
 /**
- * What a trigger is, as egret runs it: one of the three kinds it fires, or
+ * What a trigger is, as egret runs it: one of the kinds it fires, or
  * `other` (a `Leaf`: any other type, which egret never fires).
  */
 export type TriggerKindDto = typeof TriggerKindDto[keyof typeof TriggerKindDto];
@@ -17,5 +17,7 @@ export const TriggerKindDto = {
   schedule: 'schedule',
   webhook: 'webhook',
   flow: 'flow',
+  schedule_on_dates: 'schedule_on_dates',
+  http_trigger: 'http_trigger',
   other: 'other',
 } as const;

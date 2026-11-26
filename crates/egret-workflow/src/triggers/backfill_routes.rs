@@ -142,7 +142,7 @@ fn refusal_parts(r: &BackfillRefusal) -> (StatusCode, &'static str, String) {
         R::NotSupported => (
             conflict,
             BACKFILL_NOT_SUPPORTED,
-            "Only a Schedule trigger can be backfilled".to_string(),
+            "Only a cron Schedule trigger can be backfilled; ScheduleOnDates and http.Trigger triggers cannot".to_string(),
         ),
         R::TriggerDisabled => (
             conflict,

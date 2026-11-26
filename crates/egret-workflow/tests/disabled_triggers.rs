@@ -639,3 +639,44 @@ async fn flow_trigger_stop_after_disables_the_listener() {
         "a disabled listener does not fire again"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Package 11e Task 5: a switched-off `ScheduleOnDates` / `http.Trigger` is not
+// claimed, so it neither fires nor polls (the claim reads the same copy).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_claim_skips_a_switched_off_dates_or_http_trigger() {
+    let Some(fx) = fx().await else { return };
+    let dates = parsed(
+        "id: ondates\nnamespace: w11e\ntriggers:\n  - id: s\n    type: io.kestra.plugin.core.trigger.ScheduleOnDates\n    dates:\n      - \"2099-01-01T00:00:00Z\"\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n".to_string(),
+    );
+    let http = parsed(
+        "id: httppoll\nnamespace: w11e\ntriggers:\n  - id: s\n    type: io.kestra.plugin.core.http.Trigger\n    uri: https://example.test/health\n    interval: PT30S\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n".to_string(),
+    );
+    for src in [dates, http] {
+        let flow = fx.flow(&src).await;
+        common::switch_off(&fx.db, flow, "s").await;
+        sqlx::query(
+            "UPDATE workflow.triggers SET next_evaluation_date = '2026-01-01T00:00:00Z' \
+              WHERE flow_id = $1 AND trigger_id = 's'",
+        )
+        .bind(flow)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+        fx.reconcile().await;
+        let (due, disabled) = schedule_row(&fx.db, flow).await.expect("a row");
+        assert!(disabled, "control: reconcile copied the switch");
+        let due = due.expect("control: on the queue and overdue");
+
+        let report = fire_due(&fx.db.pool).await.expect("a pass");
+        assert_eq!(report, PassReport::default(), "nothing claimed: {report:?}");
+        assert_eq!(executions_of(&fx.db, flow).await, 0);
+        assert_eq!(
+            schedule_row(&fx.db, flow).await,
+            Some((Some(due), true)),
+            "no tick consumed"
+        );
+    }
+}

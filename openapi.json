@@ -64710,6 +64710,13 @@
             "type": "boolean",
             "description": "`true`: no next date; the schedule does not fire until a save\nre-initialises it (`last_error` says why)."
           },
+          "interval": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An `http.Trigger`'s authored polling `interval` (ISO-8601); `null` for\nevery other kind, and for an `http.Trigger` that sets none (60 s)."
+          },
           "missed_ticks": {
             "oneOf": [
               {
@@ -67571,11 +67578,13 @@
       },
       "TriggerKindDto": {
         "type": "string",
-        "description": "What a trigger is, as egret runs it: one of the three kinds it fires, or\n`other` (a `Leaf`: any other type, which egret never fires).",
+        "description": "What a trigger is, as egret runs it: one of the kinds it fires, or\n`other` (a `Leaf`: any other type, which egret never fires).",
         "enum": [
           "schedule",
           "webhook",
           "flow",
+          "schedule_on_dates",
+          "http_trigger",
           "other"
         ]
       },

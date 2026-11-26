@@ -27,6 +27,8 @@ const KIND_LABELS: Record<TriggerKindDto, string> = {
   schedule: "Schedule",
   webhook: "Webhook",
   flow: "Flow",
+  schedule_on_dates: "Schedule on dates",
+  http_trigger: "HTTP poll",
   other: "Other",
 };
 

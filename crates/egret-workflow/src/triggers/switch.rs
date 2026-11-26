@@ -127,14 +127,13 @@ pub(crate) async fn set_disabled(
         return Ok(Err(SwitchRefusal::NotFound));
     };
     let table = match &t.kind {
-        TriggerKind::Schedule(_) => StateTable::Schedule,
+        // `ScheduleOnDates` and `http.Trigger` ride the same queue row.
+        TriggerKind::Schedule(_)
+        | TriggerKind::ScheduleOnDates(_)
+        | TriggerKind::HttpTrigger(_) => StateTable::Schedule,
         TriggerKind::Flow(_) => StateTable::Listener,
         TriggerKind::Webhook(_) => StateTable::None,
-        // Package 11e: the switch route learns `ScheduleOnDates` at the
-        // reconcile task; until then it is unsupported, as before.
-        TriggerKind::ScheduleOnDates(_)
-        | TriggerKind::HttpTrigger(_)
-        | TriggerKind::Leaf { .. } => return Ok(Err(SwitchRefusal::NotSupported)),
+        TriggerKind::Leaf { .. } => return Ok(Err(SwitchRefusal::NotSupported)),
     };
 
     // 3. Off is always accepted (D4); on is refused while the YAML disables.

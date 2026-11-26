@@ -1862,8 +1862,7 @@ async fn schedule_on_dates_editing_the_dates_reinitialises_the_row() {
 
 const HTTP_TRIGGER: &str = "io.kestra.plugin.core.http.Trigger";
 
-/// A flow with one `http.Trigger` `s`. Parsed directly: publish still refuses
-/// the type until the reconcile task.
+/// A flow with one `http.Trigger` `s`.
 fn http_yaml(id: &str, extra: &str) -> String {
     let src = format!(
         "id: {id}\nnamespace: w12\ntriggers:\n  - id: s\n    type: {HTTP_TRIGGER}\n    uri: https://example.test/health\n{extra}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
