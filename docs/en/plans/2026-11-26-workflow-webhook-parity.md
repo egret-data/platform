@@ -49,11 +49,16 @@
 
 **Interfaces:**
 - Consumes: `models::Trigger.labels: Vec<Label>` (`models/trigger.rs:51`); the webhook `Output` record built at `handle()` (`build_output`).
-- Produces: a `fn render_webhook_labels(record: &Output /* or the serialised trigger Value */, labels: &[Label]) -> Result<Vec<Value>, String>` whose output is prepended to the flow labels carried into the new execution.
+- Produces: a `fn render_webhook_labels(record: &Output /* or the serialised trigger Value */, labels: &[Label]) -> Vec<Value>` whose output is prepended to the flow labels carried into the new execution. **Note: no `Result` — a label that fails to render is OMITTED (Kestra parity, Task 0), not an error.**
 
-- [ ] **Step 1: Write the failing test** — a webhook flow declaring `labels: [{env: prod}, {src: "{{ trigger.headers.x }}"}]` fires an execution carrying those labels (templated one rendered against the webhook record), **prepended** before the flow's own labels. Assert order: trigger labels, then flow labels.
+**Task 0 facts for this task:**
+- `start_with` hard-codes `labels: None` (`claim.rs:4155`), so the current `start_execution_with_trigger` path CANNOT carry trigger labels. Thread the rendered labels through: add a labels argument to `start_execution_with_trigger` (or a sibling wrapper) that sets `NewExecution.labels` to `Some(rendered_trigger_labels ++ flow_labels)`. The flow's own labels are applied downstream — confirm whether the new labels are PREPENDED to the flow set or passed as an override that the downstream merges; pin the exact field path before writing.
+- `render_trigger_labels` (`fire.rs:627`) is private and takes `&ScheduledExecution` — write a webhook variant/shared helper, do NOT call it directly.
+- Kestra OMITS a webhook label whose template fails to render and STILL starts the execution — the opposite of the Schedule fail-safe. Do not abort on a bad label.
+
+- [ ] **Step 1: Write the failing test** — a webhook flow declaring `labels: [{env: prod}, {src: "{{ trigger.headers.x }}"}]` fires an execution carrying those labels (templated one rendered against the webhook record), **prepended** before the flow's own labels. Assert order: trigger labels, then flow labels. Add a second case: a label with an unrenderable template is OMITTED and the execution still starts with the remaining labels.
 - [ ] **Step 2: Run it — FAIL** (webhook labels ignored today). Run: `cargo test -p egret-workflow --test webhook_route <name> -- --nocapture`. Expected: FAIL.
-- [ ] **Step 3: Implement** — in `handle()`, after `build_output` and before `start_execution_with_trigger`, render the trigger's `labels` against the webhook record (reuse the 11b `render_str` + `RenderContext` shape from `fire.rs:627`, binding the webhook record under `trigger`) and prepend to the labels the new execution receives. Flow labels unchanged. On render error, fail-safe exactly as 11b (record, do not fabricate), surfaced as the route's `InvalidInput`/`Conflict` per Task 0's 11b-matching convention.
+- [ ] **Step 3: Implement** — in `handle()`, after `build_output` and before `start_execution_with_trigger`, render the trigger's `labels` against the webhook record (reuse the 11b `render_str` + `RenderContext` shape from `fire.rs:627`, binding the webhook record under `trigger`), **omitting any label that fails to render** (Kestra parity), and carry them into the new execution PREPENDED before the flow labels via the threaded labels path (see Task 0 facts — `start_with`'s `labels: None` must become the rendered set). Flow labels unchanged.
 - [ ] **Step 4: Run it — PASS** (+ scoped `--test routes --test execution_timestamps --test webhook_route`).
 - [ ] **Step 5: Commit** `feat(workflow): Webhook trigger labels on the fired execution`.
 
@@ -61,21 +66,19 @@
 
 ### Task 2: `stopAfter` — disable the webhook trigger after a matching terminal
 
-**Files:** `worker/stop_after.rs` `on_terminal` (`:40`, the `type != SCHEDULE_TYPE` gate); `webhook_routes.rs` `handle()` (after the flow-disabled check at `:603`). Tests: `tests/stop_after.rs`, `tests/webhook_route.rs`, `tests/disabled_triggers.rs`.
+**Files:** `worker/stop_after.rs` `on_terminal` (`:40`, the `type != SCHEDULE_TYPE` gate) + module doc (`:1`). Tests: `tests/stop_after.rs`, `tests/webhook_route.rs`, `tests/disabled_triggers.rs`.
+
+**Task 0 facts (SIMPLIFICATION — no route change):** The webhook route **already** rejects a disabled trigger with a 409: it checks the YAML `disabled` flag (`webhook_routes.rs:561`) AND `workflow.disabled_triggers` (`:574-588`). A webhook has **no `workflow.triggers` row**, so `on_terminal`'s `UPDATE workflow.triggers` (`stop_after.rs:74`) is a harmless 0-row no-op; what disables the webhook is `on_terminal`'s `INSERT INTO workflow.disabled_triggers` (`:64`), which is exactly the table the route reads. **So the ONLY change is opening the type gate.** Do NOT add a route check — it already exists and a `triggers.disabled` read would hit no row.
 
 **Interfaces:**
-- Consumes: `on_terminal`'s existing body (reads `execution_trigger`, parses `ctx.source`, finds the declared trigger, checks `stop_after`, writes both disable mechanisms). The webhook type string `io.kestra.plugin.core.trigger.Webhook` (`keys.rs:109` `WEBHOOK`).
-- Produces: `on_terminal` now disables Schedule **or** Webhook triggers; the webhook route rejects a disabled webhook trigger with a 409.
+- Consumes: `on_terminal`'s existing body (reads `execution_trigger`, parses `ctx.source`, finds the declared trigger, checks `stop_after`, INSERTs `disabled_triggers` + UPDATEs `triggers`). The webhook type string `io.kestra.plugin.core.trigger.Webhook` (`keys.rs:109` `WEBHOOK`). The webhook `execution_trigger.type` is that same string (set at `webhook_routes.rs` from `trigger.r#type`).
+- Produces: `on_terminal` disables Schedule **or** Webhook triggers; no interface change.
 
-- [ ] **Step 1a: Write the failing test (hook)** — an execution started by a **Webhook** trigger reaching a terminal ∈ `stopAfter` (e.g. `[FAILED]`) disables that trigger (`workflow.triggers.disabled = true` + a `workflow.disabled_triggers` row); a non-matching terminal leaves it enabled; a non-trigger execution disables nothing.
-- [ ] **Step 2a: Run it — FAIL** (gate rejects non-Schedule). Run: `cargo test -p egret-workflow --test stop_after <name> -- --nocapture`.
-- [ ] **Step 3a: Implement** — generalise the `:40` gate from `== Some(SCHEDULE_TYPE)` to accept Schedule or Webhook (add a `WEBHOOK_TYPE`/reuse `keys::WEBHOOK`); the rest of `on_terminal` is type-agnostic (nulling `next_evaluation_date` is a harmless no-op for a webhook). Update the module doc-comment (`:1`) to say Schedule **and** Webhook.
-- [ ] **Step 4a: Run it — PASS.**
-- [ ] **Step 1b: Write the failing test (route gate)** — after a webhook trigger is disabled (row in `workflow.triggers` with `disabled = true`), a `POST` to its key returns **409** (not a fired execution); an enabled trigger still fires.
-- [ ] **Step 2b: Run it — FAIL** (`handle()` checks only flow-disabled today). Run: `cargo test -p egret-workflow --test webhook_route <name> -- --nocapture`.
-- [ ] **Step 3b: Implement** — in `handle()`, after the flow-disabled check (`:603`), read `workflow.triggers.disabled` for this `(flow_id, trigger_id)` and return `Error::Conflict` when disabled. Keep the message distinct from the flow-disabled one.
-- [ ] **Step 4b: Run it — PASS** (+ scoped `--test routes --test execution_timestamps --test webhook_route --test stop_after --test disabled_triggers`).
-- [ ] **Step 5: Commit** `feat(workflow): Webhook stopAfter disables the trigger and the route rejects it`.
+- [ ] **Step 1: Write the failing test** — an execution started by a **Webhook** trigger reaching a terminal ∈ `stopAfter` (e.g. `[FAILED]`) writes a `workflow.disabled_triggers` row for that `(flow_id, trigger_id)`, and a subsequent `POST` to the webhook key returns **409**; a non-matching terminal writes no row and the key still fires; a non-trigger execution disables nothing.
+- [ ] **Step 2: Run it — FAIL** (gate rejects non-Schedule). Run: `cargo test -p egret-workflow --test stop_after <name> -- --nocapture` (and `--test webhook_route` for the 409 half).
+- [ ] **Step 3: Implement** — generalise the `:40` gate from `== Some(SCHEDULE_TYPE)` to accept Schedule **or** Webhook (add a `WEBHOOK_TYPE` const / reuse `keys::WEBHOOK`); the rest of `on_terminal` is type-agnostic (the `triggers` UPDATE is a harmless no-op for a webhook). Update the module doc-comment (`:1`) to say Schedule **and** Webhook.
+- [ ] **Step 4: Run it — PASS** (+ scoped `--test routes --test execution_timestamps --test webhook_route --test stop_after --test disabled_triggers`).
+- [ ] **Step 5: Commit** `feat(workflow): Webhook stopAfter disables the trigger via on_terminal`.
 
 ---
 
@@ -83,15 +86,17 @@
 
 **Files:** `webhook_routes.rs` `handle()` (after the key match, before start); `spec/keys.rs` `lift_of` (`:185`); `spec/validate.rs` + `property-treatment.json` + README (census). Test: `tests/webhook_route.rs`.
 
-**Interfaces:**
-- Consumes: `models::Trigger.when: Option<Property<String>>` (`models/trigger.rs:49`, default `"true"`); the webhook record for the render context; Task 0's arm decision.
-- Produces (arm a): a falsy rendered `when` suppresses execution creation and returns the Task-0 status/body; (arm b): `when` parsed and documented as an accepted no-op. Either arm drops the `not_honoured` warning.
+**Task 0 decision — ARM (a), very high confidence.** Kestra's `WebhookService.newExecution` calls `conditionService.isValid(trigger, flow, runContext)`. A falsy `when` returns **HTTP 204 with an empty body and no execution**; a `when` that FAILS to render **also** returns 204 (not an error); `when` is checked **before** the `inputs` render.
 
-- [ ] **Step 1: Write the failing test** — **arm (a):** a webhook flow with `when: "false"` (and a templated falsy case) answered per Task 0 **without** creating an execution; `when: "true"` fires normally; a `when` render error fails **safe** (no execution, named 4xx). **arm (b):** `when: "false"` still fires (no-op), asserted against Task 0's measured Kestra behaviour. Pick the arm Task 0 pinned.
+**Interfaces:**
+- Consumes: `models::Trigger.when: Option<Property<String>>` (`models/trigger.rs:49`, default `"true"`); the webhook record `{body, headers, parameters, uri}` for the render context (the 11a binding).
+- Produces: a falsy (or unrenderable) `when` makes `handle()` return `StatusCode::NO_CONTENT` (204, empty body) and start no execution; a truthy `when` proceeds as today.
+
+- [ ] **Step 1: Write the failing test** — a webhook flow with `when: "false"` returns **204** and creates **no** execution; a templated falsy `when` (e.g. `when: "{{ trigger.headers.x == 'no' }}"` with a matching header) returns 204; an unrenderable `when` (`when: "{{ nonexistent.deep.ref }}"`) ALSO returns 204 with no execution; `when: "true"` (and the default absent `when`) fires normally. Place the `when` check so a falsy `when` short-circuits **before** the `inputs` render (Kestra order).
 - [ ] **Step 2: Run it — FAIL.** Run: `cargo test -p egret-workflow --test webhook_route <name> -- --nocapture`.
-- [ ] **Step 3: Implement** — per Task 0's arm. Arm (a): after the key matches, render `when` against the webhook record `{body, headers, parameters, uri}` (confined engine, the 11a binding); if falsy, return the Task-0 response and do not start; render error → fail-safe. Arm (b): leave the runtime untouched, keep parsing. **Both:** change `keys.rs` `lift_of` `(WEBHOOK,"when")` (`:185`) off `Package(11)` (arm a: honoured → drop the lift so it no longer warns, matching how 11b dropped Schedule `when`; arm b: whatever Task 0's census says) and update `property-treatment.json` + README `### Result` count + the drift-recount note. LIFT-REFUSAL grep first.
+- [ ] **Step 3: Implement** — in `handle()`, after the key matches and the disabled checks, **before** `build_output`/`inputs`, render `when` against the webhook record (confined engine, the 11a binding). If the rendered value is falsy OR the render fails, return `Ok((StatusCode::NO_CONTENT, ()).into_response())` (204, empty body) and start no execution. A truthy `when` (including the `"true"` default) proceeds unchanged. Then update the census: `keys.rs` `lift_of` `(WEBHOOK,"when")` (`:185`) — follow the 11b discipline (a request-time-honoured key: regenerate `property-treatment.json` via the measure tool so the webhook `when` is reclassified, and keep/drop `lift_of` exactly as the regenerated golden + the validate-vs-runtime rule require — mirror how 11b handled Schedule `when`/`labels`). Update `property-treatment.json` + README `### Result` count + the drift-recount note from the measure tool's output, not by hand. LIFT-REFUSAL grep first (the `when` warning + corpus).
 - [ ] **Step 4: Run it — PASS** (+ scoped `--test routes --test execution_timestamps --test webhook_route --test flow_schema`).
-- [ ] **Step 5: Commit** `feat(workflow): honour Webhook when:` (arm a) or `feat(workflow): accept Webhook when as an inert no-op (Kestra parity)` (arm b).
+- [ ] **Step 5: Commit** `feat(workflow): honour Webhook when: (204 on a falsy condition)`.
 
 ---
 
@@ -99,16 +104,23 @@
 
 **Files:** `trigger/webhook.rs` `declared_unsupported` (`:348`, lift the four keys); `webhook_routes.rs` `handle()` (`:618` refusal removed; add the poll + response); `spec/keys.rs` `WEBHOOK_REFUSED` (`:435`, drop the four keys) + `lift_of` (`:186`); `property-treatment.json` + README (census). Test: `tests/webhook_route.rs`.
 
-**Interfaces:**
-- Consumes: `models::Webhook.{wait, return_outputs, response_content_type, response_code}` (`models/trigger.rs:164-170`); the execution id from `start_execution_with_trigger` (`claim.rs:4085`); `workflow.executions.state` + the outputs source Task 0 pinned; `RunState::is_terminal`.
-- Produces: `wait: true` holds the response until terminal (or the Task-0 timeout) then answers with the execution's outputs/code/content-type; `wait: false` unchanged.
+**Task 0 facts (pinned from Kestra rc13 source):**
+- **Wait has NO Kestra timeout** (`followExecution().last()`). egret must pick its OWN documented cap (a `const`) and document the divergence — Kestra waits forever, egret bounds it.
+- **"Terminal" = `workflow.execution_is_idle(id)`** (SQL function, migration 0210), not a hand-rolled state check.
+- **responseCode:** default = **500 if the terminal state is FAILED, else 200** (only FAILED → 500). A declared `responseCode` is rendered against the TERMINAL execution context (so `{{ outputs.<task> }}` resolves — task outputs come from `workflow.task_runs.outputs`). It applies **even without `returnOutputs`**. An invalid rendered code → **500 with an empty body**.
+- **returnOutputs body:** the **bare flow-level outputs map** — `workflow.executions.outputs jsonb` (migration 0214; NULL = none; SECRET values stored as `******`). JSON by default; `text/plain` **only** when `responseContentType == "text/plain"` exactly. Without `returnOutputs`, the body is the `WebhookResponse` of the terminal run.
+- **egret read:** `SELECT state, outputs, workflow.execution_is_idle(id) FROM workflow.executions WHERE id = $1 AND workspace_id = $2`.
 
-- [ ] **Step 1: Write the failing tests** — (a) a `wait: true` webhook whose flow terminates: the response body carries the terminal `outputs` when `returnOutputs: true`, the status is the rendered `responseCode` (or the Task-0 default), the `Content-Type` is `responseContentType` when set; (b) `wait: true` whose flow does not terminate within the timeout → the Task-0 timeout response; (c) `wait: false` (default) still returns `state: "CREATED"` immediately, fire-and-forget. (Drive the executor so the fired execution actually reaches terminal — mirror the `tests/webhook_route.rs` + executor harness the scheduler tests use.)
+**Interfaces:**
+- Consumes: `models::Webhook.{wait, return_outputs, response_content_type, response_code}` (`models/trigger.rs:164-170`); the execution id from `start_execution_with_trigger` (`claim.rs:4085`); the read above; `workflow.task_runs.outputs` for a declared `responseCode` template.
+- Produces: `wait: true` holds the response until `execution_is_idle` (or the egret cap) then answers with the execution's outputs/code/content-type; `wait: false` unchanged.
+
+- [ ] **Step 1: Write the failing tests** — (a) a `wait: true` + `returnOutputs: true` webhook whose flow terminates SUCCESS: body = the flow's bare `outputs` map, status 200; (b) a `wait: true` flow that terminates FAILED with no declared `responseCode`: status **500**; (c) a declared `responseCode: "{{ outputs.x.v }}"` rendered against the terminal context → that status, even without `returnOutputs`; (d) `responseContentType: "text/plain"` → `Content-Type: text/plain`; (e) `wait: false` (default) still returns `state: "CREATED"` immediately (fire-and-forget). Drive the executor so the fired execution actually reaches terminal — mirror the executor harness the scheduler/webhook tests use.
 - [ ] **Step 2: Run it — FAIL** (409 refusal today). Run: `cargo test -p egret-workflow --test webhook_route <name> -- --nocapture`.
 - [ ] **Step 3: Implement** —
-  1. Remove `Wait`/`ReturnOutputs`/`ResponseContentType`/`ResponseCode` from `declared_unsupported` (`trigger/webhook.rs:348`) — keep `StoreBody`/`Multipart`. Drop them from `WEBHOOK_REFUSED` (`keys.rs:435`) and adjust `lift_of` (`:186`). LIFT-REFUSAL grep first.
-  2. In `handle()`, after `start_execution_with_trigger`, branch on `webhook.wait`. `false` → today's `WebhookResponse { state: "CREATED" }`, unchanged. `true` → a bounded poll: loop reading `SELECT state[, outputs] FROM workflow.executions WHERE id = $1` every FIXED_INTERVAL until `RunState::is_terminal`, bounded by the Task-0 max-wait. On terminal: build the response with `responseCode` (render `Property<i32>` → status, else Task-0 default), body = terminal `outputs` when `return_outputs` (Task-0 source) else the normal body, `Content-Type` from `response_content_type`. On timeout: the Task-0 response; the execution keeps running.
-  3. Interval + max-wait are documented `const`s. No `LISTEN`/`NOTIFY`.
+  1. Remove `Wait`/`ReturnOutputs`/`ResponseContentType`/`ResponseCode` from `declared_unsupported` (`trigger/webhook.rs:348`) — KEEP `StoreBody`/`Multipart`. Drop them from `WEBHOOK_REFUSED` (`keys.rs:435`) and adjust `lift_of` (`:186`) + regenerate `property-treatment.json` via the measure tool + README count. LIFT-REFUSAL grep first.
+  2. In `handle()`, after `start_execution_with_trigger`, branch on `webhook.wait`. `false` → today's `WebhookResponse { state: "CREATED" }`, unchanged. `true` → a bounded poll: loop the read above every FIXED_INTERVAL until `execution_is_idle`, bounded by the egret cap `const`. On terminal: status = rendered `responseCode` against the terminal context if declared (else 500-if-FAILED-else-200; invalid render → 500 empty body); body = the bare `outputs` map when `return_outputs` (NULL → empty), else the terminal `WebhookResponse`; `Content-Type` = `response_content_type` (`text/plain` toggles the outputs serialisation per Task 0). On hitting the egret cap before terminal: document and return a defined response (the execution keeps running) — pin the exact status in the docs (Task 5).
+  3. Interval + cap are documented `const`s. No `LISTEN`/`NOTIFY`.
 - [ ] **Step 4: Run it — PASS** (+ scoped `--test routes --test execution_timestamps --test webhook_route --test flow_schema`).
 - [ ] **Step 5: Commit** `feat(workflow): synchronous Webhook response (wait/returnOutputs/responseContentType/responseCode)`.
 
