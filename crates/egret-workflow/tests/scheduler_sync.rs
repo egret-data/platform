@@ -408,16 +408,33 @@ async fn a_schedule_that_never_fires_is_stored_off_queue_with_its_reason() {
     assert_eq!(err, None);
 }
 
+/// `lateMaximumDelay` is honoured: the schedule syncs onto the queue with no
+/// refusal recorded.
+#[tokio::test]
+async fn a_schedule_with_a_late_maximum_delay_is_queued_not_refused() {
+    let Some(fx) = fx().await else { return };
+    let ok = flow_yaml(
+        "",
+        &schedule("s", "0 2 * * *", "    lateMaximumDelay: PT1H\n"),
+        "hi",
+    );
+    let flow = fx.create(&ok).await;
+    let (next, _, err) = row(&fx.db, flow.id, "s").await.expect("a row");
+    assert!(next.is_some(), "on the queue");
+    assert_eq!(err, None);
+}
+
 /// Written before the `IS NOT NULL` term existed in the upsert, and watched
-/// failing against it (see the task report). `lateMaximumDelay` is refused by
-/// `resolve` but is not part of `spec_key`, so without the term the fix would
-/// leave the row off the queue for ever.
+/// failing against it (see the task report). A malformed `lateMaximumDelay` is
+/// refused by `resolve` but is not part of `spec_key`, so without the term the
+/// fix would leave the row off the queue for ever. (This used `when` as the
+/// refused control until package 11b honoured it.)
 #[tokio::test]
 async fn fixing_a_refused_schedule_puts_it_back_on_the_queue() {
     let Some(fx) = fx().await else { return };
     let refused = flow_yaml(
         "",
-        &schedule("s", "0 2 * * *", "    lateMaximumDelay: PT1H\n"),
+        &schedule("s", "0 2 * * *", "    lateMaximumDelay: banana\n"),
         "hi",
     );
     let flow = fx.create(&refused).await;
@@ -1116,6 +1133,7 @@ async fn a_trigger_off_the_queue_is_re_queued_at_the_current_tick() {
 
 #[tokio::test]
 async fn an_unparsable_source_keeps_the_backfill_and_a_fix_re_derives() {
+    let _g = RECOVER.lock().await;
     let Some(fx) = fx().await else { return };
     let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
     let w0 = origin(&fx.db).await;
@@ -1230,6 +1248,7 @@ async fn removing_a_kind_change_and_a_soft_delete_delete_the_backfills() {
 
 #[tokio::test]
 async fn reconcile_over_an_unchanged_backfill_changes_nothing() {
+    let _g = RECOVER.lock().await;
     let Some(fx) = fx().await else { return };
     let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
     let w0 = origin(&fx.db).await;
@@ -1292,9 +1311,10 @@ async fn a_re_snap_with_no_tick_keeps_the_stored_date() {
     );
 }
 
-/// Spec §3.7: a schedule that no longer resolves (`lateMaximumDelay`) is off
-/// the queue as before, and its backfill is kept and frozen; the save that
-/// resolves again re-derives from it.
+/// Spec §3.7: a schedule that no longer resolves (a malformed
+/// `lateMaximumDelay`) is off the queue as before, and its backfill is kept and
+/// frozen; the save that resolves again re-derives from it. (This used `when`
+/// as the refused control until package 11b honoured it.)
 #[tokio::test]
 async fn a_schedule_that_no_longer_resolves_freezes_its_backfill() {
     let Some(fx) = fx().await else { return };
@@ -1305,13 +1325,13 @@ async fn a_schedule_that_no_longer_resolves_freezes_its_backfill() {
 
     let refused = flow_yaml(
         "",
-        &schedule("s", "*/2 * * * *", "    lateMaximumDelay: PT1H\n"),
+        &schedule("s", "*/2 * * * *", "    lateMaximumDelay: banana\n"),
         "hi",
     );
     let t = &parses(&refused).triggers[0];
     assert!(
         egret_workflow::trigger::ScheduleTrigger::resolve(t).is_err(),
-        "control: `lateMaximumDelay` is refused"
+        "control: a malformed `lateMaximumDelay` is refused"
     );
     fx.update(flow.id, &refused).await;
     let (next, _, err) = queue(&fx.db, flow.id, "s").await.expect("the row");
@@ -1397,4 +1417,170 @@ async fn the_cap_counts_the_ticks_already_done() {
             );
         }
     }
+}
+
+// ---- recoverMissedSchedules at scheduler start ----
+
+/// `reconcile` is global (it recovers every live flow), so a concurrent
+/// reconcile would recover the flow of the "a save does not recover" test;
+/// every test that calls `reconcile` takes this lock.
+static RECOVER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn recover_flow(fx: &Fx, extra: &str) -> (Uuid, DateTime<Utc>) {
+    recover_flow_as(fx, "f", extra).await
+}
+
+async fn recover_flow_as(fx: &Fx, id: &str, extra: &str) -> (Uuid, DateTime<Utc>) {
+    let flow = fx
+        .create_as(id, &flow_yaml("", &schedule("s", "* * * * *", extra), "hi"))
+        .await;
+    let past = origin(&fx.db).await;
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $3, evaluated_at = $3 \
+         WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow.id)
+    .bind("s")
+    .bind(past)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    (flow.id, past)
+}
+
+async fn reconcile_now(fx: &Fx) {
+    egret_workflow::scheduler::reconcile(&fx.db.pool)
+        .await
+        .expect("reconcile");
+}
+
+async fn next_date(fx: &Fx, flow: Uuid) -> DateTime<Utc> {
+    queue(&fx.db, flow, "s").await.unwrap().0.unwrap()
+}
+
+#[tokio::test]
+async fn recover_none_reseeds_from_now_at_start() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let (flow, _) = recover_flow(&fx, "    recoverMissedSchedules: NONE\n").await;
+    reconcile_now(&fx).await;
+    let now = db_now(&fx.db).await;
+    let d = next_date(&fx, flow).await;
+    assert!(
+        d > now - Duration::seconds(5),
+        "skipped every missed tick: {d}"
+    );
+    assert!(d <= now + Duration::minutes(1) + Duration::seconds(5));
+}
+
+#[tokio::test]
+async fn recover_last_jumps_to_the_most_recent_missed_tick() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let (flow, past) = recover_flow(&fx, "    recoverMissedSchedules: LAST\n").await;
+    reconcile_now(&fx).await;
+    let now = db_now(&fx.db).await;
+    let d = next_date(&fx, flow).await;
+    assert!(d > past && d <= now, "last missed tick: {d}");
+    assert!(d > now - Duration::minutes(1) - Duration::seconds(5));
+}
+
+#[tokio::test]
+async fn recover_all_and_absent_keep_the_missed_date() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let (a, past_a) = recover_flow(&fx, "    recoverMissedSchedules: ALL\n").await;
+    let (b, past_b) = recover_flow_as(&fx, "g", "").await;
+    reconcile_now(&fx).await;
+    assert_eq!(next_date(&fx, a).await, past_a);
+    assert_eq!(next_date(&fx, b).await, past_b);
+}
+
+#[tokio::test]
+async fn recover_leaves_a_future_date_alone_and_is_start_only() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .create(&flow_yaml(
+            "",
+            &schedule("s", "* * * * *", "    recoverMissedSchedules: NONE\n"),
+            "hi",
+        ))
+        .await;
+    let before = next_date(&fx, flow.id).await;
+    reconcile_now(&fx).await;
+    assert_eq!(
+        next_date(&fx, flow.id).await,
+        before,
+        "not missed: untouched"
+    );
+
+    // A save with a stale date does not re-apply recover: only reconcile does.
+    set_sentinel(&fx.db, flow.id, "s").await;
+    fx.update(
+        flow.id,
+        &flow_yaml(
+            "",
+            &schedule("s", "* * * * *", "    recoverMissedSchedules: NONE\n"),
+            "changed",
+        ),
+    )
+    .await;
+    assert_eq!(
+        next_date(&fx, flow.id).await,
+        sentinel(),
+        "save: no recover"
+    );
+}
+
+#[tokio::test]
+async fn recover_skips_a_trigger_with_an_active_backfill() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .create(&flow_yaml(
+            "",
+            &schedule("s", "* * * * *", "    recoverMissedSchedules: NONE\n"),
+            "hi",
+        ))
+        .await;
+    let w0 = origin(&fx.db).await;
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, w0).await;
+    reconcile_now(&fx).await;
+    // The backfill's own resume (sync's re-derive to its next undone tick),
+    // not NONE's reseed to now.
+    assert_eq!(
+        next_date(&fx, flow.id).await,
+        w0 + Duration::minutes(3),
+        "backfill keeps its own resume"
+    );
+}
+
+/// The switch route's state: enabled in YAML, a `disabled_triggers` row, and a
+/// non-null (past) date -- the only disabled state still on the queue by date.
+#[tokio::test]
+async fn recover_skips_a_switch_disabled_trigger() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let (flow, past) = recover_flow(&fx, "    recoverMissedSchedules: NONE\n").await;
+    sqlx::query(
+        "INSERT INTO workflow.disabled_triggers (flow_id, trigger_id, workspace_id) \
+         VALUES ($1, 's', $2)",
+    )
+    .bind(flow)
+    .bind(fx.ws)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    reconcile_now(&fx).await;
+    let (date, disabled): (Option<DateTime<Utc>>, bool) = sqlx::query_as(
+        "SELECT next_evaluation_date, disabled FROM workflow.triggers \
+         WHERE flow_id = $1 AND trigger_id = 's'",
+    )
+    .bind(flow)
+    .fetch_one(&fx.db.pool)
+    .await
+    .unwrap();
+    assert!(disabled, "control: sync kept the switch-off");
+    assert_eq!(date, Some(past), "disabled: not recovered");
 }

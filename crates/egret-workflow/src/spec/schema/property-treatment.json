@@ -1379,8 +1379,8 @@
       "failOnTriggerError": "ignored",
       "id": "honoured",
       "inputs": "honoured",
-      "labels": "ignored",
-      "lateMaximumDelay": "refused",
+      "labels": "honoured",
+      "lateMaximumDelay": "honoured",
       "logLevel": "ignored",
       "logToFile": "ignored",
       "policyRefs": "ignored",
@@ -1389,7 +1389,7 @@
       "timezone": "honoured",
       "type": "honoured",
       "version": "ignored",
-      "when": "refused",
+      "when": "honoured",
       "withSeconds": "honoured",
       "workerSelector": "ignored"
     },
@@ -1954,7 +1954,6 @@
   },
   "refused_downstream": {
     "io.kestra.plugin.core.trigger.Schedule": {
-      "lateMaximumDelay": "trigger::schedule::ScheduleTrigger::resolve: core.schedule `lateMaximumDelay` is not supported; roadmap package #11 lifts it",
       "timezone=\"ACT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"ACT\"",
       "timezone=\"AET\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"AET\"",
       "timezone=\"AGT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"AGT\"",
@@ -1992,8 +1991,7 @@
       "timezone=\"SystemV/PST8PDT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"SystemV/PST8PDT\"",
       "timezone=\"SystemV/YST9\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"SystemV/YST9\"",
       "timezone=\"SystemV/YST9YDT\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"SystemV/YST9YDT\"",
-      "timezone=\"VST\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"VST\"",
-      "when": "trigger::schedule::ScheduleTrigger::resolve: core.schedule `when` conditions are not supported; roadmap package #11 lifts it"
+      "timezone=\"VST\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"VST\""
     },
     "io.kestra.plugin.core.trigger.Webhook": {
       "fetchType=\"STORE\"": "trigger::webhook::build_output (409 at firing): webhook trigger 't' declares fetchType: STORE, which egret does not implement yet -- the request body would have to be written to internal storage and reach the flow as `trigger.uri`",

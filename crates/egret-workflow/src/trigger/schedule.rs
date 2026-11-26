@@ -51,13 +51,13 @@
 //!    accept/refuse verdicts are measured; this taxonomy is not its taxonomy.
 //! 3. Refusing a timezone `chrono-tz` cannot resolve
 //!    (`ScheduleError::UnknownTimezone`) rather than coercing it.
-//! 4. Refusing a `when` condition (`UnsupportedWhenCondition`).
-//! 5. Refusing a declared `lateMaximumDelay`
-//!    (`UnsupportedLateMaximumDelay`) instead of parsing the duration.
-//! 6. The progress guard in `handle_max_delay`, which the artifact does not
+//! 4. Parsing `lateMaximumDelay` with the `trigger::duration` subset
+//!    (upper-case `P[nD][T[nH][nM][nS]]`, no fraction, no sign, at most 366
+//!    days); a value outside it is refused (`MalformedLateMaximumDelay`).
+//! 5. The progress guard in `handle_max_delay`, which the artifact does not
 //!    have — and which no test covers; see its own comment.
-//! 7. Returning `None` rather than the standing date when that guard fires.
-//! 8. Carrying `ScheduledExecution`'s three instants plus a zone instead of
+//! 6. Returning `None` rather than the standing date when that guard fires.
+//! 7. Carrying `ScheduledExecution`'s three instants plus a zone instead of
 //!    formatted `trigger.*` strings, because the format was never measured.
 //!
 //! Everything else in this file is measured or derived, and says which.
@@ -1265,21 +1265,11 @@ pub enum ScheduleError {
     /// declines to schedule rather than scheduling in the wrong zone — and it
     /// is recorded rather than hidden.
     UnknownTimezone(String),
-    /// `Schedule.lateMaximumDelay` changes which tick fires (see §5) and this
-    /// crate's model carries it only as an uninterpreted value, because
-    /// reproducing `java.time.Duration.parse` is a measurement this package
-    /// has not made. Scheduling anyway would replay a backlog the artifact
-    /// throws away -- measured: five days behind, `0 2 * * *` answers
-    /// `2026-06-11T02:00Z` without the delay and `2026-06-16T02:00Z` with
-    /// `PT1H`. So a `Schedule` that declares it is refused rather than
-    /// silently scheduled without it.
-    UnsupportedLateMaximumDelay,
-    /// `Schedule` supports a `when` expression that filters candidate ticks
-    /// (`Schedule.findNextDateMatchingConditions`). Rendering it needs a
-    /// `RunContext` this seam does not have, and a schedule that ignored it
-    /// would **fire where Kestra would not** — the one failure the oracle
-    /// cannot catch. So it is refused, loudly.
-    UnsupportedWhenCondition,
+    /// `Schedule.lateMaximumDelay` is not an ISO-8601 duration this crate
+    /// parses (see `trigger::duration`: a deliberate subset). Refused rather
+    /// than dropped, because dropping it would replay a backlog Kestra skips.
+    /// Carries the parser's message, which echoes the offending input.
+    MalformedLateMaximumDelay(String),
 }
 
 impl fmt::Display for ScheduleError {
@@ -1289,16 +1279,11 @@ impl fmt::Display for ScheduleError {
             Self::MissingCron => write!(f, "core.schedule requires a `cron`"),
             Self::Cron(e) => write!(f, "invalid cron: {e}"),
             Self::UnknownTimezone(tz) => write!(f, "unknown timezone {tz:?}"),
-            // Key names only (spec D10): the author's `lateMaximumDelay` and
-            // `when` values are never echoed.
-            Self::UnsupportedLateMaximumDelay => write!(
-                f,
-                "core.schedule `lateMaximumDelay` is not supported; roadmap package #11 lifts it"
-            ),
-            Self::UnsupportedWhenCondition => write!(
-                f,
-                "core.schedule `when` conditions are not supported; roadmap package #11 lifts it"
-            ),
+            // Key names only (spec D10): the author's `when` value is never
+            // echoed.
+            Self::MalformedLateMaximumDelay(why) => {
+                write!(f, "core.schedule `lateMaximumDelay` is malformed: {why}")
+            }
         }
     }
 }
@@ -1347,15 +1332,12 @@ impl ScheduleTrigger {
             return Err(ScheduleError::NotASchedule);
         };
 
-        // `hasWhenCondition()` is `getWhen() != null && !"true".equals(getWhen())`
-        // -- so both an absent `when` and the literal default `"true"` mean
-        // "no condition".
-        if let Some(when) = &trigger.when {
-            if when.source() != "true" {
-                return Err(ScheduleError::UnsupportedWhenCondition);
-            }
-        }
-
+        // A Schedule's `when` is honoured now (package 11b): it is a
+        // skip-and-advance filter evaluated at fire time in `scheduler::fire`,
+        // which has a render context this pure seam does not. `resolve` carries
+        // nothing extra for it -- `fire_one` reads `trigger.when` directly --
+        // so a `when`, absent or not, no longer changes whether a Schedule
+        // resolves.
         Self::from_schedule(&trigger.id, schedule, trigger.disabled)
     }
 
@@ -1364,9 +1346,18 @@ impl ScheduleTrigger {
         schedule: &Schedule,
         disabled: bool,
     ) -> Result<Self, ScheduleError> {
-        if schedule.late_maximum_delay.is_some() {
-            return Err(ScheduleError::UnsupportedLateMaximumDelay);
-        }
+        let late_maximum_delay = match &schedule.late_maximum_delay {
+            None => None,
+            Some(value) => {
+                let text = value.as_str().ok_or_else(|| {
+                    ScheduleError::MalformedLateMaximumDelay("expected a duration string".into())
+                })?;
+                Some(
+                    crate::trigger::duration::parse_duration(text)
+                        .map_err(|e| ScheduleError::MalformedLateMaximumDelay(e.to_string()))?,
+                )
+            }
+        };
 
         let cron = schedule.cron.as_deref().ok_or(ScheduleError::MissingCron)?;
         let cron = Cron::parse(cron, schedule.with_seconds).map_err(ScheduleError::Cron)?;
@@ -1384,42 +1375,15 @@ impl ScheduleTrigger {
             trigger_id: trigger_id.to_string(),
             cron,
             timezone,
-            // Always `None` on this path, and that is now a CONSEQUENCE
-            // rather than an omission: `resolve` has already refused any
-            // `Schedule` that declares `lateMaximumDelay`, because this crate
-            // models the key but not the duration inside it. The only way to
-            // set it is `with_late_maximum_delay`, which the tests use to pin
-            // the measured rule.
-            late_maximum_delay: None,
+            late_maximum_delay,
             disabled,
         })
     }
 
-    /// Sets `lateMaximumDelay` directly, bypassing `resolve`'s refusal.
+    /// Sets `lateMaximumDelay` directly, bypassing the YAML parse.
     ///
-    /// **Not reachable from YAML, and since fix round 2 not reachable from a
-    /// shipping build at all — by construction, not by convention.**
-    ///
-    /// It is `#[cfg(test)] pub(crate)`. Narrowing it from `pub` made clippy
-    /// report it unused in the lib target, which was the honest signal: every
-    /// one of its four call sites is in a `#[cfg(test)]` module. So rather than
-    /// silence that with an `allow`, the method now does not exist outside a
-    /// test build. That is strictly stronger than `pub(crate)` and is what
-    /// "test-only" should always have meant here. The
-    /// model now carries the key (so it round-trips and so `resolve` can see
-    /// it) but not a parsed duration, so `resolve` refuses any `Schedule` that
-    /// declares it rather than scheduling as though it were absent. This
-    /// constructor is how the measured rule is still exercised — see
-    /// `the_missed_tick_rule_matches_the_artifact`. When someone parses
-    /// `java.time.Duration` properly, `from_schedule` should use it and this
-    /// can stay as it is.
-    ///
-    /// **`pub(crate)`, and that is the whole point.** Fix round 1 wrote that
-    /// "no YAML can reach it" — true, but while this was `pub` it was
-    /// *discipline*, not construction: any caller outside the crate could set
-    /// a delay `resolve` refuses, which is exactly the over-acceptance the
-    /// refusal exists to close. Unrepresentable beats unforgettable, which is
-    /// the same argument that chose refuse-over-parse in the first place.
+    /// Test-only (`#[cfg(test)]`): `from_schedule` now parses the YAML value,
+    /// and this lets tests pin the measured rule with an exact `Duration`.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn with_late_maximum_delay(mut self, delay: Option<Duration>) -> Self {
@@ -2891,60 +2855,28 @@ mod tests {
     // ---------------------------------------------------------------------
 
     /// A `when` expression filters candidate ticks in Kestra
-    /// (`Schedule.findNextDateMatchingConditions`). Rendering it needs a
-    /// `RunContext` this seam does not have, so a schedule that carried one and
-    /// fired anyway would **fire where Kestra would not** — and the oracle
-    /// cannot catch that. It is refused.
-    ///
-    /// The two-sided half: `when` absent, and the literal default `"true"`,
-    /// must both resolve — `hasWhenCondition()` is
-    /// `getWhen() != null && !"true".equals(getWhen())`, so a refusal on
-    /// Spec §5 + D10: the two refusals name the package that lifts them and
-    /// carry no value of the author's (`when` and `lateMaximumDelay` are
-    /// expressions and durations the author wrote; a message names keys only).
+    /// (`Schedule.findNextDateMatchingConditions`). Package 11b honours it as a
+    /// skip-and-advance filter at fire time (`scheduler::fire`), so `resolve`
+    /// no longer refuses one: it resolves exactly as the same trigger without
+    /// the `when` would. The firing path, not `resolve`, reads the condition.
     #[test]
-    fn the_when_and_late_maximum_delay_refusals_name_the_package_and_no_value() {
-        let secret = "SENTINEL-value-1d2f";
-        let when: Trigger = serde_norway::from_str(&format!(
-            "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"{{{{ '{secret}' }}}}\"\n"
-        ))
-        .unwrap();
-        let e = ScheduleTrigger::resolve(&when).expect_err("a when condition");
-        assert_eq!(
-            e.to_string(),
-            "core.schedule `when` conditions are not supported; roadmap package #11 lifts it"
-        );
-        let late: Trigger = serde_norway::from_str(&format!(
-            "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nlateMaximumDelay: {secret}\n"
-        ))
-        .unwrap();
-        let e = ScheduleTrigger::resolve(&late).expect_err("a lateMaximumDelay");
-        assert_eq!(
-            e.to_string(),
-            "core.schedule `lateMaximumDelay` is not supported; roadmap package #11 lifts it"
-        );
-    }
-
-    /// `"true"` would refuse every trigger the model gives a default to.
-    #[test]
-    fn a_when_condition_is_refused_but_the_default_true_is_not() {
+    fn a_when_condition_resolves_now_and_is_honoured_at_fire_time() {
         let with_when: Trigger = serde_norway::from_str(
             "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"{{ trigger.date | date('E') == 'MON' }}\"\n",
         )
         .unwrap();
-        assert!(matches!(
-            ScheduleTrigger::resolve(&with_when),
-            Err(ScheduleError::UnsupportedWhenCondition)
-        ));
+        assert!(
+            ScheduleTrigger::resolve(&with_when).is_ok(),
+            "a `when` no longer refuses the schedule"
+        );
 
+        // The literal default `"true"` and an absent `when` resolve too --
+        // `hasWhenCondition()` is `getWhen() != null && !"true".equals(getWhen())`.
         let explicit_true: Trigger = serde_norway::from_str(
             "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"true\"\n",
         )
         .unwrap();
-        assert!(
-            ScheduleTrigger::resolve(&explicit_true).is_ok(),
-            "the literal default `true` is NOT a condition"
-        );
+        assert!(ScheduleTrigger::resolve(&explicit_true).is_ok());
 
         let absent: Trigger =
             serde_norway::from_str("id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\n").unwrap();
@@ -3450,40 +3382,64 @@ mod tests {
         );
     }
 
-    /// `lateMaximumDelay` changes which tick fires, this crate does not model
-    /// the duration, and so a `Schedule` that declares it is **refused**.
-    ///
-    /// Before fix round 1 the key parsed, resolved, and was silently dropped:
-    /// the model has no `deny_unknown_fields`, so a flow asking for the
-    /// artifact's skip-the-backlog behaviour got the replay-it behaviour
-    /// instead, and lost the key on re-serialisation too.
+    fn from_yaml(extra: &str) -> Trigger {
+        serde_norway::from_str(&format!(
+            "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\n{extra}"
+        ))
+        .unwrap()
+    }
+
+    /// A declared `lateMaximumDelay` resolves to the parsed duration.
     #[test]
-    fn a_schedule_declaring_late_maximum_delay_is_refused_not_silently_dropped() {
-        let yaml = "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nlateMaximumDelay: PT1H\n";
-        let trigger: Trigger = serde_norway::from_str(yaml).unwrap();
+    fn a_declared_late_maximum_delay_is_parsed_and_resolved() {
+        let t = ScheduleTrigger::resolve(&from_yaml("lateMaximumDelay: PT1H\n")).unwrap();
+        assert_eq!(t.late_maximum_delay(), Some(Duration::hours(1)));
+        let t = ScheduleTrigger::resolve(&from_yaml("")).unwrap();
+        assert_eq!(t.late_maximum_delay(), None);
+    }
 
-        // It reaches the model rather than being discarded on the way in --
-        // which is the half that makes the refusal possible at all.
-        match &trigger.kind {
-            crate::models::TriggerKind::Schedule(s) => assert!(
-                s.late_maximum_delay.is_some(),
-                "the key must survive parsing, or nothing downstream can see it"
-            ),
-            other => panic!("expected a Schedule, got {other:?}"),
-        }
-
-        assert!(
-            matches!(
-                ScheduleTrigger::resolve(&trigger),
-                Err(ScheduleError::UnsupportedLateMaximumDelay)
-            ),
-            "a declared lateMaximumDelay must refuse, never schedule without it"
+    /// Through the YAML path: five days behind, `PT1H` lands on `06-16`
+    /// (measured), a tick within the delay fires, and a backfill is exempt.
+    #[test]
+    fn a_yaml_late_maximum_delay_skips_over_late_ticks_but_not_a_backfill() {
+        let now = probe_clock();
+        let t = ScheduleTrigger::resolve(&from_yaml("lateMaximumDelay: PT1H\n")).unwrap();
+        assert_eq!(
+            t.next_evaluation_date(Some(at("2026-06-10T02:00:00Z")), None, now),
+            Some(at("2026-06-16T02:00:00Z")),
+            "over-late ticks are skipped"
         );
+        let t24 = ScheduleTrigger::resolve(&from_yaml("lateMaximumDelay: P1D\n")).unwrap();
+        assert_eq!(
+            t24.next_evaluation_date(Some(at("2026-06-14T02:00:00Z")), None, now),
+            Some(at("2026-06-15T02:00:00Z")),
+            "a tick within its delay fires"
+        );
+        let window = super::Backfill {
+            start: at("2026-06-01T00:00:00Z"),
+            end: at("2026-06-05T00:00:00Z"),
+            current_date: at("2026-06-01T00:00:00Z"),
+            paused: false,
+        };
+        assert_eq!(
+            t.next_evaluation_date(None, Some(&window), now),
+            Some(at("2026-06-01T02:00:00Z")),
+            "a running backfill is not skipped"
+        );
+    }
 
-        // Two-sided: the identical flow WITHOUT the key resolves.
-        let without = "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\n";
-        let trigger: Trigger = serde_norway::from_str(without).unwrap();
-        assert!(ScheduleTrigger::resolve(&trigger).is_ok());
+    /// A malformed `lateMaximumDelay` is refused, never dropped or panicked on.
+    #[test]
+    fn a_malformed_late_maximum_delay_is_refused() {
+        for bad in [
+            "banana", "PT1.5S", "-PT1H", "PT1h", "P2Y", "P400D", "\"\"", "[1]", "3600",
+        ] {
+            let r = ScheduleTrigger::resolve(&from_yaml(&format!("lateMaximumDelay: {bad}\n")));
+            assert!(
+                matches!(r, Err(ScheduleError::MalformedLateMaximumDelay(_))),
+                "{bad}: {r:?}"
+            );
+        }
     }
 
     /// `Schedule.cron` is `@NotNull` in Java; W1 modelled it `Option` because

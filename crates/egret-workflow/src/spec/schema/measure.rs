@@ -86,16 +86,20 @@ const REFUSED_BY_NAME: &[&str] = &["unsupported_pause_property"];
 ///
 /// * every trigger: `id`, `type`, `description` (documentation), `disabled`
 ///   (`scheduler::sync`, `webhook_routes`, `trigger::flow`);
-/// * `Flow` alone also reads `when` and `labels` (`trigger::flow`
-///   `when_source`/`labels`). A Schedule refuses any `when` but `"true"`
-///   (stage 2); a Webhook's path reads neither.
+/// * `Flow` reads `when` and `labels` (`trigger::flow` `when_source`/`labels`);
+///   a Schedule reads both too -- `labels` at fire time (Task 1,
+///   `scheduler::fire::render_trigger_labels`) and `when` at fire time (package
+///   11b, `scheduler::fire`'s skip-and-advance); a Webhook's path reads neither.
 ///
 /// `stopAfter`, `logToFile`, `failOnTriggerError` and `allowConcurrent` are
 /// parsed by `models::Trigger` and read by nothing.
 fn trigger_base_read(t: &str) -> Vec<&'static str> {
     let mut v = vec!["description", "disabled", "id", "type"];
-    if t == "io.kestra.plugin.core.trigger.Flow" {
-        v.extend(["labels", "when"]);
+    match t {
+        "io.kestra.plugin.core.trigger.Flow" | "io.kestra.plugin.core.trigger.Schedule" => {
+            v.extend(["labels", "when"])
+        }
+        _ => {}
     }
     v
 }
@@ -840,7 +844,7 @@ fn the_field_probe_reads_wire_names_and_unknown_keys_are_dropped() {
     assert!(format!("{spec:?}").contains("error_message"));
 }
 
-/// Stage 2 is wired: the five trigger properties egret parses and then
+/// Stage 2 is wired: the four trigger properties egret parses and then
 /// refuses (fix round 1, I1) come out `refused`, each with its site.
 #[test]
 fn properties_refused_after_parse_are_measured_refused() {
@@ -865,11 +869,6 @@ fn properties_refused_after_parse_are_measured_refused() {
             "io.kestra.plugin.core.trigger.Webhook",
             "responseCode",
             "declared_unsupported",
-        ),
-        (
-            "io.kestra.plugin.core.trigger.Schedule",
-            "lateMaximumDelay",
-            "ScheduleTrigger::resolve",
         ),
     ] {
         assert_eq!(

@@ -128,24 +128,12 @@ pub struct Schedule {
     // declared type; that coercion is W6's, at the point the schedule fires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inputs: Option<BTreeMap<String, serde_json::Value>>,
-    // W6 Task 5 fix round 1: `lateMaximumDelay` is CAPTURED but deliberately
-    // NOT interpreted.
-    //
-    // W1's comment above says the field was dropped "a `Duration`, no parser
-    // for that type yet". Dropping it did two things nobody had measured:
-    // `serde` has no `deny_unknown_fields` here, so a flow declaring
-    // `lateMaximumDelay: PT1H` PARSED, RESOLVED, and then scheduled as though
-    // the key were absent -- replaying a backlog the artifact throws away,
-    // which is over-acceptance in the direction the oracle cannot catch -- and
-    // the key was silently lost on re-serialisation too.
-    //
-    // It is `serde_json::Value`, not a `Duration`, because reproducing
-    // `java.time.Duration.parse` (`PT1H30M`, `P1DT2H`, fractional seconds,
-    // negatives) is a measurement this package has not made, and guessing it
-    // is the class of unmeasured decision fix round 1 exists to remove.
-    // Capturing it verbatim keeps the round trip honest and lets
-    // `trigger::ScheduleTrigger::resolve` REFUSE the schedule, exactly as it
-    // already refuses a `when` it cannot render.
+    // `lateMaximumDelay` is stored verbatim as a `serde_json::Value` here, so
+    // the key round-trips on re-serialisation and a non-string value is still
+    // visible downstream. It is PARSED and HONOURED in
+    // `ScheduleTrigger::from_schedule` via `trigger::duration::parse_duration`
+    // (a deliberate ISO-8601 subset: no fractions, signs, weeks or months, at
+    // most 366 days); a malformed value is refused there, never dropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub late_maximum_delay: Option<serde_json::Value>,
     // `Schedule.java`: `recoverMissedSchedules` (`ALL` | `NONE` | `LAST`).

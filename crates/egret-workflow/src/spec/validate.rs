@@ -403,31 +403,17 @@ fn save_only_findings(flow: &Flow, report: &mut ValidationReport) {
     retry_new_execution_in_loop_findings(flow, report);
 }
 
-/// The warning for a Schedule `when` or `lateMaximumDelay`: Kestra accepts and
-/// honours the key, egret's scheduler refuses it when it syncs the trigger.
-/// egret's own words, and key names only (spec D10): the author's value is
-/// never echoed. It does not embed `ScheduleError`'s `Display` because that one
-/// ends in the same package clause (it is the trigger row's `last_error`).
-fn sync_refusal(id: &str, key: &str) -> Finding {
-    Finding {
-        code: "schedule_not_resolvable",
-        message: format!(
-            "trigger '{id}': core.schedule `{key}` is not supported: egret refuses it when it syncs the trigger, so this Schedule trigger will not fire. Roadmap package #11 lifts it"
-        ),
-        path: format!("triggers.{id}.{key}"),
-    }
-}
-
 /// KI-122: what the scheduler would refuse about a `Schedule`, said at save.
 /// Warnings, not errors: the flow saves and runs by hand as before, and the
 /// trigger row records the same refusal as its `last_error`; the editor now
 /// says it before the first tick instead of after it.
 ///
 /// - `schedule_not_resolvable`: [`ScheduleTrigger::resolve`] refuses it -- a
-///   cron that does not parse, an unknown timezone, a `when` or a
-///   `lateMaximumDelay` egret does not support -- so it never fires
-///   (`scheduler::sync` stores the same message). A `cron` left out is the
-///   error `schedule_cron_required` already, so it is not said twice.
+///   cron that does not parse, an unknown timezone, or a malformed
+///   `lateMaximumDelay` -- so it never fires (`scheduler::sync` stores the same
+///   message). A `cron` left out is the error `schedule_cron_required`
+///   already, so it is not said twice. A `when` is not here: package 11b
+///   honours it at fire time.
 /// - `schedule_input_templated`: an `inputs` value with `{{ }}` or `{% %}`,
 ///   which every tick refuses (`scheduler::fire::refuse_templated`): a
 ///   scheduled execution has no context to render it in.
@@ -439,24 +425,10 @@ fn schedule_findings(flow: &Flow, report: &mut ValidationReport) {
         let TriggerKind::Schedule(schedule) = &trigger.kind else {
             continue;
         };
-        // `resolve` names the first refusal only, and `when` comes before
-        // everything else, so a second resolve without `when` finds the next:
-        // each of `when` and `lateMaximumDelay` is said once, at its own key
-        // (no-silent-drops D6/D17), and `keys.rs` leaves both keys to this.
-        let mut refusal = ScheduleTrigger::resolve(trigger);
-        if let Err(ScheduleError::UnsupportedWhenCondition) = &refusal {
-            report.warnings.push(sync_refusal(&trigger.id, "when"));
-            let mut without_when = trigger.clone();
-            without_when.when = None;
-            refusal = ScheduleTrigger::resolve(&without_when);
-        }
-        match refusal {
+        // A `when` is honoured now (package 11b), so `resolve` no longer
+        // refuses one and nothing is said about it here.
+        match ScheduleTrigger::resolve(trigger) {
             Ok(_) | Err(ScheduleError::MissingCron) => {}
-            Err(ScheduleError::UnsupportedLateMaximumDelay) => {
-                report
-                    .warnings
-                    .push(sync_refusal(&trigger.id, "lateMaximumDelay"));
-            }
             Err(e) => report.warnings.push(Finding {
                 code: "schedule_not_resolvable",
                 message: format!("trigger '{}' will never fire: {e}", trigger.id),
@@ -3285,38 +3257,35 @@ mod tests {
             codes(&bad_cron),
             vec![("schedule_not_resolvable", "triggers.s".to_string())]
         );
-        // D10 + spec §5: the save-time message for a `when` / `lateMaximumDelay`
-        // names the key and the package and carries none of the author's value.
+        // Package 11b: a `when` is honoured at fire time, so it says nothing
+        // at save -- no warning, no error, and the author's value never
+        // reaches a message.
         let sentinel = "SENTINEL-value-1d2f";
-        for (key, line, want) in [
-            (
-                "when",
-                format!("    when: \"{{{{ '{sentinel}' }}}}\"\n"),
-                "trigger 's': core.schedule `when` is not supported: egret refuses it when it \
-                 syncs the trigger, so this Schedule trigger will not fire. Roadmap package \
-                 #11 lifts it",
-            ),
-            (
-                "lateMaximumDelay",
-                format!("    lateMaximumDelay: {sentinel}\n"),
-                "trigger 's': core.schedule `lateMaximumDelay` is not supported: egret \
-                 refuses it when it syncs the trigger, so this Schedule trigger will not \
-                 fire. Roadmap package #11 lifts it",
-            ),
-        ] {
-            let r = validate(&schedule(&format!("    cron: \"0 * * * *\"\n{line}")));
-            let m = &r
+        let honoured_when = validate(&schedule(&format!(
+            "    cron: \"0 * * * *\"\n    when: \"{{{{ '{sentinel}' }}}}\"\n"
+        )));
+        assert!(codes(&honoured_when).is_empty(), "{honoured_when:?}");
+        assert!(
+            honoured_when
                 .warnings
                 .iter()
-                .find(|w| w.path == format!("triggers.s.{key}"))
-                .unwrap_or_else(|| panic!("{key}: {r:?}"))
-                .message;
-            assert_eq!(m, want, "{key}");
-            assert!(
-                !m.contains(sentinel),
-                "{key}: the author's value leaked: {m}"
-            );
-        }
+                .chain(&honoured_when.errors)
+                .all(|f| !f.message.contains(sentinel)),
+            "the author's `when` value leaked: {honoured_when:?}"
+        );
+        // `lateMaximumDelay` is honoured: a valid one says nothing, a malformed
+        // one is refused at save.
+        let honoured = validate(&schedule(
+            "    cron: \"0 * * * *\"\n    lateMaximumDelay: PT1H\n",
+        ));
+        assert!(codes(&honoured).is_empty(), "{honoured:?}");
+        let malformed = validate(&schedule(
+            "    cron: \"0 * * * *\"\n    lateMaximumDelay: banana\n",
+        ));
+        assert_eq!(
+            codes(&malformed),
+            vec![("schedule_not_resolvable", "triggers.s".to_string())]
+        );
         let w = &bad_cron
             .warnings
             .iter()

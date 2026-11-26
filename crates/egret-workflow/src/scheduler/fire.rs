@@ -28,7 +28,18 @@ fn db_err(e: sqlx::Error) -> Error {
 
 /// Kestra's `Schedule` type name, as stored in `execution_trigger.type` and
 /// matched by `workflow_executions_scheduled_date_iff_schedule`.
-const SCHEDULE_TYPE: &str = "io.kestra.plugin.core.trigger.Schedule";
+pub(crate) const SCHEDULE_TYPE: &str = "io.kestra.plugin.core.trigger.Schedule";
+
+/// Package 11b: the most `when` candidates one `fire_due` pass walks before it
+/// parks. A long-idle Schedule with an always-falsy `when` (a one-minute cron
+/// idle for a year is ~525 000 ticks) could otherwise render its whole backlog
+/// under one claim's transaction, holding the trigger row locked for tens of
+/// seconds. The walk instead parks on the last falsy candidate -- still `<=
+/// now`, so re-claimed on the next pass -- and resumes from there.
+/// `Cron::next_after` is strict, so the resumed walk makes progress and skips
+/// no candidate; only the pass boundary moves. This is the walk's hard stop,
+/// standing in for the no-`when` path's `run_until_idle` `max_passes`.
+pub const MAX_WHEN_WALK_PER_PASS: u32 = 1024;
 
 /// What one pass did, one count per claimed trigger.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -278,68 +289,164 @@ async fn fire_one(at: &mut Txn, c: &Claimed) -> Result<Fate> {
     };
     let mut t = tick(&resolved, &state, &inputs, &FixedClock(c.db_now));
 
-    let mut refused_backfill = false;
-    let (fate, last_error) = match t.outcome {
-        // The claim's `WHERE` and `tick` read the same `now()`, and a
-        // disabled trigger returned above, so neither can happen. If one did,
-        // nothing is written: the row stays due, is claimed again next pass,
-        // and says so here every time rather than passing as a quiet skip.
-        declined @ (TickOutcome::NotDue | TickOutcome::NotSchedulable(_)) => {
-            let outcome = format!("{declined:?}");
-            // Loud in a debug build, so a test that ever reaches this fails.
-            if cfg!(debug_assertions) {
-                panic!("tick declined a claimed trigger: {outcome}");
+    // Package 11b: honour a Schedule's `when`. `hasWhenCondition()` is
+    // `getWhen() != null && !"true".equals(getWhen())`, so an absent `when`
+    // and the literal default `"true"` are no condition and take the pure
+    // `tick` path unchanged. A real condition is a skip-and-advance filter
+    // evaluated HERE, in the IO half, which has a render context the pure
+    // `tick`/`next_evaluation_date` do not: only candidate ticks whose `when`
+    // renders truthy ever fire; the rest are walked past (Kestra's
+    // `Schedule.findNextDateMatchingConditions`).
+    //
+    // Two bypasses, both deliberate. Templated inputs already consume the tick
+    // below, so the walk is skipped for them (behaviour unchanged). A running
+    // backfill also bypasses the filter entirely, mirroring `lateMaximumDelay`'s
+    // `!in_backfill` bypass in `next_evaluation_date`: a backfill fires every
+    // window tick regardless of `when` (the per-tick advance would otherwise
+    // drop skipped window ticks for good, and undercount `ticks_done`; parity
+    // with Kestra's backfill + `when` is left to a later package and documented).
+    let mut when_fired_nothing = false;
+    let mut when_capped = false;
+    if refused.is_none() && backfill.is_none() {
+        if let Some(when) = trigger
+            .when
+            .as_ref()
+            .map(|w| w.source())
+            .filter(|s| *s != "true")
+        {
+            let mut steps = 0u32;
+            loop {
+                let TickOutcome::Fired(e) = &t.outcome else {
+                    // Non-`Fired` here is a `when`-skip park ONLY once the walk
+                    // has advanced past a falsy candidate (`steps > 0`): the
+                    // next candidate is in the future, so fire nothing and let
+                    // the advanced `next_evaluation_date` stand for a later pass.
+                    // On the FIRST tick, a NotDue/Skipped is a genuine claim
+                    // race or `eval` skip, which the `match` below must handle
+                    // exactly as the no-`when` path does -- so leave it alone.
+                    if steps > 0 {
+                        when_fired_nothing = true;
+                    }
+                    break;
+                };
+                let candidate = e.scheduled_date;
+                match schedule_when_is_truthy(when, e) {
+                    // Fail-safe, as `runIf` and the trigger labels do: a `when`
+                    // that does not render fires nothing; the dates stay, so
+                    // the next pass retries the same tick.
+                    Err(why) => {
+                        record_error(at.conn(), c, &why).await?;
+                        return Ok(Fate::Errored);
+                    }
+                    // This candidate matches: fall through and fire it, with
+                    // `next_evaluation_date` already past it.
+                    Ok(true) => break,
+                    Ok(false) => {
+                        steps += 1;
+                        if steps >= MAX_WHEN_WALK_PER_PASS {
+                            // Per-pass cap (the walk's hard stop): a long-idle
+                            // trigger must not render its whole backlog under one
+                            // claim's transaction. Park on this falsy candidate --
+                            // it is `<= now`, so the row is re-claimed at once --
+                            // and continue the walk next pass. `Cron::next_after`
+                            // is strict, so each pass makes progress and no
+                            // candidate is skipped; only the pass boundary moves.
+                            t.state.next_evaluation_date = Some(candidate);
+                            when_capped = true;
+                            break;
+                        }
+                        let advanced = t.state.clone();
+                        t = tick(&resolved, &advanced, &inputs, &FixedClock(c.db_now));
+                    }
+                }
             }
-            tracing::warn!(
-                flow_id = %c.flow_id,
-                trigger_id = %c.trigger_id,
-                outcome,
-                "tick declined a trigger the claim found due; nothing written"
-            );
-            return Ok(Fate::Frozen);
         }
-        TickOutcome::Skipped(reason) => (Fate::Skipped, Some(format!("skipped: {reason:?}"))),
-        // Refused inputs consume the tick (spec §5): the dates advance
-        // exactly as `tick` computed them, and no execution is created.
-        TickOutcome::Fired(_) if refused.is_some() => (Fate::Skipped, refused),
-        TickOutcome::Fired(e) => match start(at, c, &e, backfill.as_ref()).await? {
-            Started::Yes => (Fate::Fired, None),
-            // A unique index (the per-tick one, or the per-backfill-tick one
-            // for a backfill's fire) says this tick already has its
-            // execution: the tick is consumed, not refired and not taken off
-            // the queue.
-            // Under statement 1 of `scheduler`'s safety section this never
-            // happens, so it is a warning, not a routine skip.
-            Started::AlreadyFired(why) => {
+    }
+
+    let mut refused_backfill = false;
+    let (fate, last_error) = if when_capped {
+        // The cap was hit mid-walk with no match yet. The dates advanced to the
+        // last falsy candidate, which the next pass continues from; nothing
+        // fired and there is nothing to record.
+        (Fate::Frozen, None)
+    } else if when_fired_nothing {
+        // Evaluated, nothing matched: the state advanced over the skipped
+        // ticks, no execution was created, and there is no error to record.
+        (Fate::Skipped, None)
+    } else {
+        match t.outcome {
+            // The claim's `WHERE` and `tick` read the same `now()`, and a
+            // disabled trigger returned above, so neither can happen. If one did,
+            // nothing is written: the row stays due, is claimed again next pass,
+            // and says so here every time rather than passing as a quiet skip.
+            declined @ (TickOutcome::NotDue | TickOutcome::NotSchedulable(_)) => {
+                let outcome = format!("{declined:?}");
+                // Loud in a debug build, so a test that ever reaches this fails.
+                if cfg!(debug_assertions) {
+                    panic!("tick declined a claimed trigger: {outcome}");
+                }
                 tracing::warn!(
                     flow_id = %c.flow_id,
                     trigger_id = %c.trigger_id,
-                    scheduled_date = %e.scheduled_date,
-                    "a schedule tick that already has an execution was claimed again; consumed"
+                    outcome,
+                    "tick declined a trigger the claim found due; nothing written"
                 );
-                (Fate::Skipped, Some(why))
+                return Ok(Fate::Frozen);
             }
-            // Deterministic in the source: only the author's next save helps.
-            // A backfill tick's refusal ends the backfill instead (below): a
-            // save would re-derive the same tick with the same inputs, so
-            // taking the trigger off the queue would leave it stuck until the
-            // backfill was deleted (W7f §3.6, default decision 2026-10-15).
-            Started::Refused(why) if e.from_backfill && backfill.is_some() => {
-                refused_backfill = true;
-                (Fate::Errored, Some(format!("backfill ended: {why}")))
+            TickOutcome::Skipped(reason) => (Fate::Skipped, Some(format!("skipped: {reason:?}"))),
+            // Refused inputs consume the tick (spec §5): the dates advance
+            // exactly as `tick` computed them, and no execution is created.
+            TickOutcome::Fired(_) if refused.is_some() => (Fate::Skipped, refused),
+            TickOutcome::Fired(e) => {
+                // Fail-safe: a label that does not render fires nothing; the dates
+                // stay, so the next pass retries the same tick.
+                let trigger_labels = match render_trigger_labels(&e, &trigger.labels) {
+                    Ok(l) => l,
+                    Err(why) => {
+                        record_error(at.conn(), c, &why).await?;
+                        return Ok(Fate::Errored);
+                    }
+                };
+                match start(at, c, &e, backfill.as_ref(), trigger_labels).await? {
+                    Started::Yes => (Fate::Fired, None),
+                    // A unique index (the per-tick one, or the per-backfill-tick one
+                    // for a backfill's fire) says this tick already has its
+                    // execution: the tick is consumed, not refired and not taken off
+                    // the queue.
+                    // Under statement 1 of `scheduler`'s safety section this never
+                    // happens, so it is a warning, not a routine skip.
+                    Started::AlreadyFired(why) => {
+                        tracing::warn!(
+                            flow_id = %c.flow_id,
+                            trigger_id = %c.trigger_id,
+                            scheduled_date = %e.scheduled_date,
+                            "a schedule tick that already has an execution was claimed again; consumed"
+                        );
+                        (Fate::Skipped, Some(why))
+                    }
+                    // Deterministic in the source: only the author's next save helps.
+                    // A backfill tick's refusal ends the backfill instead (below): a
+                    // save would re-derive the same tick with the same inputs, so
+                    // taking the trigger off the queue would leave it stuck until the
+                    // backfill was deleted (W7f §3.6, default decision 2026-10-15).
+                    Started::Refused(why) if e.from_backfill && backfill.is_some() => {
+                        refused_backfill = true;
+                        (Fate::Errored, Some(format!("backfill ended: {why}")))
+                    }
+                    Started::Refused(why) => {
+                        take_off_queue(at.conn(), c, &why).await?;
+                        return Ok(Fate::Errored);
+                    }
+                    // Anything else may be transient (a timeout, a deadlock, a
+                    // serialization failure). The dates stay, so the next pass fires
+                    // this same tick again (spec §4 point 1); only the reason is kept.
+                    Started::Failed(why) => {
+                        record_error(at.conn(), c, &why).await?;
+                        return Ok(Fate::Errored);
+                    }
+                }
             }
-            Started::Refused(why) => {
-                take_off_queue(at.conn(), c, &why).await?;
-                return Ok(Fate::Errored);
-            }
-            // Anything else may be transient (a timeout, a deadlock, a
-            // serialization failure). The dates stay, so the next pass fires
-            // this same tick again (spec §4 point 1); only the reason is kept.
-            Started::Failed(why) => {
-                record_error(at.conn(), c, &why).await?;
-                return Ok(Fate::Errored);
-            }
-        },
+        }
     };
 
     let mut last_error = last_error;
@@ -468,11 +575,15 @@ async fn start(
     c: &Claimed,
     e: &ScheduledExecution,
     backfill: Option<&BackfillRow>,
+    trigger_labels: Vec<serde_json::Value>,
 ) -> Result<Started> {
     let backfill = backfill.filter(|_| e.from_backfill);
-    let labels = backfill
-        .map(|b| b.labels.clone())
-        .filter(|l| l.as_array().is_some_and(|a| !a.is_empty()));
+    // Kestra's order: the trigger's own labels, then the backfill's.
+    let mut all = trigger_labels;
+    if let Some(b) = backfill.and_then(|b| b.labels.as_array()) {
+        all.extend(b.iter().cloned());
+    }
+    let labels = (!all.is_empty()).then(|| serde_json::Value::Array(all));
     let mut sp = at.savepoint().await?;
     let started = start_execution_in_with(
         &mut sp,
@@ -508,6 +619,57 @@ async fn start(
             Ok(classify(&err))
         }
     }
+}
+
+/// The Schedule trigger's own `labels`, each value rendered against
+/// `{{ trigger.* }}` / `{{ schedule.* }}` (the tick's `{date, next, previous}`,
+/// as Kestra binds them). Keys stay literal. The error is the reason to record.
+fn render_trigger_labels(
+    e: &ScheduledExecution,
+    labels: &[crate::models::Label],
+) -> std::result::Result<Vec<serde_json::Value>, String> {
+    if labels.is_empty() {
+        return Ok(Vec::new());
+    }
+    let vars = schedule_trigger_record(e)
+        .get("variables")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut cx = crate::runners::RenderContext::new();
+    cx.insert("schedule", vars.clone());
+    cx.insert("trigger", vars);
+    labels
+        .iter()
+        .map(|l| {
+            let value = crate::render_str(&l.value, &cx)
+                .map_err(|err| format!("label `{}` did not render: {err}", l.key))?;
+            Ok(serde_json::json!({"key": l.key, "value": value}))
+        })
+        .collect()
+}
+
+/// Render a Schedule's `when` against the candidate tick and read its
+/// truthiness. The context is the candidate's `{date, next, previous}` bound
+/// under both `schedule` and `trigger` — exactly as [`render_trigger_labels`]
+/// binds the labels' context, and as Kestra binds a Schedule's condition. The
+/// render is database-free here (`secret()`/`kv()`/`fetch()` are null-backed
+/// and error), so the three date helpers (`isWeekend`, `isLastWorkingDay`,
+/// `isDayWeekInMonth`) resolve while anything needing IO fails the fail-safe.
+/// Truthiness is `executor::is_truthy`, the same reading `runIf` takes.
+fn schedule_when_is_truthy(
+    when: &str,
+    e: &ScheduledExecution,
+) -> std::result::Result<bool, String> {
+    let vars = schedule_trigger_record(e)
+        .get("variables")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mut cx = crate::runners::RenderContext::new();
+    cx.insert("schedule", vars.clone());
+    cx.insert("trigger", vars);
+    let rendered = crate::render_str(when, &cx)
+        .map_err(|err| format!("`when` condition did not render: {err}"))?;
+    Ok(crate::executor::is_truthy(&rendered))
 }
 
 /// Keep the reason, touch nothing else: the dates stay where the claim found

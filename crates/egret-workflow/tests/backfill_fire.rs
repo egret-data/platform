@@ -257,6 +257,44 @@ async fn a_window_drains_tick_by_tick_and_the_row_goes_with_the_last() {
     }
 }
 
+/// Package 11b: a backfill bypasses `when` entirely, mirroring the
+/// `lateMaximumDelay` `!in_backfill` bypass, and fires every window tick even
+/// when the condition is falsy. The live-tick skip-and-advance would otherwise
+/// drop the skipped window ticks for good; parity for backfill + `when` is left
+/// to a later package.
+#[tokio::test]
+async fn a_backfill_fires_every_window_tick_ignoring_a_falsy_when() {
+    let Some(fx) = fx().await else { return };
+    let src = flow_yaml("bf-when", "", "    when: \"{{ false }}\"\n");
+    let flow = fx.flow(&src).await;
+    let w0 = fx.w0().await;
+    common::stage_backfill(
+        &fx.db,
+        flow,
+        "s",
+        (w0, w0 + minutes(4)),
+        w0,
+        5,
+        json!({}),
+        json!([]),
+    )
+    .await;
+
+    for pass in 1..=5 {
+        assert_eq!(fx.pass().await, fired(1), "pass {pass}");
+    }
+    let dates: Vec<_> = execs(&fx.db, flow)
+        .await
+        .iter()
+        .map(|e| e.scheduled_date)
+        .collect();
+    assert_eq!(dates, (0..5).map(|i| w0 + minutes(i)).collect::<Vec<_>>());
+    assert!(
+        common::backfill_row(&fx.db, flow, "s").await.is_none(),
+        "the window drained in full despite the falsy when"
+    );
+}
+
 /// Test 2. Completion resumes the regular schedule (§3.6): from
 /// `max(previous_next_evaluation_date, first tick after window_end)`, then
 /// `recoverMissedSchedules` when that is past.
@@ -781,4 +819,34 @@ async fn a_paused_backfill_does_not_hold_back_a_sibling_schedule() {
     .await
     .unwrap();
     assert_eq!(fired_by, vec!["t".to_string()]);
+}
+
+/// Kestra's order: the trigger's own labels first, then the backfill's.
+#[tokio::test]
+async fn trigger_labels_come_before_backfill_labels() {
+    let Some(fx) = fx().await else { return };
+    let src = flow_yaml("lbl-order", "", "    labels:\n      env: prod\n");
+    let flow = fx.flow(&src).await;
+    let w0 = fx.w0().await;
+    common::stage_backfill(
+        &fx.db,
+        flow,
+        "s",
+        (w0, w0 + minutes(1)),
+        w0,
+        2,
+        json!({}),
+        json!([{"key": "team", "value": "ops"}]),
+    )
+    .await;
+    for _ in 0..2 {
+        assert_eq!(fx.pass().await, fired(1));
+    }
+    let want = Some(json!([
+        {"key": "env", "value": "prod"},
+        {"key": "team", "value": "ops"}
+    ]));
+    for e in execs(&fx.db, flow).await {
+        assert_eq!(e.labels, want);
+    }
 }

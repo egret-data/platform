@@ -232,8 +232,9 @@ pub enum BackfillEnd {
 /// Dropped, with reasons: `vnode`/`workerId`/`dispatchEpoch` (cluster
 /// placement, and this engine has one scheduler), `locked`/`executionId` (the
 /// `allowConcurrent` lock, which is W8's `concurrency:` neighbourhood),
-/// `lastEventId` (the event-sourced control plane), `stopAfter` (needs the
-/// terminal state of the execution it started, which arrives on another seam).
+/// `lastEventId` (the event-sourced control plane), `stopAfter` (honoured
+/// at the settle seam, `worker/stop_after.rs::on_terminal`, which needs the
+/// terminal state of the execution it started).
 ///
 /// The backfill's database home is `workflow.trigger_backfills` (W7f). The pure
 /// [`Backfill`] stays reduced to the window; its inputs and labels live beside
