@@ -1133,6 +1133,7 @@ async fn a_trigger_off_the_queue_is_re_queued_at_the_current_tick() {
 
 #[tokio::test]
 async fn an_unparsable_source_keeps_the_backfill_and_a_fix_re_derives() {
+    let _g = RECOVER.lock().await;
     let Some(fx) = fx().await else { return };
     let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
     let w0 = origin(&fx.db).await;
@@ -1247,6 +1248,7 @@ async fn removing_a_kind_change_and_a_soft_delete_delete_the_backfills() {
 
 #[tokio::test]
 async fn reconcile_over_an_unchanged_backfill_changes_nothing() {
+    let _g = RECOVER.lock().await;
     let Some(fx) = fx().await else { return };
     let flow = fx.create(&one_schedule("* * * * *", "hi")).await;
     let w0 = origin(&fx.db).await;
@@ -1415,4 +1417,141 @@ async fn the_cap_counts_the_ticks_already_done() {
             );
         }
     }
+}
+
+// ---- recoverMissedSchedules at scheduler start ----
+
+/// `reconcile` is global (it recovers every live flow), so a concurrent
+/// reconcile would recover the flow of the "a save does not recover" test;
+/// every test that calls `reconcile` takes this lock.
+static RECOVER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn recover_flow(fx: &Fx, extra: &str) -> (Uuid, DateTime<Utc>) {
+    recover_flow_as(fx, "f", extra).await
+}
+
+async fn recover_flow_as(fx: &Fx, id: &str, extra: &str) -> (Uuid, DateTime<Utc>) {
+    let flow = fx
+        .create_as(id, &flow_yaml("", &schedule("s", "* * * * *", extra), "hi"))
+        .await;
+    let past = origin(&fx.db).await;
+    sqlx::query(
+        "UPDATE workflow.triggers SET next_evaluation_date = $3, evaluated_at = $3 \
+         WHERE flow_id = $1 AND trigger_id = $2",
+    )
+    .bind(flow.id)
+    .bind("s")
+    .bind(past)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    (flow.id, past)
+}
+
+async fn reconcile_now(fx: &Fx) {
+    egret_workflow::scheduler::reconcile(&fx.db.pool)
+        .await
+        .expect("reconcile");
+}
+
+async fn next_date(fx: &Fx, flow: Uuid) -> DateTime<Utc> {
+    queue(&fx.db, flow, "s").await.unwrap().0.unwrap()
+}
+
+#[tokio::test]
+async fn recover_none_reseeds_from_now_at_start() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let (flow, _) = recover_flow(&fx, "    recoverMissedSchedules: NONE\n").await;
+    reconcile_now(&fx).await;
+    let now = db_now(&fx.db).await;
+    let d = next_date(&fx, flow).await;
+    assert!(
+        d > now - Duration::seconds(5),
+        "skipped every missed tick: {d}"
+    );
+    assert!(d <= now + Duration::minutes(1) + Duration::seconds(5));
+}
+
+#[tokio::test]
+async fn recover_last_jumps_to_the_most_recent_missed_tick() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let (flow, past) = recover_flow(&fx, "    recoverMissedSchedules: LAST\n").await;
+    reconcile_now(&fx).await;
+    let now = db_now(&fx.db).await;
+    let d = next_date(&fx, flow).await;
+    assert!(d > past && d <= now, "last missed tick: {d}");
+    assert!(d > now - Duration::minutes(1) - Duration::seconds(5));
+}
+
+#[tokio::test]
+async fn recover_all_and_absent_keep_the_missed_date() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let (a, past_a) = recover_flow(&fx, "    recoverMissedSchedules: ALL\n").await;
+    let (b, past_b) = recover_flow_as(&fx, "g", "").await;
+    reconcile_now(&fx).await;
+    assert_eq!(next_date(&fx, a).await, past_a);
+    assert_eq!(next_date(&fx, b).await, past_b);
+}
+
+#[tokio::test]
+async fn recover_leaves_a_future_date_alone_and_is_start_only() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .create(&flow_yaml(
+            "",
+            &schedule("s", "* * * * *", "    recoverMissedSchedules: NONE\n"),
+            "hi",
+        ))
+        .await;
+    let before = next_date(&fx, flow.id).await;
+    reconcile_now(&fx).await;
+    assert_eq!(
+        next_date(&fx, flow.id).await,
+        before,
+        "not missed: untouched"
+    );
+
+    // A save with a stale date does not re-apply recover: only reconcile does.
+    set_sentinel(&fx.db, flow.id, "s").await;
+    fx.update(
+        flow.id,
+        &flow_yaml(
+            "",
+            &schedule("s", "* * * * *", "    recoverMissedSchedules: NONE\n"),
+            "changed",
+        ),
+    )
+    .await;
+    assert_eq!(
+        next_date(&fx, flow.id).await,
+        sentinel(),
+        "save: no recover"
+    );
+}
+
+#[tokio::test]
+async fn recover_skips_a_trigger_with_an_active_backfill() {
+    let _g = RECOVER.lock().await;
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .create(&flow_yaml(
+            "",
+            &schedule("s", "* * * * *", "    recoverMissedSchedules: NONE\n"),
+            "hi",
+        ))
+        .await;
+    let w0 = origin(&fx.db).await;
+    stage_minutes(&fx.db, flow.id, "s", w0, 3, w0).await;
+    reconcile_now(&fx).await;
+    // The backfill's own resume (sync's re-derive to its next undone tick),
+    // not NONE's reseed to now.
+    assert_eq!(
+        next_date(&fx, flow.id).await,
+        w0 + Duration::minutes(3),
+        "backfill keeps its own resume"
+    );
 }

@@ -14,7 +14,8 @@ use super::backfill::{self, BackfillRow};
 use crate::models::{Schedule, State, Trigger, TriggerKind};
 use crate::repo::{flow_cols, FlowRow};
 use crate::trigger::{
-    BackfillEnd, FixedClock, FlowTriggerError, ScheduleTrigger, TriggerState, WindowFreeFlowTrigger,
+    BackfillEnd, FixedClock, FlowTriggerError, RecoverMissed, ScheduleTrigger, TriggerState,
+    WindowFreeFlowTrigger,
 };
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -568,8 +569,72 @@ async fn reconcile_one(pool: &PgPool, id: Uuid) -> Result<()> {
     .map_err(db_err)?;
     if let Some(flow) = flow {
         sync(&mut tx, &flow, false).await?;
+        recover_missed(&mut tx, &flow).await?;
     }
     tx.commit().await.map_err(db_err)
+}
+
+/// `recoverMissedSchedules` at scheduler start: a schedule whose queued date
+/// is already past (downtime) is moved per its policy -- `NONE` reseeds from
+/// now, `LAST` jumps to the most recent missed tick, `ALL` (the default) keeps
+/// the date so every miss replays. Runs from `reconcile_one` only, i.e. once
+/// per process start; never from `sync` (which also runs on every save). A
+/// trigger with an active backfill keeps the backfill's own resume semantics.
+async fn recover_missed(conn: &mut PgConnection, flow: &FlowRow) -> Result<()> {
+    let Ok(parsed) = crate::spec::parse(&flow.source) else {
+        return Ok(());
+    };
+    let now: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    let rows: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT t.trigger_id, t.next_evaluation_date FROM workflow.triggers t \
+         WHERE t.flow_id = $1 AND t.next_evaluation_date IS NOT NULL \
+           AND t.next_evaluation_date < $2 \
+           AND NOT EXISTS (SELECT 1 FROM workflow.trigger_backfills b \
+                           WHERE b.flow_id = t.flow_id AND b.trigger_id = t.trigger_id)",
+    )
+    .bind(flow.id)
+    .bind(now)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    for (trigger_id, from) in rows {
+        let Some(trigger) = parsed
+            .triggers
+            .iter()
+            .find(|t| t.id == trigger_id && matches!(t.kind, TriggerKind::Schedule(_)))
+        else {
+            continue;
+        };
+        let TriggerKind::Schedule(schedule) = &trigger.kind else {
+            continue;
+        };
+        let Ok(policy) = RecoverMissed::from_model(schedule.recover_missed_schedules.as_ref())
+        else {
+            continue;
+        };
+        let Ok(resolved) = ScheduleTrigger::resolve(trigger) else {
+            continue;
+        };
+        let new = TriggerState::resume_after_backfill(&resolved, from, policy, now);
+        if new == Some(from) {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE workflow.triggers SET next_evaluation_date = $3, evaluated_at = $4, \
+             updated_at = now() WHERE flow_id = $1 AND trigger_id = $2",
+        )
+        .bind(flow.id)
+        .bind(&trigger_id)
+        .bind(new)
+        .bind(now)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
+    }
+    Ok(())
 }
 
 /// `cron|withSeconds|timezone` -- the three fields that decide WHEN. A string,
