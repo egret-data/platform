@@ -167,3 +167,31 @@ scheduler-evaluated → chủ yếu **Schedule**; Flow (event-driven) và Webhoo
   0 xác nhận không gap ẩn.
 - **D5** Lift-refusal discipline: grep code + message + **fixture YAML** khắp
   `tests/` trước khi gỡ warning nào (bài học 9a×2 / 9b×1).
+
+## 9. Kết quả Task 0 (2026-11-26) — phạm vi đã sửa
+
+Đo theo Kestra source local tại cross-ref pinned `96893b589` (controller xác minh):
+
+- **allowConcurrent** — default `false`; `false` tuần tự hoá (HOLD). Honour bởi
+  Schedule + polling trigger; egret không có polling trigger nên **chỉ Schedule**.
+  Lock trên "bất kỳ execution sống của (flow, trigger)" → **DERIVABLE,
+  migration-free** (D1 xác nhận). Tick lỡ bị GIỮ và xử lý tuần tự. → **honour
+  (Schedule)**.
+- **failOnTriggerError** (D6) — chỉ đọc tại `WorkerTriggerProcessor.java:181`
+  (worker/polling trigger). **Không trigger type egret nào consult trong Kestra.**
+  → giữ warning `not_honoured`; Task 3 sửa câu chữ + `lift_of` để đánh dấu là
+  Kestra-divergence egret không act, KHÔNG phải lift package-11 tương lai. Bỏ
+  khỏi các key honour.
+- **stopAfter trên Flow** (D7) — `DefaultExecutor.sendTriggerExecutionTerminated`
+  (`:861-868`) loại Webhook + Flow + Subflow, nên Kestra **no-op** Flow (và
+  Webhook) stopAfter. egret đã honour Webhook stopAfter (11c) như divergence có
+  chủ đích; **honour Flow stopAfter y vậy** (user duyệt). Wiring: disable của
+  Flow listener đọc từ `workflow.flow_listeners`, nên `on_terminal` phải
+  `UPDATE workflow.flow_listeners SET disabled = true` (UPDATE `workflow.triggers`
+  là no-op cho Flow). Migration-free.
+- **dependsOn** — no gap (states/when/dependsOn + window/mode/minSatisfied đều
+  honour; `Flow.java` pinned không có `conditions:` cũ).
+
+Gói đã sửa: Task 1 allowConcurrent (Schedule), Task 2 stopAfter (Flow,
+divergence), Task 3 reconcile (gỡ hai key, sửa câu chữ failOnTriggerError, regen
+census 1224→1226, docs). Migration-free. Migration kế nếu cần là 0244.

@@ -182,3 +182,32 @@ three (Schedule/Webhook done; Flow added here).
   not touch them; Task 0 confirms no hidden gap.
 - **D5** Lift-refusal discipline: grep code + message + **fixture YAML** across
   `tests/` before lifting any warning (9a×2 / 9b×1 lesson).
+
+## 9. Task 0 outcome (2026-11-26) — scope corrected
+
+Measured against the local Kestra source at the pinned cross-reference
+`96893b589` (controller-verified):
+
+- **allowConcurrent** — default `false`; `false` serialises (HOLD). Honoured by
+  Schedule + polling triggers; egret has no polling trigger, so **Schedule
+  only**. Lock keyed on "any live execution of this (flow, trigger)" →
+  **DERIVABLE, migration-free** (D1 confirmed). Missed ticks are HELD and
+  worked off serially. → **honour (Schedule)**.
+- **failOnTriggerError** (D6) — read only in `WorkerTriggerProcessor.java:181`
+  (worker/polling triggers). **No egret trigger type consults it in Kestra.**
+  → stays a `not_honoured` warning; Task 3 corrects its wording and `lift_of`
+  so it is marked a Kestra-divergence egret does not act on, NOT a future
+  package-11 lift. Dropped as an honoured key.
+- **stopAfter on Flow** (D7) — `DefaultExecutor.sendTriggerExecutionTerminated`
+  (`:861-868`) excludes Webhook + Flow + Subflow, so Kestra **no-ops** Flow
+  (and Webhook) stopAfter. egret already honours Webhook stopAfter (11c) as a
+  deliberate divergence; **honour Flow stopAfter the same way** (user-approved).
+  Wiring: the Flow listener's disable is read from `workflow.flow_listeners`, so
+  `on_terminal` must `UPDATE workflow.flow_listeners SET disabled = true` (the
+  `workflow.triggers` UPDATE is a no-op for Flow). Migration-free.
+- **dependsOn** — no gap (states/when/dependsOn + window/mode/minSatisfied all
+  honoured; pinned `Flow.java` has no legacy `conditions:`).
+
+Revised package: Task 1 allowConcurrent (Schedule), Task 2 stopAfter (Flow,
+divergence), Task 3 reconcile (lift the two, correct failOnTriggerError wording,
+regen census 1224→1226, docs). Migration-free. Next migration would be 0244.
