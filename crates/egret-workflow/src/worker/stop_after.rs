@@ -1,5 +1,5 @@
-//! Schedule `stopAfter` (package 11b): when an execution a Schedule trigger
-//! started ends in one of the trigger's `stopAfter` states, the trigger is
+//! Schedule and Webhook `stopAfter` (packages 11b, 11c): when an execution a
+//! Schedule or Webhook trigger started ends in one of the trigger's `stopAfter` states, the trigger is
 //! switched off.
 //!
 //! The off switch is the manual one (`triggers::switch`): a
@@ -15,6 +15,9 @@ use sqlx::PgConnection;
 use super::claim::ExecutionCtx;
 use crate::executor::ExecutionState;
 use crate::models::State;
+
+/// `execution_trigger.type` of a webhook-started execution.
+const WEBHOOK_TYPE: &str = "io.kestra.plugin.core.trigger.Webhook";
 
 /// The settle's hook: `ctx`'s execution just became terminal in `state`.
 pub(super) async fn on_terminal(
@@ -37,7 +40,12 @@ pub(super) async fn on_terminal(
     let Some(trigger) = trigger else {
         return Ok(());
     };
-    if trigger.get("type").and_then(|t| t.as_str()) != Some(crate::scheduler::SCHEDULE_TYPE) {
+    // A webhook has no `workflow.triggers` row, so the UPDATE below is a
+    // no-op for it; the `disabled_triggers` row is what its route reads.
+    if !matches!(
+        trigger.get("type").and_then(|t| t.as_str()),
+        Some(crate::scheduler::SCHEDULE_TYPE | WEBHOOK_TYPE)
+    ) {
         return Ok(());
     }
     let Some(trigger_id) = trigger.get("id").and_then(|t| t.as_str()) else {

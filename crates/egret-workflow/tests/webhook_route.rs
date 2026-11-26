@@ -2254,3 +2254,74 @@ async fn an_unrenderable_webhook_label_is_omitted_and_the_execution_starts() {
         ]))
     );
 }
+
+/// Package 11c: a Webhook's `stopAfter` switches the trigger off once an
+/// execution it started ends in a listed state -- the next POST is a 409.
+#[tokio::test]
+async fn a_webhook_stop_after_disables_the_trigger_after_a_matching_terminal() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let src = hook_flow(&ns).replace(
+        "    key: fx-key\n",
+        "    key: fx-key\n    stopAfter: [FAILED]\n",
+    );
+    let flow = common::seed_flow(&db, ws, user, &src, "draft").await;
+    let app = common::webhook_app(&db).await;
+    let post = || async {
+        common::anon(
+            &app,
+            "POST",
+            &hook_url(ws, &ns, "fx-key"),
+            Some("application/json"),
+            b"{}",
+        )
+        .await
+        .status()
+    };
+    let rows = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.disabled_triggers WHERE flow_id = $1 AND trigger_id = 'fx-trigger'",
+        )
+        .bind(flow)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    };
+
+    // This binary's tests share one worker queue, so a tick may claim another
+    // test's execution: tick until THIS workspace has no unfinished one.
+    let drain = |ok: bool| {
+        let (db, ws) = (&db, ws);
+        async move {
+            for _ in 0..50 {
+                egret_workflow::worker::tick(&db.pool, 3, &common::Answering(ok))
+                    .await
+                    .expect("tick");
+                let open: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM workflow.executions WHERE workspace_id = $1 \
+                     AND state NOT IN ('SUCCESS','FAILED','WARNING','KILLED','CANCELLED')",
+                )
+                .bind(ws)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+                if open == 0 {
+                    return;
+                }
+            }
+            panic!("the execution never reached a terminal state");
+        }
+    };
+
+    // Fire; the execution ends SUCCESS, which is not in stopAfter.
+    assert_eq!(post().await, StatusCode::OK);
+    drain(true).await;
+    assert_eq!(rows().await, 0, "SUCCESS is not in stopAfter");
+    assert_eq!(post().await, StatusCode::OK, "the key still fires");
+
+    // The second execution ends FAILED: now the trigger switches off.
+    drain(false).await;
+    assert_eq!(rows().await, 1, "FAILED is in stopAfter");
+    assert_eq!(post().await, StatusCode::CONFLICT);
+}
