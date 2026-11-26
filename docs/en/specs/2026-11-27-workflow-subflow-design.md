@@ -117,3 +117,13 @@ discipline before lifting.
 
 - Any NEW_EXECUTION or scheduleDate detail where egret's restart/scheduler model differs from
   Kestra's (Task 0 records the exact differences).
+
+## Task 0 outcome (2026-11-27) — scope corrected
+
+Measured against Kestra `96893b589` + egret:
+
+- **labels/inheritLabels, revision, restartBehavior**: tractable, migration-free — honoured in #12. Label composition pinned (child own + [inheritLabels ? parent-exec labels filtered : parent system.*] + task labels + correlationId, deduped; task labels rendered in the parent runContext). revision via `FlowRepo::get_version`. restartBehavior NEW_EXECUTION gates `restart_earlier_child`.
+- **LoopUntil child-by-identity** (row #12 bug): egret matches a Subflow child by `(trigger_execution_id, trigger_run_ix)`; Kestra by `taskRunId`+value+iteration. egret never sets `TaskRun::value` on a Subflow run → may need one child-identity column (migration 0245) — decided in the restartBehavior task.
+- **scheduleDate → split to #12b.** egret has NO seam to defer an already-created execution's start, and the `workflow_executions_scheduled_date_iff_schedule` CHECK (0156/0244) forbids a Subflow child (NULL trigger) from writing `scheduled_date`. Honouring it needs a new deferred-start subsystem (modelled on retry `ExecutionDelay`) + a migration — materially larger than a key wire, so it is its own package #12b (user-approved split 2026-11-27). In #12, `scheduleDate` stays ignored/warned, re-pointed to #12b.
+
+Revised #12: Task 1 labels+inheritLabels, Task 2 revision, Task 3 restartBehavior+LoopUntil-identity, Task 4 reconcile (four keys). Census 1257 → honoured +4.
