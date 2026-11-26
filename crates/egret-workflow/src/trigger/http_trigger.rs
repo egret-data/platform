@@ -98,7 +98,7 @@ mod tests {
         let TriggerKind::HttpTrigger(h) = t.kind else {
             panic!("http trigger")
         };
-        h
+        *h
     }
 
     #[test]

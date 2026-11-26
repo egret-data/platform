@@ -81,7 +81,7 @@ pub enum TriggerKind {
     /// Package 11e. A polling trigger (`io.kestra.plugin.core.http.Trigger`):
     /// scheduled every `interval`, not by a date. Its publish warning is kept
     /// until the package's reconcile task (`FeaturePresence::triggers`).
-    HttpTrigger(HttpTrigger),
+    HttpTrigger(Box<HttpTrigger>),
     Webhook(Webhook),
     Flow(FlowTrigger),
     Leaf {
@@ -553,7 +553,9 @@ fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TriggerKind, serde_
         r#type.to_ascii_lowercase().as_str(),
         "io.kestra.plugin.core.http.trigger" | "core.http.trigger"
     ) {
-        return Ok(TriggerKind::HttpTrigger(serde_json::from_value(rest)?));
+        return Ok(TriggerKind::HttpTrigger(Box::new(serde_json::from_value(
+            rest,
+        )?)));
     }
     let canonical = r#type
         .strip_prefix("io.kestra.plugin.core.trigger.")
