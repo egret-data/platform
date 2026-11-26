@@ -181,8 +181,10 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
             match (t, key) {
                 // Honoured now (package 11d): a Schedule holds a tick while its
                 // execution runs; a Flow trigger stops after its states.
-                (SCHEDULE, "allowConcurrent") | (FLOW_TRIGGER, "stopAfter") => return None,
-                (_, "allowConcurrent" | "stopAfter") => return Some(Package(11)),
+                // `stopAfter` is honoured on every trigger type (11b Schedule,
+                // 11c Webhook, 11d Flow).
+                (_, "stopAfter") | (SCHEDULE, "allowConcurrent") => return None,
+                (_, "allowConcurrent") => return Some(Package(11)),
                 (_, "failOnTriggerError") => {
                     return Some(Lift::Inert(FAIL_ON_TRIGGER_ERROR_REASON))
                 }
@@ -1290,9 +1292,9 @@ mod tests {
         assert_eq!(
             lift_of(
                 Site::Trigger("io.kestra.plugin.core.trigger.Schedule"),
-                "stopAfter"
+                "allowConcurrent"
             ),
-            Some(Package(11))
+            None
         );
         assert_eq!(lift_of(Site::Input("FORM"), "inputs"), Some(Enterprise));
         assert_eq!(lift_of(Site::Input("SELECT"), "values"), None);
@@ -2108,7 +2110,6 @@ mod tests {
         assert_eq!(
             paths,
             std::collections::BTreeSet::from([
-                "triggers.a.stopAfter",
                 "triggers.e.allowConcurrent",
                 "triggers.e.failOnTriggerError",
                 "triggers.g.allowConcurrent",
@@ -2223,7 +2224,6 @@ mod tests {
         for (t, key) in [
             (SCHED, "labels"),
             (HOOK, "labels"),
-            (SCHED, "stopAfter"),
             (HOOK, "allowConcurrent"),
             (FLOWT, "allowConcurrent"),
         ] {
@@ -2235,7 +2235,9 @@ mod tests {
         }
         // Package 11d honours these two cells.
         assert_eq!(lift_of(Site::Trigger(SCHED), "allowConcurrent"), None);
-        assert_eq!(lift_of(Site::Trigger(FLOWT), "stopAfter"), None);
+        for t in [SCHED, HOOK, FLOWT] {
+            assert_eq!(lift_of(Site::Trigger(t), "stopAfter"), None, "{t}");
+        }
         // `failOnTriggerError` is inert on every trigger type and no package lifts it.
         for t in [SCHED, HOOK, FLOWT] {
             assert!(
