@@ -149,6 +149,15 @@ async fn last_error(db: &Db, flow: Uuid) -> Option<String> {
     .unwrap()
 }
 
+/// The one execution's stored `labels` array (`[{key,value}]`), or `None`.
+async fn labels_of(db: &Db, flow: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT labels FROM workflow.executions WHERE flow_id = $1")
+        .bind(flow)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+}
+
 async fn executions_of(db: &Db, flow: Uuid) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE flow_id = $1")
         .bind(flow)
@@ -291,6 +300,75 @@ async fn a_live_execution_holds_the_poll_when_concurrency_is_off() {
         executions_of(&fx.db, flow).await,
         1,
         "no second fire while live"
+    );
+}
+
+// ---- (f) the trigger's base `when` gates the fire and sees the response -----
+
+#[tokio::test]
+async fn the_base_when_gates_the_fire_and_reads_the_response() {
+    let Some(fx) = fx().await else { return };
+    let server = serve().await;
+
+    // A falsy `when` against a 200: `responseCondition` is truthy (200 < 400),
+    // but the base `when` -- evaluated with `response` bound -- is not, so
+    // NOTHING fires. A silent no-fire: the interval advanced, no error.
+    let gated = fx
+        .flow(
+            "when-gated",
+            &server.url("/ok"),
+            "    allowConcurrent: true\n    when: \"{{ response.statusCode == 500 }}\"\n",
+        )
+        .await;
+    set_due(&fx.db, gated).await;
+    let r = fx.pass().await;
+    assert_eq!((r.fired, r.errored), (0, 0), "{r:?}");
+    assert_eq!(r.skipped, 1, "when gated the fire out: {r:?}");
+    assert_eq!(executions_of(&fx.db, gated).await, 0);
+    assert!(next_date(&fx.db, gated).await.unwrap() > Utc::now());
+    assert_eq!(
+        last_error(&fx.db, gated).await,
+        None,
+        "no error, just no fire"
+    );
+
+    // A truthy `when` reading the same response: fires one execution.
+    let fires = fx
+        .flow(
+            "when-fires",
+            &server.url("/ok"),
+            "    allowConcurrent: true\n    when: \"{{ response.statusCode == 200 }}\"\n",
+        )
+        .await;
+    set_due(&fx.db, fires).await;
+    let r = fx.pass().await;
+    assert_eq!(r.fired, 1, "a truthy when fires: {r:?}");
+    assert_eq!(executions_of(&fx.db, fires).await, 1);
+}
+
+// ---- (g) a templated label is rendered against the fire context -------------
+
+#[tokio::test]
+async fn a_templated_label_is_rendered_against_the_fire_context() {
+    let Some(fx) = fx().await else { return };
+    let server = serve().await;
+    // `{{ trigger.code }}` is the polled status (11a's binding); the label value
+    // must be the RENDERED "200", not the literal template.
+    let flow = fx
+        .flow(
+            "labelled",
+            &server.url("/ok"),
+            "    allowConcurrent: true\n    labels:\n      status: \"{{ trigger.code }}\"\n",
+        )
+        .await;
+    set_due(&fx.db, flow).await;
+
+    let r = fx.pass().await;
+    assert_eq!(r.fired, 1, "{r:?}");
+    assert_eq!(
+        labels_of(&fx.db, flow).await,
+        Some(serde_json::json!([{"key": "status", "value": "200"}])),
+        "the templated label is rendered"
     );
 }
 

@@ -991,17 +991,75 @@ async fn run_http_poll(pool: &PgPool, job: HttpPollJob) -> Result<Fate> {
         return Ok(Fate::Skipped);
     }
 
-    // 4. Fire. `Request.Output` is bound as the trigger record's `variables`,
-    //    so 11a's `{{ trigger.* }}` binding exposes `trigger.uri`,
-    //    `trigger.code`, `trigger.headers`, `trigger.body`. No `scheduled_date`
-    //    (not a date tick): the `workflow_executions_scheduled_date_iff_schedule`
-    //    CHECK is satisfied by NULL for a non-Schedule type.
+    // 4. `when` (package 11e): the trigger's base condition, honoured the same
+    //    way egret honours it on a Schedule -- render, then `is_truthy`; a falsy
+    //    or unrenderable result fires nothing. It renders against the poll
+    //    context plus the bound `response` and the `trigger.*` variables the
+    //    fired execution sees (11a), so both `{{ response.* }}` and
+    //    `{{ trigger.code }}` resolve, matching what the execution would see.
+    //    `responseCondition` truthy AND `when` truthy => fire. The interval has
+    //    already advanced, so any no-fire here is a silent `Skipped`.
     let variables = serde_json::json!({
         "uri": uri,
         "code": status.as_u16(),
         "headers": headers_out,
         "body": body,
     });
+    if let Some(when) = job
+        .trigger
+        .when
+        .as_ref()
+        .map(|w| w.source().to_string())
+        .filter(|s| s != "true")
+    {
+        let mut when_props = serde_json::Map::new();
+        when_props.insert(WHEN_KEY.into(), when.into());
+        let mut when_cx = poll_context(&job);
+        when_cx.insert(
+            "response",
+            serde_json::json!({
+                "statusCode": status.as_u16(),
+                "body": body,
+                "headers": headers_out,
+            }),
+        );
+        // `trigger.*` as the fired execution sees it: the record's id/type plus
+        // the `Request.Output` variables, so `{{ trigger.code }}` resolves to
+        // the polled status exactly as it will in the execution.
+        when_cx.insert(
+            "trigger",
+            serde_json::json!({
+                "id": job.trigger.id,
+                "type": job.trigger.r#type,
+                "uri": uri,
+                "code": status.as_u16(),
+                "headers": headers_out,
+                "body": body,
+            }),
+        );
+        let when_rendered =
+            match render_with_secrets(&when_props, &when_cx, job.workspace_id, secrets.as_ref())
+                .await
+            {
+                Ok((rendered, _)) => rendered,
+                // Fail-safe, as the Schedule `when` and the labels: an unrenderable
+                // `when` fires nothing; the interval has already advanced.
+                Err(_) => return Ok(Fate::Skipped),
+            };
+        let when_truthy = when_rendered
+            .get(WHEN_KEY)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(crate::executor::is_truthy);
+        if !when_truthy {
+            return Ok(Fate::Skipped);
+        }
+    }
+
+    // 5. Fire. `Request.Output` is bound as the trigger record's `variables`,
+    //    so 11a's `{{ trigger.* }}` binding exposes `trigger.uri`,
+    //    `trigger.code`, `trigger.headers`, `trigger.body`. No `scheduled_date`
+    //    (not a date tick): the `workflow_executions_scheduled_date_iff_schedule`
+    //    CHECK is satisfied by NULL for a non-Schedule type.
     fire_http_execution(pool, &job, variables, false).await
 }
 
@@ -1009,6 +1067,8 @@ async fn run_http_poll(pool: &PgPool, job: HttpPollJob) -> Result<Fate> {
 const DEFAULT_RESPONSE_CONDITION: &str = "{{ response.statusCode < 400 }}";
 /// The one-key map the condition is rendered through.
 const RESPONSE_CONDITION_KEY: &str = "responseCondition";
+/// The one-key map the trigger's base `when` is rendered through (package 11e).
+const WHEN_KEY: &str = "when";
 
 /// Package 11e: a transport/render/eval failure is a "trigger error". With
 /// `failOnTriggerError: true` it starts a born-failed execution (11d's
@@ -1045,15 +1105,40 @@ async fn fire_http_execution(
         "type": job.trigger.r#type,
         "variables": variables,
     });
-    let labels = (!job.trigger.labels.is_empty()).then(|| {
-        serde_json::Value::Array(
-            job.trigger
-                .labels
-                .iter()
-                .map(|l| serde_json::json!({"key": l.key, "value": l.value}))
-                .collect(),
-        )
-    });
+    // Package 11e: the trigger's own `labels`, each value RENDERED against the
+    // poll/fire context -- `flow` plus the `trigger.*` the execution sees (its
+    // id/type and the `Request.Output` variables) -- exactly as Schedule and
+    // Webhook render theirs, so `{{ trigger.code }}` resolves. A label whose
+    // template does not render is OMITTED and the rest proceed (Kestra, as the
+    // webhook path), so there is no fail-safe here. A born-failed execution
+    // carries empty `variables`, so `{{ trigger.* }}` labels drop out there.
+    let labels = {
+        let mut label_cx = crate::runners::RenderContext::new();
+        label_cx.insert(
+            "flow",
+            serde_json::json!({"id": job.flow_key, "namespace": job.namespace}),
+        );
+        let mut trigger_vars = serde_json::json!({
+            "id": job.trigger.id,
+            "type": job.trigger.r#type,
+        });
+        if let (Some(dst), Some(src)) = (trigger_vars.as_object_mut(), variables.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        label_cx.insert("trigger", trigger_vars);
+        let rendered: Vec<serde_json::Value> = job
+            .trigger
+            .labels
+            .iter()
+            .filter_map(|l| {
+                let value = crate::render_str(&l.value, &label_cx).ok()?;
+                Some(serde_json::json!({"key": l.key, "value": value}))
+            })
+            .collect();
+        (!rendered.is_empty()).then_some(serde_json::Value::Array(rendered))
+    };
     let source = job.source.clone();
     let started: Result<Uuid> = transaction!(pool, |at| {
         start_execution_in_with(
