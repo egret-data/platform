@@ -1403,18 +1403,18 @@
       "id": "honoured",
       "inputs": "honoured",
       "key": "honoured",
-      "labels": "ignored",
+      "labels": "honoured",
       "logLevel": "ignored",
       "logToFile": "ignored",
       "policyRefs": "ignored",
-      "responseCode": "refused",
-      "responseContentType": "refused",
-      "returnOutputs": "refused",
+      "responseCode": "honoured",
+      "responseContentType": "honoured",
+      "returnOutputs": "honoured",
       "stopAfter": "ignored",
       "type": "honoured",
       "version": "ignored",
-      "wait": "refused",
-      "when": "ignored",
+      "wait": "honoured",
+      "when": "honoured",
       "workerSelector": "ignored"
     },
     "io.kestra.plugin.scripts.python.Commands": {
@@ -1994,11 +1994,7 @@
       "timezone=\"VST\"": "trigger::schedule::ScheduleTrigger::resolve: unknown timezone \"VST\""
     },
     "io.kestra.plugin.core.trigger.Webhook": {
-      "fetchType=\"STORE\"": "trigger::webhook::build_output (409 at firing): webhook trigger 't' declares fetchType: STORE, which egret does not implement yet -- the request body would have to be written to internal storage and reach the flow as `trigger.uri`",
-      "responseCode": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares responseCode, which egret does not implement yet -- it is the status of a held-open response (roadmap package #11)",
-      "responseContentType": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares responseContentType, which egret does not implement yet -- it describes the body of a held-open response (roadmap package #11)",
-      "returnOutputs": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares returnOutputs: true, which egret does not implement yet -- it needs the same held-open response wait: true does (roadmap package #11)",
-      "wait": "trigger::webhook::declared_unsupported (409 at firing): webhook trigger 't' declares wait: true, which egret does not implement yet -- the response would have to be held open until the execution terminates (roadmap package #11)"
+      "fetchType=\"STORE\"": "trigger::webhook::build_output (409 at firing): webhook trigger 't' declares fetchType: STORE, which egret does not implement yet -- the request body would have to be written to internal storage and reach the flow as `trigger.uri`"
     }
   }
 }

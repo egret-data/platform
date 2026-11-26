@@ -880,15 +880,15 @@ async fn a_disabled_flow_is_refused_after_the_key_matches() {
     assert_eq!(common::execution_count(&db, ws).await, 1);
 }
 
-/// The three things this port cannot do are refused **by name**, never
+/// The two things this port still cannot do are refused **by name**, never
 /// approximated. An approximated `fetchType: STORE` would hand the flow a
 /// trigger with the body silently missing.
 ///
-/// **Six rows, not one**, and four of them are fix round 1's Important 3:
-/// `returnOutputs`, `responseContentType` and `responseCode` were parsed into
-/// `models::Webhook` and then silently dropped — an author could write them,
-/// they validated, and they changed nothing. That is the `lateMaximumDelay`
-/// shape this branch has now hit three times.
+/// The four sync-response keys (`wait`/`returnOutputs`/`responseContentType`/
+/// `responseCode`) are **no longer here**: package 11c Task 4 implements them,
+/// and their own tests below exercise the response they produce. What remains is
+/// `fetchType: STORE` (refused on the declaration via `build_output`) and
+/// `multipart/form-data` (refused on the request).
 #[tokio::test]
 async fn the_unsupported_declarations_are_refused_by_name() {
     let Some(db) = common::db().await else { return };
@@ -896,39 +896,32 @@ async fn the_unsupported_declarations_are_refused_by_name() {
     let base = fresh_namespace();
     let app = common::webhook_app(&db).await;
 
-    for (suffix, needle) in [
-        ("    wait: true\n", "wait: true"),
-        ("    returnOutputs: true\n", "returnOutputs: true"),
-        (
-            "    responseContentType: \"text/plain\"\n",
-            "responseContentType",
-        ),
-        ("    responseCode: 202\n", "responseCode"),
-        ("    fetchType: STORE\n", "fetchType: STORE"),
-    ] {
-        let ns = format!(
-            "{base}.{}",
-            needle.replace([':', ' ', '/'], "-").to_lowercase()
-        );
-        let flow =
-            hook_flow(&ns).replace("    key: fx-key\n", &format!("    key: fx-key\n{suffix}"));
-        common::seed_flow(&db, ws, user, &flow, "draft").await;
-        let res = common::anon(
-            &app,
-            "POST",
-            &url(ws, &ns, "fx-flow", "fx-key"),
-            Some("application/json"),
-            b"{}",
-        )
-        .await;
-        assert_eq!(res.status(), StatusCode::CONFLICT, "{needle} was ACCEPTED");
-        let body = common::body_text(res).await;
-        assert!(
-            body.contains(needle),
-            "the refusal must name {needle}; got {body}"
-        );
-        assert!(body.contains("fx-trigger"), "and the trigger; got {body}");
-    }
+    // fetchType: STORE is refused from the declaration.
+    let ns = format!("{base}.store");
+    let flow = hook_flow(&ns).replace(
+        "    key: fx-key\n",
+        "    key: fx-key\n    fetchType: STORE\n",
+    );
+    common::seed_flow(&db, ws, user, &flow, "draft").await;
+    let res = common::anon(
+        &app,
+        "POST",
+        &url(ws, &ns, "fx-flow", "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::CONFLICT,
+        "fetchType: STORE was ACCEPTED"
+    );
+    let body = common::body_text(res).await;
+    assert!(
+        body.contains("fetchType: STORE"),
+        "the refusal must name it; got {body}"
+    );
+    assert!(body.contains("fx-trigger"), "and the trigger; got {body}");
 
     // multipart is refused on the REQUEST rather than on the declaration.
     let multi = format!("{base}.multi");
@@ -944,9 +937,8 @@ async fn the_unsupported_declarations_are_refused_by_name() {
     assert_eq!(res.status(), StatusCode::CONFLICT);
     assert!(common::body_text(res).await.contains("multipart/form-data"));
 
-    // The control: the SAME fixture with none of the six declared does fire.
-    // Without it every row above is satisfied by a handler that refuses
-    // everything.
+    // The control: the SAME fixture with neither declared does fire. Without it
+    // every row above is satisfied by a handler that refuses everything.
     let plain = format!("{base}.plain");
     common::seed_flow(&db, ws, user, &hook_flow(&plain), "draft").await;
     let res = common::anon(
@@ -962,7 +954,7 @@ async fn the_unsupported_declarations_are_refused_by_name() {
     assert_eq!(
         common::execution_count(&db, ws).await,
         1,
-        "exactly the control -- not one of the six refusals started anything"
+        "exactly the control -- neither refusal started anything"
     );
 }
 
@@ -2154,5 +2146,562 @@ async fn a_foreach_is_refused_and_starts_nothing() {
         .await
         .unwrap(),
         1
+    );
+}
+
+// ---- package 11c Task 1: the trigger's own `labels` ----
+
+fn labelled_hook_flow(ns: &str, trigger_labels: &str) -> String {
+    format!(
+        "\
+id: fx-flow
+namespace: {ns}
+labels:
+  team: data
+tasks:
+  - id: fx-task
+    type: core.log
+    message: hello
+triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+    labels:
+{trigger_labels}"
+    )
+}
+
+async fn only_execution_labels(db: &egret_metastore::Db, ws: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT labels FROM workflow.executions WHERE workspace_id = $1")
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read labels")
+}
+
+/// The trigger's `labels:` reach the execution, a templated value rendered
+/// against the webhook record, in declaration order. The flow's own `labels:`
+/// stay on the flow and are merged first by every reader
+/// (`labels::visible_labels`), so the stored own-labels hold the trigger's only.
+#[tokio::test]
+async fn webhook_trigger_labels_reach_the_execution() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let flow = labelled_hook_flow(
+        &ns,
+        "      env: prod\n      src: \"{{ trigger.parameters.who[0] }}\"\n",
+    );
+    common::seed_flow(&db, ws, user, &flow, "draft").await;
+    let app = common::webhook_app(&db).await;
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &format!("{}?who=alice", hook_url(ws, &ns, "fx-key")),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    assert_eq!(
+        only_execution_labels(&db, ws).await,
+        Some(json!([
+            {"key": "env", "value": "prod"},
+            {"key": "src", "value": "alice"}
+        ]))
+    );
+}
+
+/// Kestra OMITS a webhook label whose template does not render and still starts
+/// the execution -- the opposite of the Schedule fail-safe.
+#[tokio::test]
+async fn an_unrenderable_webhook_label_is_omitted_and_the_execution_starts() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let flow = labelled_hook_flow(
+        &ns,
+        "      env: prod\n      bad: \"{{ nosuchroot.nothing }}\"\n      last: z\n",
+    );
+    common::seed_flow(&db, ws, user, &flow, "draft").await;
+    let app = common::webhook_app(&db).await;
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+    assert_eq!(
+        only_execution_labels(&db, ws).await,
+        Some(json!([
+            {"key": "env", "value": "prod"},
+            {"key": "last", "value": "z"}
+        ]))
+    );
+}
+
+/// `worker::tick` claims every runnable execution in the database and settles
+/// it with the injected `Answering` outcome, so two tests driving ticks with
+/// different outcomes could flip each other's result. Every test in this file
+/// that ticks holds this guard for its whole body.
+static TICK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Package 11c: a Webhook's `stopAfter` switches the trigger off once an
+/// execution it started ends in a listed state -- the next POST is a 409.
+#[tokio::test]
+async fn a_webhook_stop_after_disables_the_trigger_after_a_matching_terminal() {
+    let _tick = TICK.lock().await;
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let src = hook_flow(&ns).replace(
+        "    key: fx-key\n",
+        "    key: fx-key\n    stopAfter: [FAILED]\n",
+    );
+    let flow = common::seed_flow(&db, ws, user, &src, "draft").await;
+    let app = common::webhook_app(&db).await;
+    let post = || async {
+        common::anon(
+            &app,
+            "POST",
+            &hook_url(ws, &ns, "fx-key"),
+            Some("application/json"),
+            b"{}",
+        )
+        .await
+        .status()
+    };
+    let rows = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workflow.disabled_triggers WHERE flow_id = $1 AND trigger_id = 'fx-trigger'",
+        )
+        .bind(flow)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    };
+
+    // This binary's tests share one worker queue, so a tick may claim another
+    // test's execution: tick until THIS workspace has no unfinished one.
+    let drain = |ok: bool| {
+        let (db, ws) = (&db, ws);
+        async move {
+            for _ in 0..50 {
+                egret_workflow::worker::tick(&db.pool, 3, &common::Answering(ok))
+                    .await
+                    .expect("tick");
+                let open: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM workflow.executions WHERE workspace_id = $1 \
+                     AND state NOT IN ('SUCCESS','FAILED','WARNING','KILLED','CANCELLED')",
+                )
+                .bind(ws)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+                if open == 0 {
+                    return;
+                }
+            }
+            panic!("the execution never reached a terminal state");
+        }
+    };
+
+    // Fire; the execution ends SUCCESS, which is not in stopAfter.
+    assert_eq!(post().await, StatusCode::OK);
+    drain(true).await;
+    assert_eq!(rows().await, 0, "SUCCESS is not in stopAfter");
+    assert_eq!(post().await, StatusCode::OK, "the key still fires");
+
+    // The second execution ends FAILED: now the trigger switches off.
+    drain(false).await;
+    assert_eq!(rows().await, 1, "FAILED is in stopAfter");
+    assert_eq!(post().await, StatusCode::CONFLICT);
+}
+
+// ---- package 11c Task 3: the trigger's `when:` ----
+
+fn when_hook_flow(ns: &str, when_lines: &str) -> String {
+    format!(
+        "\
+id: fx-flow
+namespace: {ns}
+tasks:
+  - id: fx-task
+    type: core.log
+    message: hello
+triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+{when_lines}"
+    )
+}
+
+/// POST once to a webhook flow carrying `when_lines`; answer
+/// (status, body length, execution count).
+async fn post_when(when_lines: &str, query: &str) -> (StatusCode, usize, i64) {
+    let db = common::db().await.expect("db");
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    common::seed_flow(&db, ws, user, &when_hook_flow(&ns, when_lines), "draft").await;
+    let app = common::webhook_app(&db).await;
+    let res = common::anon(
+        &app,
+        "POST",
+        &format!("{}{query}", hook_url(ws, &ns, "fx-key")),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    let status = res.status();
+    let len = common::body_text(res).await.len();
+    (status, len, common::execution_count(&db, ws).await)
+}
+
+/// A falsy `when` answers 204 with no body and starts nothing. Kestra
+/// `WebhookService.newExecution` -> `conditionService.isValid`.
+#[tokio::test]
+async fn a_falsy_webhook_when_answers_204_and_starts_nothing() {
+    if common::db().await.is_none() {
+        return;
+    }
+    let (s, len, n) = post_when("    when: \"false\"\n", "").await;
+    assert_eq!((s, len, n), (StatusCode::NO_CONTENT, 0, 0));
+
+    let (s, len, n) = post_when(
+        "    when: \"{{ trigger.parameters.go[0] == 'yes' }}\"\n",
+        "?go=no",
+    )
+    .await;
+    assert_eq!(
+        (s, len, n),
+        (StatusCode::NO_CONTENT, 0, 0),
+        "templated falsy"
+    );
+}
+
+/// A `when` that fails to render is also a 204, not an error.
+#[tokio::test]
+async fn an_unrenderable_webhook_when_answers_204_and_starts_nothing() {
+    if common::db().await.is_none() {
+        return;
+    }
+    let (s, len, n) = post_when("    when: \"{{ nosuch.ref }}\"\n", "").await;
+    assert_eq!((s, len, n), (StatusCode::NO_CONTENT, 0, 0));
+}
+
+/// The controls: a truthy or absent `when` fires.
+#[tokio::test]
+async fn a_truthy_or_absent_webhook_when_fires() {
+    if common::db().await.is_none() {
+        return;
+    }
+    for (line, q) in [
+        ("    when: \"true\"\n", ""),
+        ("", ""),
+        (
+            "    when: \"{{ trigger.parameters.go[0] == 'yes' }}\"\n",
+            "?go=yes",
+        ),
+    ] {
+        let (s, _, n) = post_when(line, q).await;
+        assert_eq!((s, n), (StatusCode::OK, 1), "{line:?}{q}");
+    }
+}
+
+/// A falsy `when` short-circuits BEFORE `inputs` render: an input that would
+/// answer 400 is never reached.
+#[tokio::test]
+async fn a_falsy_webhook_when_short_circuits_before_inputs() {
+    if common::db().await.is_none() {
+        return;
+    }
+    let (s, len, n) = post_when(
+        "    when: \"false\"\n    inputs:\n      x: \"{{ nosuch.ref }}\"\n",
+        "",
+    )
+    .await;
+    assert_eq!((s, len, n), (StatusCode::NO_CONTENT, 0, 0));
+}
+
+// ---- package 11c Task 4: the synchronous response ----
+//
+// `wait: true` holds the response open until the execution is idle, then answers
+// with its outputs / status / content-type. Driving the execution to terminal
+// needs a worker tick, so each test here runs the POST and the ticks CONCURRENTLY
+// (`tokio::join!`): the request polls `execution_is_idle` while the drive loop
+// ticks until this workspace has no unfinished execution. `tick` is global, so
+// these hold `TICK` for their whole body, exactly as the stopAfter test does.
+
+/// A registry that answers every task SUCCESS carrying a fixed output map, so a
+/// flow's `outputs:` and a `responseCode` template have real task outputs to
+/// read. `Answering` (common) answers with *no* outputs, which these need.
+struct AnsweringWith(serde_json::Value);
+
+#[async_trait::async_trait]
+impl egret_workflow::worker::Registry for AnsweringWith {
+    async fn run(
+        &self,
+        _task: &egret_workflow::worker::TaskInput,
+    ) -> egret_core::Result<egret_workflow::worker::Outcome> {
+        Ok(egret_workflow::worker::Outcome::succeeded_with(
+            self.0.clone(),
+        ))
+    }
+    async fn cancel(&self, _task: &egret_workflow::worker::TaskInput) -> egret_core::Result<()> {
+        Ok(())
+    }
+}
+
+/// Tick the global worker queue until `ws` has at least one execution and none
+/// of them is still unfinished, with `reg` as the outcome. Mirrors the
+/// stopAfter test's `drain`, but runs CONCURRENTLY with a held-open request.
+async fn drive_ws_to_terminal<R: egret_workflow::worker::Registry>(
+    db: &egret_metastore::Db,
+    ws: Uuid,
+    reg: &R,
+) {
+    for _ in 0..1200 {
+        egret_workflow::worker::tick(&db.pool, 64, reg)
+            .await
+            .expect("tick");
+        let (total, open): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER ( \
+                WHERE state NOT IN ('SUCCESS','FAILED','WARNING','KILLED','CANCELLED')) \
+             FROM workflow.executions WHERE workspace_id = $1",
+        )
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if total >= 1 && open == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the execution never reached a terminal state");
+}
+
+// NOTE the task id is `fxtask`, with no hyphen: a `responseCode` or `outputs:`
+// template reads it with dotted access (`outputs.fxtask.values.code`), and Jinja
+// parses `outputs.fx-task` as the subtraction `outputs.fx - task`.
+fn wait_flow(ns: &str, trigger_lines: &str, outputs: &str) -> String {
+    format!(
+        "\
+id: fx-flow
+namespace: {ns}
+tasks:
+  - id: fxtask
+    type: core.log
+    message: hello
+{outputs}triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+{trigger_lines}"
+    )
+}
+
+/// (a) `wait: true` + `returnOutputs: true`, flow SUCCESS -> the body is the
+/// bare flow-level `outputs` map and the status is 200.
+#[tokio::test]
+async fn wait_with_return_outputs_answers_the_bare_outputs_map() {
+    let _tick = TICK.lock().await;
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let src = wait_flow(
+        &ns,
+        "    wait: true\n    returnOutputs: true\n",
+        "outputs:\n  - id: result\n    type: STRING\n    value: \"{{ outputs.fxtask.values.greeting }}\"\n",
+    );
+    common::seed_flow(&db, ws, user, &src, "draft").await;
+    let app = common::webhook_app(&db).await;
+    let reg = AnsweringWith(json!({"values": {"greeting": "hi"}}));
+
+    let url = hook_url(ws, &ns, "fx-key");
+    let post = common::anon(&app, "POST", &url, Some("application/json"), b"{}");
+    let (res, ()) = tokio::join!(post, drive_ws_to_terminal(&db, ws, &reg));
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+    let body: serde_json::Value = serde_json::from_str(&common::body_text(res).await).unwrap();
+    assert_eq!(
+        body,
+        json!({"result": "hi"}),
+        "the body is the bare flow outputs map, not the WebhookResponse"
+    );
+}
+
+/// (b) `wait: true`, flow FAILED, no declared `responseCode` -> 500.
+#[tokio::test]
+async fn wait_on_a_failed_flow_without_response_code_is_500() {
+    let _tick = TICK.lock().await;
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let src = wait_flow(&ns, "    wait: true\n", "");
+    common::seed_flow(&db, ws, user, &src, "draft").await;
+    let app = common::webhook_app(&db).await;
+
+    let url = hook_url(ws, &ns, "fx-key");
+    let post = common::anon(&app, "POST", &url, Some("application/json"), b"{}");
+    let (res, ()) = tokio::join!(
+        post,
+        drive_ws_to_terminal(&db, ws, &common::Answering(false))
+    );
+    assert_eq!(
+        res.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a FAILED terminal with no responseCode is 500"
+    );
+    let body: serde_json::Value = serde_json::from_str(&common::body_text(res).await).unwrap();
+    assert_eq!(
+        body["state"],
+        json!("FAILED"),
+        "without returnOutputs the body is the terminal WebhookResponse"
+    );
+}
+
+/// (c) a declared `responseCode` rendered from the terminal task outputs sets
+/// the status, even without `returnOutputs`.
+#[tokio::test]
+async fn a_declared_response_code_is_rendered_from_terminal_outputs() {
+    let _tick = TICK.lock().await;
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let src = wait_flow(
+        &ns,
+        "    wait: true\n    responseCode: \"{{ outputs.fxtask.values.code }}\"\n",
+        "",
+    );
+    common::seed_flow(&db, ws, user, &src, "draft").await;
+    let app = common::webhook_app(&db).await;
+    let reg = AnsweringWith(json!({"values": {"code": 201}}));
+
+    let url = hook_url(ws, &ns, "fx-key");
+    let post = common::anon(&app, "POST", &url, Some("application/json"), b"{}");
+    let (res, ()) = tokio::join!(post, drive_ws_to_terminal(&db, ws, &reg));
+    assert_eq!(
+        res.status(),
+        StatusCode::CREATED,
+        "the rendered responseCode 201 wins even though the flow SUCCEEDED (would be 200)"
+    );
+}
+
+/// (d) `responseContentType: text/plain` sets the `Content-Type`.
+#[tokio::test]
+async fn response_content_type_sets_the_content_type_header() {
+    let _tick = TICK.lock().await;
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let src = wait_flow(
+        &ns,
+        "    wait: true\n    responseContentType: \"text/plain\"\n",
+        "",
+    );
+    common::seed_flow(&db, ws, user, &src, "draft").await;
+    let app = common::webhook_app(&db).await;
+
+    let url = hook_url(ws, &ns, "fx-key");
+    let post = common::anon(&app, "POST", &url, Some("application/json"), b"{}");
+    let (res, ()) = tokio::join!(
+        post,
+        drive_ws_to_terminal(&db, ws, &common::Answering(true))
+    );
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("text/plain"),
+        "the declared responseContentType is the Content-Type"
+    );
+}
+
+/// (e) `wait: false` (the default) still returns `state: "CREATED"` at once,
+/// without any worker having run.
+#[tokio::test]
+async fn wait_false_is_fire_and_forget() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    // wait: false declared explicitly, and a returnOutputs: false beside it, to
+    // pin that neither changes the asynchronous answer.
+    let src = wait_flow(&ns, "    wait: false\n    returnOutputs: false\n", "");
+    common::seed_flow(&db, ws, user, &src, "draft").await;
+    let app = common::webhook_app(&db).await;
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&common::body_text(res).await).unwrap();
+    assert_eq!(body["state"], json!("CREATED"));
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+}
+
+/// The egret cap: `wait: true` with nothing driving the execution to terminal
+/// degrades to the fire-and-forget shape once the cap elapses -- a 200 with the
+/// execution's current (non-terminal) state. It holds `TICK` (and ticks
+/// nothing) so no concurrent test can settle its execution before the cap.
+///
+/// A freshly started execution is already `RUNNING` (the create's `Tick(0)`
+/// settle schedules its tasks before any worker runs), so the degraded response
+/// carries a non-terminal state that is `RUNNING`, not `CREATED`. What the cap
+/// must guarantee is only that the state is **not terminal** -- the execution
+/// kept running.
+#[tokio::test]
+async fn wait_degrades_to_fire_and_forget_at_the_cap() {
+    let _tick = TICK.lock().await;
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let src = wait_flow(&ns, "    wait: true\n    returnOutputs: true\n", "");
+    common::seed_flow(&db, ws, user, &src, "draft").await;
+    // A cap short enough that the test does not wait the production 55 s.
+    let app = common::webhook_app_with_wait_cap(&db, std::time::Duration::from_millis(150)).await;
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the cap degrades to the fire-and-forget shape, HTTP 200"
+    );
+    let body: serde_json::Value = serde_json::from_str(&common::body_text(res).await).unwrap();
+    let state = body["state"].as_str().unwrap();
+    assert!(
+        !["SUCCESS", "FAILED", "WARNING", "KILLED", "CANCELLED"].contains(&state),
+        "the cap must return a NON-terminal state (the execution kept running); got {state}"
+    );
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        1,
+        "the execution keeps running; the cap only ends the wait"
     );
 }

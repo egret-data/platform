@@ -574,6 +574,8 @@ async fn the_webhook_path_key_error_and_unsupported() {
         entry(&body, "broken")["webhook"],
         json!({ "url_path": null, "key_error": "the key does not render", "unsupported": null })
     );
+    // Package 11c Task 4: `wait` is implemented, so a webhook declaring it is
+    // served with no `unsupported` hint.
     let w = &entry(&body, "waits")["webhook"];
     assert_eq!(
         w["url_path"],
@@ -581,10 +583,7 @@ async fn the_webhook_path_key_error_and_unsupported() {
             "/workflows/v1/{ws}/executions/webhook/company.a/hooks/plain"
         ))
     );
-    assert!(
-        w["unsupported"].as_str().unwrap().contains("wait: true"),
-        "{w}"
-    );
+    assert_eq!(w["unsupported"], json!(null), "{w}");
 }
 
 // ── 6. last execution ─────────────────────────────────────────────────────────

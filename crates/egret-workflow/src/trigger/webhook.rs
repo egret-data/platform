@@ -160,12 +160,18 @@
 //! # Where this is knowingly narrower than Kestra, stated rather than found
 //!
 //! * **`wait:`, `returnOutputs:`, `responseContentType:` and `responseCode:`
-//!   are not implemented.** They are `Webhook.evaluate`'s streaming path —
-//!   `WebhookService.followExecution` returns a `Flux<Event<Execution>>` and
-//!   the response is held open until the execution terminates. egret answers
-//!   the asynchronous shape only. A flow declaring them still fires; it simply
-//!   gets the `CREATED` response immediately. **Not silently**: see
-//!   [`Unsupported::Wait`].
+//!   are implemented** (package 11c Task 4). They are `Webhook.evaluate`'s
+//!   streaming path — `WebhookService.followExecution` returns a
+//!   `Flux<Event<Execution>>` and the response is held open until the execution
+//!   terminates. egret reproduces the *outcome* without the stream: the route
+//!   bounds-polls `workflow.execution_is_idle` and then answers with the
+//!   terminal execution's outputs/status/content-type (see
+//!   [`crate::webhook_routes`]). The one deliberate divergence is a **cap**:
+//!   Kestra waits forever (`followExecution().last()` has no timeout), egret
+//!   bounds the wait at [`crate::webhook_routes::WEBHOOK_WAIT_CAP`] and, on
+//!   reaching it, degrades to the fire-and-forget shape with the execution's
+//!   current (non-terminal) state. `wait: false` (the default) still gets the
+//!   `CREATED` response immediately.
 //! * **`fetchType: STORE` is refused**, not approximated. It needs egret's
 //!   object store, which this crate does not depend on, and answering as if it
 //!   were `NONE` would hand the flow a `trigger` with the body silently
@@ -316,6 +322,12 @@ pub struct ExecutionTrigger {
 ///
 /// Each of these fires **after** the key has matched, so reporting it discloses
 /// nothing to a caller that has not already authenticated itself with the key.
+///
+/// `wait:`, `returnOutputs:`, `responseContentType:` and `responseCode:` are no
+/// longer here: package 11c Task 4 implements them (see the module doc and
+/// [`crate::webhook_routes`]). What remains is what genuinely has no egret
+/// behaviour yet, and both are refused at request time by [`build_output`]
+/// rather than by a declaration-only predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsupported {
     /// `fetchType: STORE` — the body goes to internal storage and the flow
@@ -323,44 +335,6 @@ pub enum Unsupported {
     StoreBody,
     /// `multipart/form-data` — `parts` are stored files.
     Multipart,
-    /// `wait: true` — the response is held open until the execution terminates.
-    Wait,
-    /// `returnOutputs: true` — the terminal execution's `outputs` are put in
-    /// the response body. Needs the same streaming path [`Self::Wait`] does.
-    ReturnOutputs,
-    /// `responseContentType:` — the content type of the body a waited response
-    /// carries. Same path.
-    ResponseContentType,
-    /// `responseCode:` — the status a waited response carries. Same path.
-    ResponseCode,
-}
-
-/// The declarations of `webhook` this port parses and cannot honour,
-/// **refused by name** rather than accepted and ignored: the first one, or
-/// `None`. The webhook route answers it with a 409 on every firing, after the
-/// key has matched; `spec::schema`'s measurement calls it too, so none of
-/// these properties is offered by the flow editor.
-///
-/// `returnOutputs`, `responseContentType` and `responseCode` were once parsed
-/// into `models::Webhook` and then silently dropped (webhook fix round 1,
-/// Important 3) -- the `lateMaximumDelay` shape: a field an author can write,
-/// that validates, and that changes nothing.
-pub fn declared_unsupported(webhook: &Webhook) -> Option<Unsupported> {
-    [
-        webhook.wait.then_some(Unsupported::Wait),
-        webhook.return_outputs.then_some(Unsupported::ReturnOutputs),
-        webhook
-            .response_content_type
-            .is_some()
-            .then_some(Unsupported::ResponseContentType),
-        webhook
-            .response_code
-            .is_some()
-            .then_some(Unsupported::ResponseCode),
-    ]
-    .into_iter()
-    .flatten()
-    .next()
 }
 
 impl Unsupported {
@@ -377,28 +351,52 @@ impl Unsupported {
                  does not implement yet -- each file part would have to be written to internal \
                  storage and reach the flow as `trigger.parts`"
             ),
-            Self::Wait => format!(
-                "webhook trigger '{trigger_id}' declares wait: true, which egret does not \
-                 implement yet -- the response would have to be held open until the execution \
-                 terminates (roadmap package #11)"
-            ),
-            Self::ReturnOutputs => format!(
-                "webhook trigger '{trigger_id}' declares returnOutputs: true, which egret does \
-                 not implement yet -- it needs the same held-open response wait: true does \
-                 (roadmap package #11)"
-            ),
-            Self::ResponseContentType => format!(
-                "webhook trigger '{trigger_id}' declares responseContentType, which egret does \
-                 not implement yet -- it describes the body of a held-open response \
-                 (roadmap package #11)"
-            ),
-            Self::ResponseCode => format!(
-                "webhook trigger '{trigger_id}' declares responseCode, which egret does not \
-                 implement yet -- it is the status of a held-open response \
-                 (roadmap package #11)"
-            ),
         }
     }
+}
+
+/// Render a declared `responseCode` against the **terminal** execution's
+/// context and return the status number it names, or `None` when it does not
+/// render to a number (the route turns `None` into a 500 with an empty body,
+/// as Kestra's invalid-code path does).
+///
+/// Kestra renders `responseCode` against the finished execution's full
+/// `runContext`, so `{{ outputs.<task>.values.<field> }}` resolves off
+/// `workflow.task_runs.outputs` and `{{ execution.outputs.<id> }}` off the
+/// flow-level outputs. egret binds the two roots that corpus `responseCode`
+/// templates read -- `outputs` (task id → that run's stored, SECRET-masked
+/// output map) and `execution` (`{id, state, outputs}`) -- and nothing else;
+/// that is narrower than Kestra's context and is the recorded divergence here.
+/// Both roots are the **masked** columns, never `secret_outputs`, because the
+/// rendered value can reach an anonymous caller.
+#[must_use]
+pub fn render_response_code(
+    source: &str,
+    outputs_by_task: &BTreeMap<String, Value>,
+    flow_outputs: &Value,
+    execution_id: uuid::Uuid,
+    state: &str,
+) -> Option<i64> {
+    let mut cx = RenderContext::new();
+    cx.insert(
+        "outputs",
+        Value::Object(
+            outputs_by_task
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+    );
+    cx.insert(
+        "execution",
+        json!({
+            "id": execution_id.to_string(),
+            "state": state,
+            "outputs": flow_outputs,
+        }),
+    );
+    let rendered = render_str(source, &cx).ok()?;
+    rendered.trim().parse::<i64>().ok()
 }
 
 /// Everything the key template may read, and nothing else.
@@ -695,6 +693,53 @@ pub fn build_output(
         Value::String(base64::engine::general_purpose::STANDARD.encode(&req.body))
     });
     Ok(out)
+}
+
+/// The trigger's own `labels:`, each value rendered against the webhook record
+/// (`{body, headers, parameters, uri}`) bound under both `trigger` and
+/// `webhook`. Keys stay literal.
+///
+/// A label whose template does not render is **omitted** and the rest proceed:
+/// Kestra starts the execution without it, the opposite of the Schedule
+/// trigger's fail-safe. So there is no `Result`.
+#[must_use]
+pub fn render_webhook_labels(record: &Output, labels: &[crate::models::Label]) -> Vec<Value> {
+    if labels.is_empty() {
+        return Vec::new();
+    }
+    let vars = serde_json::to_value(record).unwrap_or(Value::Null);
+    let mut cx = RenderContext::new();
+    cx.insert("trigger", vars.clone());
+    cx.insert("webhook", vars);
+    labels
+        .iter()
+        .filter_map(|l| {
+            let value = render_str(&l.value, &cx).ok()?;
+            Some(json!({"key": l.key, "value": value}))
+        })
+        .collect()
+}
+
+/// Does the trigger's `when:` let this request through?
+///
+/// Kestra's `WebhookService.newExecution` asks `conditionService.isValid`
+/// before it renders `inputs`; a falsy `when` answers 204 with no execution,
+/// and so does one that fails to render (the caller never sees an error). The
+/// record is bound under `trigger` and `webhook`, as for the labels. An absent
+/// `when` (the `"true"` default) passes without rendering.
+#[must_use]
+pub fn when_passes(record: &Output, trigger: &Trigger) -> bool {
+    let Some(when) = trigger.when.as_ref().map(|w| w.source()) else {
+        return true;
+    };
+    if when == "true" {
+        return true;
+    }
+    let vars = serde_json::to_value(record).unwrap_or(Value::Null);
+    let mut cx = RenderContext::new();
+    cx.insert("trigger", vars.clone());
+    cx.insert("webhook", vars);
+    render_str(when, &cx).is_ok_and(|r| crate::executor::is_truthy(&r))
 }
 
 /// Is this a `multipart/form-data` request?
@@ -1073,34 +1118,23 @@ mod tests {
     use super::*;
     use crate::spec::parse;
 
-    /// Spec §5: the four refusals a parity gap causes name roadmap package #11;
-    /// the two that are a deployment's configuration do not.
+    /// The two refusals that remain are a deployment's configuration (an object
+    /// store), not a parity gap, so neither names a roadmap package. The four
+    /// sync-response keys that used to live here are implemented (package 11c
+    /// Task 4) and no longer have an `Unsupported` variant at all.
     #[test]
-    fn the_unsupported_messages_name_the_package_that_lifts_them() {
-        assert_eq!(
-            Unsupported::Wait.message("w"),
-            "webhook trigger 'w' declares wait: true, which egret does not implement yet -- \
-             the response would have to be held open until the execution terminates \
-             (roadmap package #11)"
-        );
-        assert_eq!(
-            Unsupported::ReturnOutputs.message("w"),
-            "webhook trigger 'w' declares returnOutputs: true, which egret does not implement \
-             yet -- it needs the same held-open response wait: true does (roadmap package #11)"
-        );
-        assert_eq!(
-            Unsupported::ResponseContentType.message("w"),
-            "webhook trigger 'w' declares responseContentType, which egret does not implement \
-             yet -- it describes the body of a held-open response (roadmap package #11)"
-        );
-        assert_eq!(
-            Unsupported::ResponseCode.message("w"),
-            "webhook trigger 'w' declares responseCode, which egret does not implement yet -- \
-             it is the status of a held-open response (roadmap package #11)"
-        );
+    fn the_unsupported_messages_do_not_name_a_roadmap_package() {
         for u in [Unsupported::StoreBody, Unsupported::Multipart] {
-            assert!(!u.message("w").contains("roadmap package"), "{u:?}");
+            let m = u.message("w");
+            assert!(m.contains("egret does not"), "{u:?}");
+            assert!(!m.contains("roadmap package"), "{u:?}");
         }
+        assert!(Unsupported::StoreBody
+            .message("w")
+            .contains("fetchType: STORE"));
+        assert!(Unsupported::Multipart
+            .message("w")
+            .contains("multipart/form-data"));
     }
 
     fn flow_of(yaml: &str) -> crate::models::Flow {

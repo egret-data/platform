@@ -13,9 +13,8 @@
 //!
 //! 1. **parse + validate** -- a parse failure or a new validation error;
 //! 2. **the later stage**, where egret has one that refuses by name:
-//!    `ScheduleTrigger::resolve` for a Schedule trigger,
-//!    `trigger::webhook::declared_unsupported` and `build_output` for a
-//!    Webhook (the 409 every firing would answer);
+//!    `ScheduleTrigger::resolve` for a Schedule trigger, `build_output` for a
+//!    Webhook (the 409 a `fetchType: STORE` firing would answer);
 //! 3. **what egret keeps** -- the *read set*:
 //!    * a type row: the base keys `models::Task` reads, plus the fields of the
 //!      struct its handler deserializes the leaf spec into (serde's own list,
@@ -89,7 +88,13 @@ const REFUSED_BY_NAME: &[&str] = &["unsupported_pause_property"];
 /// * `Flow` reads `when` and `labels` (`trigger::flow` `when_source`/`labels`);
 ///   a Schedule reads both too -- `labels` at fire time (Task 1,
 ///   `scheduler::fire::render_trigger_labels`) and `when` at fire time (package
-///   11b, `scheduler::fire`'s skip-and-advance); a Webhook's path reads neither.
+///   11b, `scheduler::fire`'s skip-and-advance); a Webhook reads `when` at
+///   request time (package 11c Task 3, `trigger::webhook::when_passes`) and
+///   `labels` on the firing path (Task 1,
+///   `trigger::webhook::render_webhook_labels`). The sync-response keys
+///   `wait`/`returnOutputs`/`responseContentType`/`responseCode` (Task 4) are
+///   read straight off the typed model (`trigger_keys`), so they need no entry
+///   here.
 ///
 /// `stopAfter`, `logToFile`, `failOnTriggerError` and `allowConcurrent` are
 /// parsed by `models::Trigger` and read by nothing.
@@ -99,6 +104,7 @@ fn trigger_base_read(t: &str) -> Vec<&'static str> {
         "io.kestra.plugin.core.trigger.Flow" | "io.kestra.plugin.core.trigger.Schedule" => {
             v.extend(["labels", "when"])
         }
+        "io.kestra.plugin.core.trigger.Webhook" => v.extend(["labels", "when"]),
         _ => {}
     }
     v
@@ -134,12 +140,6 @@ fn downstream(flow: &Flow) -> Option<String> {
                 }
             }
             TriggerKind::Webhook(w) => {
-                if let Some(u) = crate::trigger::webhook::declared_unsupported(w) {
-                    return Some(format!(
-                        "trigger::webhook::declared_unsupported (409 at firing): {}",
-                        u.message(&t.id)
-                    ));
-                }
                 let req = crate::trigger::webhook::WebhookRequest {
                     query: Vec::new(),
                     headers: Vec::new(),
@@ -844,47 +844,34 @@ fn the_field_probe_reads_wire_names_and_unknown_keys_are_dropped() {
     assert!(format!("{spec:?}").contains("error_message"));
 }
 
-/// Stage 2 is wired: the four trigger properties egret parses and then
-/// refuses (fix round 1, I1) come out `refused`, each with its site.
+/// Package 11c Task 4: the four Webhook sync-response keys are honoured now
+/// (they used to be `refused` after parse, fix round 1 I1). The one Webhook
+/// property still refused after parse is `fetchType: STORE`, via `build_output`.
 #[test]
-fn properties_refused_after_parse_are_measured_refused() {
+fn the_sync_response_webhook_keys_are_measured_honoured() {
     let m = super::measured();
-    for (row, prop, site) in [
-        (
-            "io.kestra.plugin.core.trigger.Webhook",
-            "wait",
-            "declared_unsupported",
-        ),
-        (
-            "io.kestra.plugin.core.trigger.Webhook",
-            "returnOutputs",
-            "declared_unsupported",
-        ),
-        (
-            "io.kestra.plugin.core.trigger.Webhook",
-            "responseContentType",
-            "declared_unsupported",
-        ),
-        (
-            "io.kestra.plugin.core.trigger.Webhook",
-            "responseCode",
-            "declared_unsupported",
-        ),
+    const WEBHOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
+    for prop in [
+        "wait",
+        "returnOutputs",
+        "responseContentType",
+        "responseCode",
     ] {
         assert_eq!(
-            m.properties[row].get(prop),
-            Some(&Treatment::Refused),
-            "{row}.{prop}"
-        );
-        assert!(
-            m.refused_downstream[row][prop].contains(site),
-            "{row}.{prop}"
+            m.properties[WEBHOOK].get(prop),
+            Some(&Treatment::Honoured),
+            "{WEBHOOK}.{prop}"
         );
     }
+    // The firing path renders `labels`, so Task 4's census catch-up marks it
+    // honoured too (it was a measurement gap: ignored though rendered).
     assert_eq!(
-        m.refused_values["io.kestra.plugin.core.trigger.Webhook"]["fetchType"],
-        vec![json!("STORE")]
+        m.properties[WEBHOOK].get("labels"),
+        Some(&Treatment::Honoured),
+        "{WEBHOOK}.labels"
     );
+    // `fetchType: STORE` is still the one refused Webhook value.
+    assert_eq!(m.refused_values[WEBHOOK]["fetchType"], vec![json!("STORE")]);
 }
 
 /// **A `not_honoured` warning does not serve a key** (spec D3): `classify`

@@ -444,29 +444,34 @@ fn no_served_property_is_one_egret_ignores_or_refuses() {
     assert!(nested > 30, "only {nested} nested definitions were checked");
 }
 
-/// Fix round 1, I1: the five properties egret parses and then refuses at a
-/// later stage are not offered.
+/// Package 11c Task 4: the four Webhook sync-response keys are honoured now, so
+/// the editor offers them (they used to be refused after parse, fix round 1 I1).
+/// The one Webhook property still refused after parse — `fetchType: STORE` — is
+/// a value, covered by `webhook_fetch_type_does_not_offer_store`.
 #[test]
-fn properties_egret_refuses_after_parsing_are_not_served() {
+fn the_webhook_sync_response_keys_are_served_and_honoured() {
     let schema = flow_schema(&ALL[3], &permissive_deployment());
-    let defs = &schema["$defs"];
-    for (def, prop) in [
-        ("io.kestra.plugin.core.trigger.Webhook", "wait"),
-        ("io.kestra.plugin.core.trigger.Webhook", "returnOutputs"),
-        (
-            "io.kestra.plugin.core.trigger.Webhook",
-            "responseContentType",
-        ),
-        ("io.kestra.plugin.core.trigger.Webhook", "responseCode"),
+    let def = "io.kestra.plugin.core.trigger.Webhook";
+    let props = &schema["$defs"][def]["properties"];
+    assert!(props.is_object(), "{def} is served");
+    for prop in [
+        "wait",
+        "returnOutputs",
+        "responseContentType",
+        "responseCode",
     ] {
-        assert!(defs[def]["properties"].is_object(), "{def} is served");
-        assert!(
-            defs[def]["properties"].get(prop).is_none(),
-            "{def} offers {prop}, which egret refuses"
+        assert_eq!(
+            measured().properties[def].get(prop),
+            Some(&Treatment::Honoured),
+            "{def}.{prop} is honoured"
         );
         assert!(
-            measured().refused_downstream[def].contains_key(prop),
-            "{def}.{prop} names its refusal site"
+            props.get(prop).is_some(),
+            "{def} must offer {prop} now that it is honoured"
+        );
+        assert!(
+            !measured().refused_downstream[def].contains_key(prop),
+            "{def}.{prop} no longer names a refusal site"
         );
     }
 }

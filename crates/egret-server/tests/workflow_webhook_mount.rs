@@ -128,6 +128,8 @@ fn composed_app_with_workflow() -> axum::Router {
         export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
         trigger_flags: Default::default(),
         follow_poll_interval: egret_workflow::http::follow::FOLLOW_POLL_INTERVAL,
+        webhook_wait_poll_interval: egret_workflow::webhook_routes::WEBHOOK_WAIT_POLL_INTERVAL,
+        webhook_wait_cap: egret_workflow::webhook_routes::WEBHOOK_WAIT_CAP,
     };
     build_router(
         AppState::without_db()
@@ -164,6 +166,8 @@ fn composed_app_with_workflow_webhooks_off() -> axum::Router {
         export_total_timeout: egret_workflow::routes::EXPORT_TOTAL_TIMEOUT,
         trigger_flags: Default::default(),
         follow_poll_interval: egret_workflow::http::follow::FOLLOW_POLL_INTERVAL,
+        webhook_wait_poll_interval: egret_workflow::webhook_routes::WEBHOOK_WAIT_POLL_INTERVAL,
+        webhook_wait_cap: egret_workflow::webhook_routes::WEBHOOK_WAIT_CAP,
     };
     build_router(AppState::without_db().with_workflow(state))
 }

@@ -157,14 +157,33 @@
 //! **an author editing a draft changes what a live webhook URL runs, with no
 //! publish step in between.**
 //!
+//! # The synchronous response (`wait: true`), package 11c Task 4
+//!
+//! A webhook declaring `wait: true` holds its response open until the execution
+//! is idle (`workflow.execution_is_idle`, migration 0210), then answers with
+//! the terminal execution's shape:
+//!
+//! * **status** — a declared `responseCode`, rendered against the terminal
+//!   execution's context (`{{ outputs.<task> }}` off `workflow.task_runs`,
+//!   `{{ execution.outputs }}` off the flow outputs), wins and applies even
+//!   without `returnOutputs`; a code that does not render to a valid status is a
+//!   500 with an empty body. Absent a `responseCode`, a FAILED terminal is 500
+//!   and every other terminal is 200;
+//! * **body** — with `returnOutputs`, the bare flow-level `outputs` map
+//!   (`workflow.executions.outputs`, NULL → `{}`); otherwise the terminal
+//!   [`WebhookResponse`];
+//! * **`Content-Type`** — the declared `responseContentType`, or
+//!   `application/json`;
+//! * **the cap** — egret bounds the wait at [`WEBHOOK_WAIT_CAP`] where Kestra
+//!   waits forever; on reaching it the response degrades to the fire-and-forget
+//!   shape with the execution's current (non-terminal) state, HTTP 200.
+//!
+//! `wait: false` (the default) is unchanged: `state: "CREATED"`, returned
+//! immediately. `fetchType: STORE` and multipart are still refused, but at
+//! request time by [`crate::trigger::webhook::build_output`].
+//!
 //! # What is deliberately not here
 //!
-//! * **No `wait:`.** See [`crate::trigger::webhook`]'s "knowingly narrower"
-//!   list. A flow declaring it — or `returnOutputs`, `responseContentType` or
-//!   `responseCode` — is refused **by name**, one `if` per field, rather than
-//!   answered with a response shape it did not ask for. That is fix round 1's
-//!   Important 3: the first version refused only `wait` and silently ignored the
-//!   other three.
 //! * **No OpenAPI document.** The management router's `openapi()` covers the
 //!   session-authenticated seam; this one is machine-facing and anonymous, like
 //!   `catalog_engine`'s mount, which also carries none.
@@ -207,7 +226,8 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use egret_core::{Error, Result as EgretResult};
@@ -217,7 +237,7 @@ use uuid::Uuid;
 
 use crate::routes::WorkflowState;
 use crate::trigger::webhook::{
-    build_output, declared_unsupported, find, ExecutionTrigger, InputContext, KeyContext,
+    build_output, find, render_response_code, ExecutionTrigger, InputContext, KeyContext,
     WebhookRequest,
 };
 
@@ -312,6 +332,31 @@ pub type AttemptWindow = (Instant, u32);
 /// nothing else. Memory is `WEBHOOK_ATTEMPT_SLOTS * size_of::<AttemptWindow>()`
 /// whatever anyone sends, which at 4096 slots is under 100 KiB.
 pub const WEBHOOK_ATTEMPT_SLOTS: usize = 4096;
+
+/// How long a `wait: true` webhook holds its response open before giving up and
+/// degrading to the fire-and-forget shape.
+///
+/// **This bound is egret's, and it is a deliberate divergence from Kestra.**
+/// Kestra's `WebhookService.followExecution().last()` has no timeout: the
+/// response is held until the execution terminates, however long that is. egret
+/// caps it instead, because this surface is a multi-tenant, path-scoped one and
+/// a request held open indefinitely is a resource an anonymous caller can pin.
+/// 55 s is chosen to sit under the 60 s idle timeout common proxies (nginx,
+/// ALB) default to, so the cap fires before the hop in front of egret reaps the
+/// connection. On the cap the execution keeps running; the caller gets the
+/// execution's current (non-terminal) state and its id, HTTP 200 -- the same
+/// shape `wait: false` answers with (see [`handle`]).
+///
+/// Overridable per router through [`crate::WorkflowState::webhook_wait_cap`],
+/// the seam `follow_poll_interval` uses, so a "cap elapsed" test can drive a
+/// cap it genuinely reaches without waiting the full 55 s.
+pub const WEBHOOK_WAIT_CAP: Duration = Duration::from_secs(55);
+
+/// How often a `wait: true` webhook re-reads `workflow.execution_is_idle` while
+/// it holds the response open (1 s in production). No `LISTEN`/`NOTIFY`: one
+/// short read per interval, the same poll shape the follow streams use.
+/// Overridable through [`crate::WorkflowState::webhook_wait_poll_interval`].
+pub const WEBHOOK_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The two in-process bounds, built once per router.
 ///
@@ -442,8 +487,12 @@ pub struct WebhookResponse {
     pub flow_id: String,
     /// `{id, type, variables}` — exactly what was stored on the execution row.
     pub trigger: ExecutionTrigger,
-    /// Always `CREATED`: this surface answers asynchronously.
-    pub state: &'static str,
+    /// The execution's state. `CREATED` for the asynchronous answer
+    /// (`wait: false`, or a `wait: true` that hit [`WEBHOOK_WAIT_CAP`] before it
+    /// left `CREATED`); the terminal state for a `wait: true` that is answered
+    /// without `returnOutputs`; the current non-terminal state when the cap
+    /// fired mid-run.
+    pub state: String,
 }
 
 /// The anonymous webhook router. Mount it **outside** `/api` and outside the
@@ -486,7 +535,7 @@ async fn handle(
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
-) -> EgretResult<Json<WebhookResponse>> {
+) -> EgretResult<Response> {
     // --- 0. the two bounds, before anything that costs -----------------------
     //
     // The attempt limiter is keyed on the THREE path segments that name a
@@ -503,7 +552,14 @@ async fn handle(
     ) {
         return Err(Error::TooManyRequests);
     }
-    let _permit = guard
+    // The bulkhead bounds the EXPENSIVE start path (key match, render, the
+    // `start_execution_with_trigger_labels` write) — the work it was sized for,
+    // in milliseconds. It is a real binding, not `_permit`, because a `wait:
+    // true` response then DROPS it before the poll: holding this global
+    // `WEBHOOK_MAX_CONCURRENCY` permit across the up-to-cap wait would let 16
+    // slow waited requests starve every other webhook (fast fire-and-forget
+    // ones included) across all workspaces with a 429.
+    let permit = guard
         .bulkhead
         .try_acquire()
         .map_err(|_| Error::TooManyRequests)?;
@@ -605,19 +661,10 @@ async fn handle(
             "Cannot execute flow: flow is disabled.".into(),
         ));
     }
-    // Declarations this port parses and cannot honour. **Refused by name**, one
-    // `if` per field, rather than accepted and ignored.
-    //
-    // Fix round 1, Important 3: `returnOutputs`, `responseContentType` and
-    // `responseCode` were parsed into `models::Webhook` and then silently
-    // dropped, which is the `lateMaximumDelay` shape -- a field an author can
-    // write, that validates, and that changes nothing. Only `wait` was refused.
-    // The list lives in `trigger::webhook::declared_unsupported`, which the
-    // flow schema's measurement (`spec::schema`) also calls, so a property
-    // refused here is never offered by the editor's completion.
-    if let Some(unsupported) = declared_unsupported(webhook) {
-        return Err(Error::Conflict(unsupported.message(&trigger.id)));
-    }
+    // The sync-response keys (`wait`/`returnOutputs`/`responseContentType`/
+    // `responseCode`) are honoured now (package 11c Task 4), at the bottom of
+    // this handler. `fetchType: STORE` and multipart are still refused, but at
+    // request time by `build_output` below, not from the declaration.
 
     // --- 5. what the flow will see -------------------------------------------
     // The verb is not passed on: `WebhookRequest` has no `method` field, for
@@ -634,6 +681,13 @@ async fn handle(
     };
     let output = build_output(&req, webhook.fetch_type, None)
         .map_err(|u| Error::Conflict(u.message(&trigger.id)))?;
+
+    // The trigger's `when:` (package 11c): a falsy condition, or one that does
+    // not render, answers 204 with no body and starts nothing -- and it is
+    // checked BEFORE `inputs` render, as Kestra does.
+    if !crate::trigger::webhook::when_passes(&output, trigger) {
+        return Ok((StatusCode::NO_CONTENT, ()).into_response());
+    }
 
     // `inputs:` render against a context that binds **no** `trigger` at all, so
     // the key comparison's private object is unreachable rather than merely
@@ -683,24 +737,132 @@ async fn handle(
     let trigger_json = serde_json::to_value(&record)
         .map_err(|e| Error::Internal(anyhow::anyhow!("serialising the trigger record: {e}")))?;
 
-    let id = crate::worker::start_execution_with_trigger(
+    // The trigger's own `labels:`; one that does not render is omitted and the
+    // execution still starts (Kestra parity, unlike a Schedule's).
+    let labels = crate::trigger::webhook::render_webhook_labels(&record.variables, &trigger.labels);
+
+    let id = crate::worker::start_execution_with_trigger_labels(
         &st.db.pool,
         ws_id,
         Some(flow_uuid),
         &source,
         inputs,
         Some(trigger_json),
+        labels,
     )
     .await?;
 
-    Ok(Json(WebhookResponse {
+    // The expensive start path is done. Release the bulkhead permit HERE, before
+    // either response path: the `wait: true` poll below is cheap (one
+    // `execution_is_idle` read per interval, bounded by the cap) and must not
+    // occupy a global permit for up to the cap — that would turn 16 slow waited
+    // requests into a 429 for every other webhook across all workspaces.
+    drop(permit);
+
+    // --- 7. the response ------------------------------------------------------
+    //
+    // `wait: false` (the default) is the fire-and-forget answer, unchanged.
+    let created = |state: String| WebhookResponse {
         workspace_id: ws_id,
         id,
-        namespace: parsed.namespace,
-        flow_id: parsed.id,
-        trigger: record,
-        state: "CREATED",
-    }))
+        namespace: parsed.namespace.clone(),
+        flow_id: parsed.id.clone(),
+        trigger: record.clone(),
+        state,
+    };
+    if !webhook.wait {
+        return Ok(Json(created("CREATED".into())).into_response());
+    }
+
+    // `wait: true`: hold the response open, bounds-polling
+    // `workflow.execution_is_idle` (migration 0210) until the execution is
+    // terminal with no run still live, or the egret cap elapses. No
+    // `LISTEN`/`NOTIFY`; one short read per interval.
+    let deadline = Instant::now() + st.webhook_wait_cap;
+    let (state, flow_outputs, idle) = loop {
+        let row: (String, Option<serde_json::Value>, Option<bool>) = sqlx::query_as(
+            "SELECT state, outputs, workflow.execution_is_idle(id) \
+               FROM workflow.executions WHERE id = $1 AND workspace_id = $2",
+        )
+        .bind(id)
+        .bind(ws_id)
+        .fetch_one(&st.db.pool)
+        .await
+        .map_err(|e| Error::Internal(anyhow::anyhow!("webhook wait read: {e}")))?;
+        if row.2.unwrap_or(false) {
+            break (row.0, row.1, true);
+        }
+        if Instant::now() >= deadline {
+            // The cap: egret bounds where Kestra waits forever. The execution
+            // keeps running; the caller gets the fire-and-forget shape with the
+            // current (non-terminal) state.
+            break (row.0, row.1, false);
+        }
+        tokio::time::sleep(st.webhook_wait_poll_interval).await;
+    };
+    if !idle {
+        return Ok(Json(created(state)).into_response());
+    }
+
+    let flow_outputs = flow_outputs.unwrap_or_else(|| serde_json::json!({}));
+
+    // The status: a declared `responseCode` rendered against the terminal
+    // context wins (and applies even without `returnOutputs`); an invalid
+    // rendered code is a 500 with an empty body. Otherwise FAILED is 500 and
+    // every other terminal is 200.
+    let status = if let Some(prop) = webhook.response_code.as_ref() {
+        // `{{ outputs.<task> }}` reads the per-task stored (masked) outputs.
+        let task_rows: Vec<(String, Option<serde_json::Value>)> = sqlx::query_as(
+            "SELECT task_id, outputs FROM workflow.task_runs WHERE execution_id = $1",
+        )
+        .bind(id)
+        .fetch_all(&st.db.pool)
+        .await
+        .map_err(|e| Error::Internal(anyhow::anyhow!("webhook wait task outputs: {e}")))?;
+        let outputs_by_task: std::collections::BTreeMap<String, serde_json::Value> = task_rows
+            .into_iter()
+            .map(|(t, o)| (t, o.unwrap_or_else(|| serde_json::json!({}))))
+            .collect();
+        match render_response_code(prop.source(), &outputs_by_task, &flow_outputs, id, &state)
+            .and_then(|code| u16::try_from(code).ok())
+            .and_then(|code| StatusCode::from_u16(code).ok())
+        {
+            Some(s) => s,
+            None => return Ok(empty_500()),
+        }
+    } else if state == "FAILED" {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::OK
+    };
+
+    // The body and its content type. `returnOutputs` → the bare flow-level
+    // outputs map; otherwise the terminal `WebhookResponse`. The declared
+    // `responseContentType` is the `Content-Type` either way; absent, it is
+    // `application/json`.
+    let content_type = webhook
+        .response_content_type
+        .clone()
+        .unwrap_or_else(|| "application/json".to_string());
+    let body = if webhook.return_outputs {
+        serde_json::to_vec(&flow_outputs)
+    } else {
+        serde_json::to_vec(&created(state))
+    }
+    .map_err(|e| Error::Internal(anyhow::anyhow!("serialising the webhook response: {e}")))?;
+
+    Ok((
+        status,
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        body,
+    )
+        .into_response())
+}
+
+/// A 500 with an empty body: the answer to a declared `responseCode` that does
+/// not render to a valid status, as Kestra's invalid-code path gives.
+fn empty_500() -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, ()).into_response()
 }
 
 /// `URIBuilder(uri).getQueryParams()` — split on `&`, then on the **first**
