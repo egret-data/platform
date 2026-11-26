@@ -31,9 +31,19 @@ const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
 /// A flow `id` with one `*/1 * * * *` schedule `s`. `prelude` goes before
 /// `triggers:` (flow-level keys such as `inputs:` or `disabled:`), `extra` is
 /// appended to the trigger (trigger-level keys, 4-space indented).
+///
+/// Package 11d: Kestra's default `allowConcurrent: false` holds a tick while the
+/// trigger's previous execution is live, and these fixtures never drive their
+/// executions. The firing-mechanics tests are about everything else, so the
+/// fixture opts into `allowConcurrent: true` unless `extra` sets it.
 fn flow_yaml(id: &str, prelude: &str, extra: &str) -> String {
+    let concurrent = if extra.contains("allowConcurrent") {
+        ""
+    } else {
+        "    allowConcurrent: true\n"
+    };
     let src = format!(
-        "id: {id}\nnamespace: w12\n{prelude}triggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n{extra}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+        "id: {id}\nnamespace: w12\n{prelude}triggers:\n  - id: s\n    type: {SCHEDULE}\n    cron: \"*/1 * * * *\"\n{concurrent}{extra}tasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
     );
     egret_workflow::spec::parse(&src)
         .unwrap_or_else(|e| panic!("fixture must parse: {e:?}\n{src}"));
@@ -1571,4 +1581,80 @@ async fn a_rendered_true_when_fires_every_tick() {
     }
     let want: Vec<_> = (0..3).map(|k| first + Duration::minutes(k)).collect();
     assert_eq!(common::scheduled_dates(&fx.db, flow).await, want);
+}
+
+/// Package 11d: Kestra's default `allowConcurrent: false` serialises a
+/// trigger. A due tick is held -- not fired, not advanced -- while an
+/// execution this trigger started is live, and fires once it is terminal.
+#[tokio::test]
+async fn allow_concurrent_false_holds_a_tick_while_the_execution_is_live() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml("hold", "", "    allowConcurrent: false\n"))
+        .await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            ..Default::default()
+        }
+    );
+
+    // The first execution is not driven, so it stays live. Make a second,
+    // earlier tick due.
+    common::make_due(&fx.db, flow, "s", 2).await;
+    let before = row(&fx.db, flow).await.unwrap();
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            held: 1,
+            ..Default::default()
+        },
+        "held while the first execution is live"
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 1);
+    assert_eq!(
+        row(&fx.db, flow).await.unwrap(),
+        before,
+        "a held tick writes nothing: not advanced, no last_error"
+    );
+
+    // Terminal means the execution AND its task runs: `execution_is_idle`.
+    sqlx::query(
+        "UPDATE workflow.task_runs SET state = 'SUCCESS' \
+          WHERE execution_id IN (SELECT id FROM workflow.executions WHERE flow_id = $1)",
+    )
+    .bind(flow)
+    .execute(&fx.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE workflow.executions SET state = 'SUCCESS' WHERE flow_id = $1")
+        .bind(flow)
+        .execute(&fx.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.pass().await,
+        PassReport {
+            fired: 1,
+            ..Default::default()
+        },
+        "the held tick fires once the execution is terminal"
+    );
+    assert_eq!(executions_of(&fx.db, flow).await, 2);
+}
+
+#[tokio::test]
+async fn allow_concurrent_true_does_not_hold() {
+    let Some(fx) = fx().await else { return };
+    let flow = fx
+        .flow(&flow_yaml("nohold", "", "    allowConcurrent: true\n"))
+        .await;
+    common::make_due(&fx.db, flow, "s", 1).await;
+    assert_eq!(fx.pass().await.fired, 1);
+    common::make_due(&fx.db, flow, "s", 2).await;
+    let r = fx.pass().await;
+    assert_eq!((r.fired, r.held), (1, 0), "both ticks fire");
+    assert_eq!(executions_of(&fx.db, flow).await, 2);
 }
