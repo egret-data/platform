@@ -1,6 +1,6 @@
 //! Schedule and Webhook `stopAfter` (packages 11b, 11c): when an execution a
-//! Schedule or Webhook trigger started ends in one of the trigger's `stopAfter` states, the trigger is
-//! switched off.
+//! Schedule or Webhook trigger started ends in one of the trigger's
+//! `stopAfter` states, the trigger is switched off.
 //!
 //! The off switch is the manual one (`triggers::switch`): a
 //! `workflow.disabled_triggers` row, which `scheduler::sync` re-derives

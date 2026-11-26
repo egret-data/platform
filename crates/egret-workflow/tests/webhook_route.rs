@@ -2255,10 +2255,17 @@ async fn an_unrenderable_webhook_label_is_omitted_and_the_execution_starts() {
     );
 }
 
+/// `worker::tick` claims every runnable execution in the database and settles
+/// it with the injected `Answering` outcome, so two tests driving ticks with
+/// different outcomes could flip each other's result. Every test in this file
+/// that ticks holds this guard for its whole body.
+static TICK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Package 11c: a Webhook's `stopAfter` switches the trigger off once an
 /// execution it started ends in a listed state -- the next POST is a 409.
 #[tokio::test]
 async fn a_webhook_stop_after_disables_the_trigger_after_a_matching_terminal() {
+    let _tick = TICK.lock().await;
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     let ns = fresh_namespace();
