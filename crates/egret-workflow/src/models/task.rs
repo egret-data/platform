@@ -674,9 +674,9 @@ pub struct CheckFrequency {
 }
 
 // kestra: Subflow.java. Kept to the interface's field list
-// (namespace/flowId/inputs/wait/transmitFailed); `labels`,
-// `inheritLabels`, `scheduleDate`, and `restartBehavior` are dropped for now,
-// the same curation the brief already applied to this type.
+// (namespace/flowId/inputs/wait/transmitFailed) plus `revision`, `labels`,
+// `inheritLabels` and `restartBehavior` (package #12). Only `scheduleDate` is
+// deferred (package #12b); it is accepted and warned, not modelled.
 //
 // `namespace` is `@NotEmpty` and `flowId` is `@NotNull`, both in Java with no
 // default (Task 4 fix round 3 owes both checks) -- same bean-validation-not-

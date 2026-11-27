@@ -1938,12 +1938,6 @@ fn render_name(
     }
 }
 
-/// The `Subflow`'s `inputs:` map, with every string rendered.
-///
-/// Recursive over arrays and objects, because Kestra's
-/// `runContext.render(Map<String, Object>)` is: a value nested inside a list an
-/// author wrote is rendered too. Non-strings pass through — there is nothing in
-/// a number to render.
 /// The child's stored `labels` (its OWN list; readers prepend the child
 /// flow's `labels:`): Kestra's `newLabels` -- the parent EXECUTION's visible
 /// labels minus the keys the child flow declares when `inheritLabels`
@@ -1992,6 +1986,12 @@ async fn child_labels(
     })))
 }
 
+/// The `Subflow`'s `inputs:` map, with every string rendered.
+///
+/// Recursive over arrays and objects, because Kestra's
+/// `runContext.render(Map<String, Object>)` is: a value nested inside a list an
+/// author wrote is rendered too. Non-strings pass through — there is nothing in
+/// a number to render.
 fn rendered_inputs(sub: &Subflow, cx: &RenderContext) -> std::result::Result<Value, String> {
     fn render_value(v: &Value, cx: &RenderContext) -> std::result::Result<Value, String> {
         Ok(match v {

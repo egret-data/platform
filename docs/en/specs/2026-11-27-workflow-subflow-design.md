@@ -117,6 +117,10 @@ discipline before lifting.
 
 - Any NEW_EXECUTION or scheduleDate detail where egret's restart/scheduler model differs from
   Kestra's (Task 0 records the exact differences).
+- **Nested LoopUntil over a Subflow (approximation):** the child's iteration identity
+  (`child_iteration`) uses the NEAREST enclosing loop's iteration, matching Kestra's single
+  `taskRunIteration`; an outer loop's iteration is not part of the child identity.
+- `scheduleDate` is not honoured (package #12b); it stays accepted and warned.
 
 ## Task 0 outcome (2026-11-27) — scope corrected
 

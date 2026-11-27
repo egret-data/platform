@@ -67,6 +67,9 @@ pub(crate) enum Lift {
     /// Accepted but inert on purpose, and no package will change that: Kestra
     /// itself consults the key only where egret has no counterpart.
     Inert(&'static str),
+    /// Not yet scheduled into a numbered roadmap package; the text names the
+    /// future package that lifts it.
+    Deferred(&'static str),
 }
 
 impl Lift {
@@ -78,7 +81,7 @@ impl Lift {
                 "Kestra Enterprise only, ignored by Kestra OSS too, roadmap \u{a7}3.3".into()
             }
             Lift::KeptDesign(why) => format!("{why} (roadmap \u{a7}3.2)"),
-            Lift::Inert(why) => (*why).to_string(),
+            Lift::Inert(why) | Lift::Deferred(why) => (*why).to_string(),
         }
     }
 
@@ -91,7 +94,7 @@ impl Lift {
                     .into()
             }
             Lift::KeptDesign(why) => format!("{why} (roadmap \u{a7}3.2)"),
-            Lift::Inert(why) => (*why).to_string(),
+            Lift::Inert(why) | Lift::Deferred(why) => (*why).to_string(),
         }
     }
 }
@@ -173,10 +176,9 @@ pub(crate) fn lift_of(site: Site<'_>, key: &str) -> Option<Lift> {
                 return Some(Package(18));
             }
             match (t, key) {
-                (
-                    "io.kestra.plugin.core.flow.Subflow",
-                    "revision" | "labels" | "inheritLabels" | "scheduleDate" | "restartBehavior",
-                ) => Some(Package(12)),
+                ("io.kestra.plugin.core.flow.Subflow", "scheduleDate") => {
+                    Some(Lift::Deferred("roadmap package #12b lifts it"))
+                }
                 _ => None,
             }
         }
@@ -1284,7 +1286,11 @@ mod tests {
         let sub = "io.kestra.plugin.core.flow.Subflow";
         assert_eq!(lift_of(Site::Task(log), "logLevel"), Some(Package(13)));
         assert_eq!(lift_of(Site::Task(log), "workerSelector"), Some(Enterprise));
-        assert_eq!(lift_of(Site::Task(sub), "inheritLabels"), Some(Package(12)));
+        assert_eq!(lift_of(Site::Task(sub), "inheritLabels"), None);
+        assert!(matches!(
+            lift_of(Site::Task(sub), "scheduleDate"),
+            Some(Deferred(_))
+        ));
         // Package #6 Task A1 runs `Loop` `outputs`/`fetchType`: no lift.
         assert_eq!(
             lift_of(Site::Task("io.kestra.plugin.core.flow.Loop"), "outputs"),
@@ -1709,11 +1715,11 @@ mod tests {
 
     #[test]
     fn flowable_keys_kestra_has_warn_with_their_package_and_others_are_refused() {
-        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: x.y\n    flowId: g\n    inheritLabels: true\n  - id: p\n    type: io.kestra.plugin.core.flow.Parallel\n    onChildFailure: FAILED\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n        mesage: typo\n");
+        let r = report("id: f\nnamespace: a.b\ntasks:\n  - id: s\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: x.y\n    flowId: g\n    scheduleDate: 2026-01-01T00:00:00Z\n  - id: p\n    type: io.kestra.plugin.core.flow.Parallel\n    onChildFailure: FAILED\n    tasks:\n      - id: a\n        type: core.log\n        message: a\n        mesage: typo\n");
         assert!(
             r.warnings.iter().any(|w| w.code == "not_honoured"
-                && w.path == "tasks.s.inheritLabels"
-                && w.message.ends_with("roadmap package #12 lifts it")),
+                && w.path == "tasks.s.scheduleDate"
+                && w.message.ends_with("roadmap package #12b lifts it")),
             "{r:?}"
         );
         let unknown: std::collections::BTreeSet<_> = r
