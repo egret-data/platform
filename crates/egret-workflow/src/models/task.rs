@@ -695,6 +695,17 @@ pub struct Subflow {
     pub wait: bool,
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
+    /// The child execution's own extra labels (`Subflow.labels`); keys AND
+    /// values are rendered in the parent's context at spawn.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "super::flow::deserialize_labels"
+    )]
+    pub labels: Vec<super::flow::Label>,
+    /// `Subflow.inheritLabels`, a `Property<Boolean>` defaulting to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_labels: Option<Property<bool>>,
 
     // Task 6 fix round 1: `publish::resolve_task` fills this in. Since debt
     // §5.1 (2026-10-19) it looks `namespace`/`flow_id` up in the PUBLISHING

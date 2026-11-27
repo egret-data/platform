@@ -542,6 +542,13 @@ pub(super) async fn spawn_one(
         Err(e) => return Err(e),
     };
 
+    // The child's own `labels` (package #12 Task 1): Kestra's
+    // `ExecutableUtils.subflowExecution` `:204-207`.
+    let labels = match child_labels(conn, ctx, &flow, sub, &child, &cx).await? {
+        Ok(v) => v,
+        Err(why) => return Ok(fail_run(ctx, r.run, &why)),
+    };
+
     // **In a savepoint, because the FILE-input check needs the row and may
     // refuse it** (W9a spec §7.1). The readable set is walked FROM the child
     // -- its `trigger_execution_id` is this execution, which is what makes the
@@ -568,9 +575,10 @@ pub(super) async fn spawn_one(
     let child_id: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-                trigger_execution_id, trigger_run_ix, inputs, execution_depth, secret_inputs, ",
+                trigger_execution_id, trigger_run_ix, inputs, execution_depth, secret_inputs, \
+                labels, ",
         super::stamps::stamp_columns!(),
-        ") VALUES ($1,$2,$3,$4,$5,$11,$12::jsonb,$6,$7,$8,$9,$10, ",
+        ") VALUES ($1,$2,$3,$4,$5,$11,$12::jsonb,$6,$7,$8,$9,$10,$13, ",
         super::stamps::stamp_values!("$11", "$12"),
         ") RETURNING id",
     ))
@@ -586,6 +594,7 @@ pub(super) async fn spawn_one(
     .bind(secret_inputs)
     .bind(&row.state)
     .bind(&row.history)
+    .bind(labels)
     .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
@@ -1842,6 +1851,54 @@ fn render_name(
 /// `runContext.render(Map<String, Object>)` is: a value nested inside a list an
 /// author wrote is rendered too. Non-strings pass through — there is nothing in
 /// a number to render.
+/// The child's stored `labels` (its OWN list; readers prepend the child
+/// flow's `labels:`): Kestra's `newLabels` -- the parent EXECUTION's visible
+/// labels minus the keys the child flow declares when `inheritLabels`
+/// renders true, else only the parent's `system.*` labels -- then the task's
+/// own `labels`, keys and values rendered in the PARENT context (one that does
+/// not render is omitted, as a webhook's). `Err` fails the run.
+async fn child_labels(
+    conn: &mut PgConnection,
+    ctx: &claim::ExecutionCtx,
+    parent_flow: &crate::models::Flow,
+    sub: &Subflow,
+    child: &crate::models::Flow,
+    cx: &RenderContext,
+) -> Result<std::result::Result<Option<Value>, String>> {
+    use crate::labels::{execution_labels, own_labels, visible_labels, SYSTEM_LABEL_PREFIX};
+    let inherit = match sub.inherit_labels.as_ref().map(|p| p.render(cx)) {
+        None => false,
+        Some(Ok(b)) => b,
+        Some(Err(e)) => return Ok(Err(format!("subflow inheritLabels: {e}"))),
+    };
+    let (stored, replaced): (Option<Value>, bool) =
+        sqlx::query_as("SELECT labels, labels_replaced FROM workflow.executions WHERE id = $1")
+            .bind(ctx.id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    let parent = visible_labels(&parent_flow.labels, &own_labels(stored.as_ref()), replaced);
+    let mut new: Vec<crate::models::Label> = parent
+        .into_iter()
+        .filter(|l| {
+            if inherit {
+                !child.labels.iter().any(|c| c.key == l.key)
+            } else {
+                l.key.starts_with(SYSTEM_LABEL_PREFIX)
+            }
+        })
+        .collect();
+    for l in &sub.labels {
+        if let (Ok(key), Ok(value)) = (render_str(&l.key, cx), render_str(&l.value, cx)) {
+            new.push(crate::models::Label { key, value });
+        }
+    }
+    let own = execution_labels(&[], &new);
+    Ok(Ok((!own.is_empty()).then(|| {
+        serde_json::to_value(&own).expect("labels serialise")
+    })))
+}
+
 fn rendered_inputs(sub: &Subflow, cx: &RenderContext) -> std::result::Result<Value, String> {
     fn render_value(v: &Value, cx: &RenderContext) -> std::result::Result<Value, String> {
         Ok(match v {
