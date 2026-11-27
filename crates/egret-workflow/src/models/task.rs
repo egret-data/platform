@@ -674,9 +674,9 @@ pub struct CheckFrequency {
 }
 
 // kestra: Subflow.java. Kept to the interface's field list
-// (namespace/flowId/inputs/wait/transmitFailed); `revision`, `labels`,
-// `inheritLabels`, `scheduleDate`, and `restartBehavior` are dropped for now,
-// the same curation the brief already applied to this type.
+// (namespace/flowId/inputs/wait/transmitFailed) plus `revision`, `labels`,
+// `inheritLabels` and `restartBehavior` (package #12). Only `scheduleDate` is
+// deferred (package #12b); it is accepted and warned, not modelled.
 //
 // `namespace` is `@NotEmpty` and `flowId` is `@NotNull`, both in Java with no
 // default (Task 4 fix round 3 owes both checks) -- same bean-validation-not-
@@ -695,6 +695,28 @@ pub struct Subflow {
     pub wait: bool,
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
+    /// `Subflow.revision`: spawn this published revision of the target flow;
+    /// absent = the latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i32>,
+    /// The child execution's own extra labels (`Subflow.labels`); keys AND
+    /// values are rendered in the parent's context at spawn.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "super::flow::deserialize_labels"
+    )]
+    pub labels: Vec<super::flow::Label>,
+    /// `Subflow.inheritLabels`, a `Property<Boolean>` defaulting to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_labels: Option<Property<bool>>,
+    /// `Subflow.restartBehavior` (`ExecutableTask.RestartBehavior`,
+    /// `ExecutableUtils.java:92-172`): on a parent restart that re-runs this
+    /// `Subflow` task, `RETRY_FAILED` (the default) restarts the earlier child
+    /// in place, and `NEW_EXECUTION` leaves it untouched and spawns a fresh
+    /// child linked to the restarted run.
+    #[serde(default)]
+    pub restart_behavior: RestartBehavior,
 
     // Task 6 fix round 1: `publish::resolve_task` fills this in. Since debt
     // §5.1 (2026-10-19) it looks `namespace`/`flow_id` up in the PUBLISHING
@@ -900,6 +922,20 @@ pub enum RetryBehavior {
     #[default]
     RetryFailedTask,
     CreateNewExecution,
+}
+
+/// `io.kestra.core.models.tasks.ExecutableTask.RestartBehavior`
+/// (`ExecutableTask.java:66-68`): how a `Subflow` whose parent run is restarted
+/// treats the child it already started. `Subflow.restartBehavior` defaults to
+/// `RETRY_FAILED` (`Subflow.java:153-155`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RestartBehavior {
+    /// Restart the earlier child in place, the egret 7a behaviour.
+    #[default]
+    RetryFailed,
+    /// Leave the earlier child untouched and spawn a fresh child.
+    NewExecution,
 }
 
 // `interval`/`maxInterval`/`minInterval` are `@NotNull` on all three Java
