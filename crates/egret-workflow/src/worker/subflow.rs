@@ -79,8 +79,11 @@
 //!   `valids/task-allow-warning-executable-flow` are the two entries it used to
 //!   cost and **both bank**. `transmitFailed: false` is still unreachable from
 //!   the corpus and still implemented.
-//! * **`scheduleDate` and `restartBehavior` are not on `models::Subflow`** (W1's curation), so
-//!   nothing here can honour them. `valids/task-flow-inherited-labels` and
+//! * **`scheduleDate` is not on `models::Subflow`** (W1's curation, split to
+//!   package #12b), so nothing here can honour it. `restartBehavior` IS carried
+//!   now (package #12 Task 3): it gates [`restart_earlier_child`] between the
+//!   in-place restart (`RETRY_FAILED`, the default) and a fresh spawn
+//!   (`NEW_EXECUTION`). `valids/task-flow-inherited-labels` and
 //!   `valids/subflow-inherited-labels-parent` are the entries that names.
 //!
 //! # A gap that is the ORACLE's and not this worker's
@@ -104,7 +107,7 @@ use super::{claim, WorkerError};
 use crate::executor::{
     apply, build_plan, Command, ExecutionState, RunIx, RunState, TaskIx, TaskKind,
 };
-use crate::models::{Concurrency, Flow, Subflow, TaskKind as ModelTaskKind};
+use crate::models::{Concurrency, Flow, RestartBehavior, Subflow, TaskKind as ModelTaskKind};
 use crate::runners::{render_str, RenderContext};
 use crate::trigger::flow::DEFAULT_MAX_EXECUTION_DEPTH;
 
@@ -312,8 +315,12 @@ pub(super) async fn spawn_one(
 
     // **D9: a reset run of a restarted execution restarts its earlier child
     // in place**, before the target is even rendered, as Kestra's
-    // `ExecutableUtils.subflowExecutions` (`:91-170`) looks it up first.
-    if let Some(jobs) = restart_earlier_child(conn, ctx, state, r, sub.wait).await? {
+    // `ExecutableUtils.subflowExecutions` (`:91-170`) looks it up first. Package
+    // #12 Task 3: only under `restartBehavior: RETRY_FAILED` (the default); a
+    // `NEW_EXECUTION` subflow falls through here to the fresh spawn below.
+    if let Some(jobs) =
+        restart_earlier_child(conn, ctx, state, r, sub.wait, sub.restart_behavior).await?
+    {
         return Ok(jobs);
     }
 
@@ -578,9 +585,9 @@ pub(super) async fn spawn_one(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
                 trigger_execution_id, trigger_run_ix, inputs, execution_depth, secret_inputs, \
-                labels, ",
+                labels, trigger_run_iteration, ",
         super::stamps::stamp_columns!(),
-        ") VALUES ($1,$2,$3,$4,$5,$11,$12::jsonb,$6,$7,$8,$9,$10,$13, ",
+        ") VALUES ($1,$2,$3,$4,$5,$11,$12::jsonb,$6,$7,$8,$9,$10,$13,$14, ",
         super::stamps::stamp_values!("$11", "$12"),
         ") RETURNING id",
     ))
@@ -597,6 +604,9 @@ pub(super) async fn spawn_one(
     .bind(&row.state)
     .bind(&row.history)
     .bind(labels)
+    // Package #12 Task 3: the child's iteration identity (Kestra's
+    // `taskRunIteration`), so a restart matches a looped child by identity.
+    .bind(child_iteration(ctx, state, r.run))
     .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
@@ -691,27 +701,66 @@ pub(super) async fn spawn_one(
     Ok(jobs)
 }
 
+/// The iteration identity of a `Subflow` child spawned for `run` -- Kestra's
+/// `taskRunIteration` (`ExecutableUtils.java:113-117`, `:225-230`): the
+/// iteration of the nearest enclosing `LoopUntil`, or `0` when the run is not
+/// inside one.
+///
+/// A `LoopUntil` reuses one run across its iterations (`Command::RestartLoop`
+/// empties the body's runs in place), so two children of a looped `Subflow`
+/// land under one `(trigger_execution_id, trigger_run_ix)` pair. Stamping this
+/// number on the child row and matching on it is what lets a restart find the
+/// right iteration's child by identity rather than by list position. It is
+/// **stable across a restart** -- [`crate::executor::loop_iteration`] keeps the
+/// failed iteration's number ([`executor::restart`](crate::executor) /
+/// `RestartCaseTest.restartOrReplayLoopUntil`) -- so the value computed here at
+/// spawn equals the value the restart computes for the same iteration.
+///
+/// A plain `Loop` iteration is an execution of its own, so its iteration is
+/// already in `trigger_execution_id` and never reaches here (`0`); a `retry:`
+/// that spawns a second child does so under the SAME iteration, which stays
+/// "several" (Kestra creates a new one), exactly as before.
+fn child_iteration(ctx: &claim::ExecutionCtx, state: &ExecutionState, run: RunIx) -> i32 {
+    let mut cur = state.runs.get(run).and_then(|r| r.parent);
+    while let Some(p) = cur {
+        let Some(parent_run) = state.runs.get(p) else {
+            break;
+        };
+        if matches!(
+            ctx.plan.tasks[parent_run.task].kind,
+            TaskKind::LoopUntil { .. }
+        ) {
+            return i32::try_from(crate::executor::loop_iteration(state, p)).unwrap_or(0);
+        }
+        cur = parent_run.parent;
+    }
+    0
+}
+
 /// **Spec D9 (user decision Q1): a reset `Subflow` run restarts its
 /// earlier child in place** -- Kestra's `restartBehavior: RETRY_FAILED`
 /// (`ExecutableUtils.java:91-170`, `ExecutorService:1311-1318`).
 ///
-/// `None` -- spawn a new child, as before D9 -- unless all of these hold:
+/// `None` -- spawn a new child, as before D9 -- when the Subflow asks for
+/// `restartBehavior: NEW_EXECUTION` (package #12 Task 3: the earlier child is
+/// left untouched and a fresh one is born), or unless all of these hold:
 ///
 /// - the run was **reset by a restart**: its history has a terminal state
 ///   followed by `CREATED` (D3). A run built fresh -- emptied by D4 or by a
 ///   `LoopUntil`'s next iteration, both of which give it a new task-run id
 ///   -- never had this child, as Kestra's `taskRunId` match says;
 /// - the execution is labelled `system.restarted: "true"` (D7);
-/// - **exactly one** earlier child is linked to it by
-///   `trigger_execution_id = <this execution>` and `trigger_run_ix = <run>`.
-///   That pair is the whole of what a child row records of its run, and
-///   `run_ix` identifies one run within one execution: a `Loop` iteration
-///   is an execution of its own, so the iteration is in
-///   `trigger_execution_id`, and egret's `TaskRun::value` is never set on a
-///   `Subflow` run. Two children under one run (a `retry:` that spawned
-///   again, or a `LoopUntil` whose iterations reused the run) are
-///   "several": Kestra creates a new one. The run's `outputs.executionId`
-///   is not read: the restart cleared it (D7 side writes).
+/// - **exactly one** earlier child is linked to it by identity:
+///   `trigger_execution_id = <this execution>`, `trigger_run_ix = <run>` and
+///   `trigger_run_iteration = <the run's loop iteration>` (package #12 Task 3,
+///   Kestra's `taskRunId` + `taskRunValue` + `taskRunIteration` match,
+///   `ExecutableUtils.java:113-117`). A `Loop` iteration is an execution of its
+///   own, so its iteration is already in `trigger_execution_id`; a `LoopUntil`
+///   reuses one run across its iterations, so [`child_iteration`] is what tells
+///   that run's children apart. Two children under one `(pair, iteration)` (a
+///   `retry:` that spawned again in the SAME iteration) are still "several":
+///   Kestra creates a new one. The run's `outputs.executionId` is not read: the
+///   restart cleared it (D7 side writes).
 ///
 /// Then, by the child's state:
 ///
@@ -752,7 +801,18 @@ async fn restart_earlier_child(
     state: &ExecutionState,
     r: &Requested,
     wait: bool,
+    restart_behavior: RestartBehavior,
 ) -> Result<Option<Vec<claim::Job>>> {
+    // **Package #12 Task 3: `restartBehavior: NEW_EXECUTION`** (Kestra's guard
+    // at `ExecutableUtils.java:94` is FALSE for it, so control falls through to
+    // the fresh-spawn path, `:172+`). egret returns `None` so `spawn_one` takes
+    // the ordinary fresh spawn: the earlier child is left untouched (neither
+    // restarted nor killed, linked by its original trigger pair) and a brand-new
+    // child is born for the restarted run. `RETRY_FAILED` (the default) keeps
+    // the in-place restart below.
+    if restart_behavior == RestartBehavior::NewExecution {
+        return Ok(None);
+    }
     let reset = state.runs.get(r.run).is_some_and(|run| {
         run.history
             .windows(2)
@@ -776,12 +836,25 @@ async fn restart_earlier_child(
     if !restarted {
         return Ok(None);
     }
+    // **Package #12 Task 3: match by identity, not list position.** Kestra keys
+    // the earlier child on `taskRunId` + `taskRunValue` + `taskRunIteration`
+    // (`ExecutableUtils.java:113-117`); egret's `(trigger_execution_id,
+    // trigger_run_ix)` is the first two, and `trigger_run_iteration` is the
+    // third, so a `LoopUntil` whose body is a `Subflow` -- which reuses one run
+    // across iterations and lands two children under one pair -- restarts the
+    // right iteration's child rather than finding "several" and spawning a new
+    // one. `loop_iteration` is stable across a restart (it keeps the failed
+    // iteration's number), so the value here equals what the child was stamped
+    // with at spawn. A `retry:` that spawned a second child in the SAME
+    // iteration is still "several" under one `(pair, iteration)`, as before.
     let found: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, state FROM workflow.executions \
-          WHERE trigger_execution_id = $1 AND trigger_run_ix = $2 LIMIT 2",
+          WHERE trigger_execution_id = $1 AND trigger_run_ix = $2 \
+            AND trigger_run_iteration = $3 LIMIT 2",
     )
     .bind(ctx.id)
     .bind(r.run as i32)
+    .bind(child_iteration(ctx, state, r.run))
     .fetch_all(&mut *conn)
     .await
     .map_err(db_err)?;

@@ -710,6 +710,13 @@ pub struct Subflow {
     /// `Subflow.inheritLabels`, a `Property<Boolean>` defaulting to false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherit_labels: Option<Property<bool>>,
+    /// `Subflow.restartBehavior` (`ExecutableTask.RestartBehavior`,
+    /// `ExecutableUtils.java:92-172`): on a parent restart that re-runs this
+    /// `Subflow` task, `RETRY_FAILED` (the default) restarts the earlier child
+    /// in place, and `NEW_EXECUTION` leaves it untouched and spawns a fresh
+    /// child linked to the restarted run.
+    #[serde(default)]
+    pub restart_behavior: RestartBehavior,
 
     // Task 6 fix round 1: `publish::resolve_task` fills this in. Since debt
     // §5.1 (2026-10-19) it looks `namespace`/`flow_id` up in the PUBLISHING
@@ -915,6 +922,20 @@ pub enum RetryBehavior {
     #[default]
     RetryFailedTask,
     CreateNewExecution,
+}
+
+/// `io.kestra.core.models.tasks.ExecutableTask.RestartBehavior`
+/// (`ExecutableTask.java:66-68`): how a `Subflow` whose parent run is restarted
+/// treats the child it already started. `Subflow.restartBehavior` defaults to
+/// `RETRY_FAILED` (`Subflow.java:153-155`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RestartBehavior {
+    /// Restart the earlier child in place, the egret 7a behaviour.
+    #[default]
+    RetryFailed,
+    /// Leave the earlier child untouched and spawn a fresh child.
+    NewExecution,
 }
 
 // `interval`/`maxInterval`/`minInterval` are `@NotNull` on all three Java

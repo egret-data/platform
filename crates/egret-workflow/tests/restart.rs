@@ -2006,3 +2006,194 @@ async fn an_unloadable_iteration_fails_the_loop_with_the_log_line(pool: sqlx::Pg
     assert_eq!(exec_state(&pool, root).await, "FAILED");
     assert!(is_idle(&pool, root).await);
 }
+
+// ── restartBehavior + LoopUntil child-by-identity (package #12 Task 3) ───────
+
+/// `restart-parent` with an explicit `restartBehavior` on its `Subflow`.
+fn restart_parent_rb(rb: &str) -> String {
+    format!(
+        "id: restart-parent\nnamespace: t\ntasks:\n{}  - id: callSubflow\n    \
+         type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: restart-child\n    \
+         wait: true\n    transmitFailed: true\n    restartBehavior: {rb}\n{}",
+        tasks(&["hello"]),
+        tasks(&["helloParent2"])
+    )
+}
+
+/// **Package #12 Task 3, case (a): `restartBehavior: NEW_EXECUTION`.** On a
+/// parent restart the earlier child is left untouched and a FRESH child
+/// (a new execution id) is spawned for the restarted run, which resolves its
+/// outputs from the new child -- Kestra's fall-through at
+/// `ExecutableUtils.java:172+` when the `RETRY_FAILED` guard is false.
+#[sqlx::test(migrations = "../../migrations")]
+async fn new_execution_spawns_a_fresh_child_and_leaves_the_old_one(pool: sqlx::PgPool) {
+    // Arrange: the child's `failFirstTime` fails exactly once in all, so the
+    // first child fails and the fresh one started by the restart passes.
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[("failFirstTime", 1)]);
+    let root = start(&pool, ws, &restart_parent_rb("NEW_EXECUTION")).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let before = children(&pool).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].1, "FAILED");
+    let old = before[0].0;
+
+    // Act
+    let out = restart(&pool, root).await;
+    drive(&pool, &reg, root).await;
+
+    // Assert: the old child is untouched; a brand-new child ran to SUCCESS.
+    assert_eq!(out, Restarted::Done);
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let after = children(&pool).await;
+    assert_eq!(after.len(), 2, "a fresh child, the old one kept: {after:?}");
+    let still_old = after.iter().find(|k| k.0 == old).expect("the old child");
+    assert_eq!(
+        (&still_old.1, still_old.3),
+        (&"FAILED".to_string(), 1),
+        "the earlier child is neither restarted nor killed"
+    );
+    assert!(
+        !has_restarted_label(&still_old.4),
+        "the old child carries no restart label: {still_old:?}"
+    );
+    let fresh = after.iter().find(|k| k.0 != old).expect("a fresh child");
+    assert_eq!(fresh.1, "SUCCESS");
+    assert_eq!(fresh.3, 1, "a fresh spawn, not an in-place restart");
+    let sub = run(&runs_of(&pool, root).await, "callSubflow").clone();
+    assert_eq!(
+        sub.6.as_ref().unwrap()["executionId"],
+        fresh.0.to_string(),
+        "outputs resolve from the NEW child"
+    );
+}
+
+/// **Package #12 Task 3, case (b): explicit `restartBehavior: RETRY_FAILED`.**
+/// The default, written out: the failed child is restarted in place, never
+/// replaced -- the 7a behaviour, proving the explicit value parses and gates
+/// the same way the absent one does.
+#[sqlx::test(migrations = "../../migrations")]
+async fn explicit_retry_failed_restarts_the_child_in_place(pool: sqlx::PgPool) {
+    // Arrange
+    let (db, ws, user) = setup(&pool).await;
+    seed_restart_child(&db, ws, user).await;
+    let reg = Flaky::new(&[]).failing_first_attempt_of(&["failFirstTime"]);
+    let root = start(&pool, ws, &restart_parent_rb("RETRY_FAILED")).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let before = children(&pool).await;
+    assert_eq!(before.len(), 1);
+    let child = before[0].0;
+    assert_eq!(before[0].1, "FAILED");
+
+    // Act
+    let out = restart(&pool, root).await;
+    drive(&pool, &reg, root).await;
+
+    // Assert: the same child, restarted in place, ran to SUCCESS.
+    assert_eq!(out, Restarted::Done);
+    assert_eq!(exec_state(&pool, root).await, "SUCCESS");
+    let after = children(&pool).await;
+    assert_eq!(after.len(), 1, "never replaced: {after:?}");
+    assert_eq!(after[0].0, child, "the same child");
+    assert_eq!(after[0].1, "SUCCESS");
+    assert_eq!(after[0].3, 2, "the child's attempt_number goes up");
+    assert!(has_restarted_label(&after[0].4));
+}
+
+/// Every execution of `loop-child`, ordered by its stamped iteration identity:
+/// `(id, state, attempt_number, trigger_run_iteration, history)`.
+async fn loop_children(pool: &sqlx::PgPool) -> Vec<(Uuid, String, i32, i32, Value)> {
+    sqlx::query_as(
+        "SELECT id, state, attempt_number, trigger_run_iteration, history \
+           FROM workflow.executions WHERE flow_key = 'loop-child' \
+          ORDER BY trigger_run_iteration, created_at",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("loop children")
+}
+
+/// **Package #12 Task 3, case (c): a `LoopUntil` whose body is a `Subflow`,
+/// matched by identity.** The loop reuses one run across its iterations, so two
+/// children land under one `(trigger_execution_id, trigger_run_ix)` pair. On a
+/// restart egret keys the earlier child on `trigger_run_iteration` as well
+/// (Kestra's `taskRunIteration`, `ExecutableUtils.java:113-117`), so the
+/// failing iteration's child is restarted IN PLACE rather than found "several"
+/// and replaced by a spurious new one (the row #12 bug).
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_looped_subflow_child_is_restarted_by_iteration_identity(pool: sqlx::PgPool) {
+    // Arrange: a child that logs `ok` always and `boom` only when its input
+    // `n == 2`, where `boom` always fails. The parent loops a `Subflow` over it,
+    // passing the iteration as `n`, so iteration 1's child SUCCEEDS and
+    // iteration 2's child FAILS -- two children, under one run, iterations 1 and 2.
+    let (db, ws, user) = setup(&pool).await;
+    let child = "id: loop-child\nnamespace: t\ninputs:\n  - id: n\n    type: INT\ntasks:\n  \
+         - id: ok\n    type: io.kestra.plugin.core.log.Log\n    message: ok\n  \
+         - id: boom\n    type: io.kestra.plugin.core.log.Log\n    message: boom\n    \
+         runIf: \"{{ inputs.n == 2 }}\"\n";
+    common::seed_flow(&db, ws, user, child, "draft").await;
+    let parent = "id: loop-parent\nnamespace: t\ntasks:\n  - id: loop\n    \
+         type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{ false }}\"\n    \
+         checkFrequency:\n      interval: PT0S\n      maxIterations: 5\n    \
+         failOnMaxReached: false\n    tasks:\n      - id: callSubflow\n        \
+         type: io.kestra.plugin.core.flow.Subflow\n        namespace: t\n        \
+         flowId: loop-child\n        wait: true\n        transmitFailed: true\n        \
+         inputs:\n          n: \"{{ outputs.loop.iterationCount }}\"\n";
+    let reg = Flaky::new(&[("boom", 10)]);
+    let root = start(&pool, ws, parent).await;
+    drive(&pool, &reg, root).await;
+    assert_eq!(exec_state(&pool, root).await, "FAILED");
+    let before = loop_children(&pool).await;
+    assert_eq!(before.len(), 2, "one child per iteration: {before:?}");
+    assert_eq!(
+        (before[0].3, before[0].1.as_str()),
+        (1, "SUCCESS"),
+        "iteration 1 succeeded"
+    );
+    assert_eq!(
+        (before[1].3, before[1].1.as_str()),
+        (2, "FAILED"),
+        "iteration 2 failed"
+    );
+    let (ok_child, boom_child) = (before[0].0, before[1].0);
+
+    // Act
+    let out = restart(&pool, root).await;
+    drive(&pool, &reg, root).await;
+
+    // Assert: NO spurious third child -- the iteration-2 child is restarted in
+    // place by identity, and the iteration-1 child is untouched.
+    assert_eq!(out, Restarted::Done);
+    let after = loop_children(&pool).await;
+    assert_eq!(
+        after.len(),
+        2,
+        "matched by identity, not replaced by a new child: {after:?}"
+    );
+    let ok = after
+        .iter()
+        .find(|k| k.0 == ok_child)
+        .expect("iter-1 child");
+    assert_eq!(
+        (ok.3, ok.1.as_str(), ok.2),
+        (1, "SUCCESS", 1),
+        "iteration 1's child is untouched"
+    );
+    let boom = after
+        .iter()
+        .find(|k| k.0 == boom_child)
+        .expect("iter-2 child");
+    assert_eq!(boom.3, 2, "same iteration identity");
+    assert_eq!(boom.2, 2, "restarted in place: attempt_number goes up");
+    assert!(
+        history_tail(&boom.4, 3) == ["FAILED", "RESTARTED", "RUNNING"]
+            || boom
+                .4
+                .as_array()
+                .is_some_and(|h| h.iter().any(|s| s == "RESTARTED")),
+        "the iteration-2 child carries a RESTARTED transition: {boom:?}"
+    );
+}
