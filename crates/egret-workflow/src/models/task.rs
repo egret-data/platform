@@ -674,7 +674,7 @@ pub struct CheckFrequency {
 }
 
 // kestra: Subflow.java. Kept to the interface's field list
-// (namespace/flowId/inputs/wait/transmitFailed); `revision`, `labels`,
+// (namespace/flowId/inputs/wait/transmitFailed); `labels`,
 // `inheritLabels`, `scheduleDate`, and `restartBehavior` are dropped for now,
 // the same curation the brief already applied to this type.
 //
@@ -695,6 +695,10 @@ pub struct Subflow {
     pub wait: bool,
     #[serde(default = "default_true")]
     pub transmit_failed: bool,
+    /// `Subflow.revision`: spawn this published revision of the target flow;
+    /// absent = the latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<i32>,
     /// The child execution's own extra labels (`Subflow.labels`); keys AND
     /// values are rendered in the parent's context at spawn.
     #[serde(

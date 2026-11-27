@@ -79,8 +79,7 @@
 //!   `valids/task-allow-warning-executable-flow` are the two entries it used to
 //!   cost and **both bank**. `transmitFailed: false` is still unreachable from
 //!   the corpus and still implemented.
-//! * **`revision`, `labels`, `inheritLabels`, `scheduleDate` and
-//!   `restartBehavior` are not on `models::Subflow`** (W1's curation), so
+//! * **`scheduleDate` and `restartBehavior` are not on `models::Subflow`** (W1's curation), so
 //!   nothing here can honour them. `valids/task-flow-inherited-labels` and
 //!   `valids/subflow-inherited-labels-parent` are the entries that names.
 //!
@@ -372,16 +371,19 @@ pub(super) async fn spawn_one(
         ));
     }
 
-    let Some((child_flow, source)) = resolve(conn, ctx.workspace_id, &namespace, &flow_id).await?
+    let Some((child_flow, source)) =
+        resolve(conn, ctx.workspace_id, &namespace, &flow_id, sub.revision).await?
     else {
         // The artifact's own message, kept close to it:
         // `"Unable to find flow '" + ns + "'.'" + id + "' with revision '0'"`.
-        // egret has no revision, so the clause is dropped rather than faked.
-        return Ok(fail_run(
-            ctx,
-            r.run,
-            &format!("unable to find flow '{namespace}'.'{flow_id}'"),
-        ));
+        // egret's miss adds the `with revision` clause only when one is pinned.
+        let msg = match sub.revision {
+            Some(n) => {
+                format!("unable to find flow '{namespace}'.'{flow_id}' with revision '{n}'")
+            }
+            None => format!("unable to find flow '{namespace}'.'{flow_id}'"),
+        };
+        return Ok(fail_run(ctx, r.run, &msg));
     };
 
     let child = match crate::spec::parse(&source) {
@@ -1604,6 +1606,7 @@ async fn resolve(
     workspace_id: Uuid,
     namespace: &str,
     flow_id: &str,
+    revision: Option<i32>,
 ) -> Result<Option<(Uuid, String)>> {
     let row: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT id, source FROM workflow.flows \
@@ -1616,7 +1619,24 @@ async fn resolve(
     .fetch_optional(&mut *conn)
     .await
     .map_err(db_err)?;
-    Ok(row)
+    let (Some((id, _)), Some(n)) = (&row, revision) else {
+        return Ok(row);
+    };
+    // `Subflow.revision`: the frozen source of that published version
+    // (`flow_versions.snapshot.source`). The flow id was resolved in this
+    // workspace just above, so the version lookup is workspace-scoped too. A
+    // missing revision is a miss, exactly like a missing flow.
+    let source: Option<String> = sqlx::query_scalar(
+        "SELECT snapshot->>'source' FROM workflow.flow_versions \
+          WHERE flow_id = $1 AND version = $2",
+    )
+    .bind(id)
+    .bind(n)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(db_err)?
+    .flatten();
+    Ok(source.map(|s| (*id, s)))
 }
 
 /// Why a spawn is refused, or `None`.
