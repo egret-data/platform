@@ -112,3 +112,5 @@ documented).
 
 - egret starts a deferred child from a poll cadence (best-effort around the worker loop interval),
   not Kestra's executor-held scheduledDate; the start may lag the instant by up to one poll.
+- `scheduleDate` is parsed as RFC3339 only. Kestra's `ZonedDateTime` rendering is more lenient, so a bare date such as `2026-01-01` that Kestra accepts fails the Subflow run in egret.
+- `created_at` becomes mutable for a woken parked child: the wake rewrites it to `now()` so the child's clock (`not_before`, attempt timings) starts when it starts, not when it was parked. Only the graph tie-break that orders by `created_at` can notice (a narrow note); a child that already started is never moved.

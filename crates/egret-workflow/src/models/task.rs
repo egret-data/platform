@@ -677,10 +677,8 @@ pub struct CheckFrequency {
 // (namespace/flowId/inputs/wait/transmitFailed) plus `revision`, `labels`,
 // `inheritLabels` and `restartBehavior` (package #12) and `scheduleDate`
 // (package #12b). `scheduleDate` is now MODELLED and honoured by the worker
-// (`worker::subflow::spawn_one` renders it and parks a future child), but the
-// spec census still carries it as `ignored`/warned via `keys.rs`'s
-// `Lift::Deferred` until package #12b Task 2 lifts the census entry -- so a
-// flow that writes it is parsed, run and warned at publish, not refused.
+// (`worker::subflow::spawn_one` renders it and parks a future child:
+// deferred child start), and the spec census counts it `honoured`.
 //
 // `namespace` is `@NotEmpty` and `flowId` is `@NotNull`, both in Java with no
 // default (Task 4 fix round 3 owes both checks) -- same bean-validation-not-

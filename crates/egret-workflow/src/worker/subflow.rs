@@ -82,9 +82,8 @@
 //! * **`scheduleDate` IS honoured now** (package #12b): [`spawn_one`] renders it
 //!   in the parent context, a future instant PARKS the child CREATED with
 //!   `scheduled_start` set (no first settle; `claim::wake` drives it when due)
-//!   and a past/now one starts it immediately. The spec census still carries the
-//!   key as `ignored`/warned via `keys.rs`'s `Lift::Deferred` until #12b Task 2
-//!   lifts it. `restartBehavior` IS carried
+//!   and a past/now one starts it immediately. The spec census counts the key
+//!   `honoured`. `restartBehavior` IS carried
 //!   now (package #12 Task 3): it gates [`restart_earlier_child`] between the
 //!   in-place restart (`RETRY_FAILED`, the default) and a fresh spawn
 //!   (`NEW_EXECUTION`). `valids/task-flow-inherited-labels` and
