@@ -905,10 +905,103 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
             }
         }
     }
+    // Package #12b: deferred-start Subflow children. A parked child has NO task
+    // runs (`due_retries` keys on `task_runs.not_before_ms`, so it cannot see
+    // one), and its `scheduleDate` is an absolute wall-clock instant, not a
+    // `created_at`-relative offset -- hence a sibling due-query against the
+    // `scheduled_start` column. Each due child's standalone FIRST settle is
+    // driven by [`resume_deferred_start`]. Every one is attempted and the first
+    // error returned after the loop, [`due_retries`]' own rule.
+    for execution in due_deferred_starts(pool, limit).await? {
+        match resume_deferred_start(pool, execution).await {
+            Ok(true) => woken.push(execution),
+            // Lost the race to another poller (already started); nothing woken.
+            Ok(false) => {}
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
     match first_err {
         Some(e) => Err(e),
         None => Ok(woken),
     }
+}
+
+/// Parked `Subflow` children (`worker::subflow::spawn_one`) whose
+/// `scheduled_start` is now due: `CREATED`, with a non-null `scheduled_start`
+/// `<= now()`. A plain `SELECT` like [`due_retries`] -- two concurrent pollers
+/// may both return the same id; [`resume_deferred_start`] serialises them on the
+/// row lock, so the first starts it and the second finds it no longer eligible.
+/// The partial index `workflow_executions_scheduled_start` (migration 0246)
+/// serves this predicate.
+async fn due_deferred_starts(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE state = 'CREATED' \
+            AND scheduled_start IS NOT NULL \
+            AND scheduled_start <= now() \
+          ORDER BY scheduled_start \
+          LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(exec)
+    .await
+    .map_err(db_err)
+}
+
+/// Drive a parked child's FIRST settle, standalone (outside any parent txn).
+///
+/// Returns `true` when this call started the child, `false` when another poller
+/// already did (a lost race).
+///
+/// # The clock is anchored at WAKE, not at park (the one subtlety)
+///
+/// [`resume`] settles with `now` computed by [`load`] from the row's
+/// `created_at`. A parked child's `created_at` is PARK time, so an unmodified
+/// [`resume`] would drive its first settle at `Tick = the full defer duration`,
+/// not `Tick(0)` -- unlike [`Frame::first`], which every other fresh first
+/// settle (`start_execution_in_on`, `spawn::spawn_one`, `replay::spawn_due`)
+/// uses at `Tick(0)`. So this resets `created_at = now()` before the settle,
+/// which makes [`load`]'s `now_ms` exactly `0` (both read the transaction's one
+/// `now()`), i.e. the child's clock starts at wake. That matches Kestra, whose
+/// deferred child's `state.startDate` is set at wake rather than at park. The
+/// reset is safe because a parked child has NO task runs yet -- no existing
+/// `Tick` (a `not_before`, an attempt start) is anchored to the old
+/// `created_at`, so none is invalidated.
+///
+/// # Exactly-once under concurrent pollers
+///
+/// The `UPDATE ... WHERE state = 'CREATED' AND scheduled_start IS NOT NULL`
+/// takes the row's write lock and is the guard: the winner flips the row (and
+/// its [`settle`] moves it out of `CREATED`), so a loser blocked on the lock
+/// re-evaluates the `WHERE` against the committed state, matches no row, and
+/// settles nothing. `scheduled_start` is cleared in the same statement so the
+/// due-query never re-selects it. Same proven pattern as [`due_retries`] +
+/// [`resume`] + the row lock, with the gate moved into the `UPDATE`.
+async fn resume_deferred_start(pool: &PgPool, execution_id: Uuid) -> Result<bool> {
+    transaction!(pool, |at| {
+        let (conn, gate) = at.parts();
+        let moved = sqlx::query(
+            "UPDATE workflow.executions \
+                SET created_at = now(), scheduled_start = NULL \
+              WHERE id = $1 AND state = 'CREATED' AND scheduled_start IS NOT NULL",
+        )
+        .bind(execution_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?
+        .rows_affected();
+        if moved == 0 {
+            return Ok(false);
+        }
+        let (ctx, state, now) = load(conn, execution_id, Stack::Fresh(gate.clone())).await?;
+        let before = state.clone();
+        settle(conn, &ctx, &before, state, now, None).await?;
+        Ok(true)
+    })
 }
 
 /// # READ THIS BEFORE WIRING `tick` INTO A BINARY
