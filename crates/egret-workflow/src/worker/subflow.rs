@@ -79,8 +79,11 @@
 //!   `valids/task-allow-warning-executable-flow` are the two entries it used to
 //!   cost and **both bank**. `transmitFailed: false` is still unreachable from
 //!   the corpus and still implemented.
-//! * **`scheduleDate` is not on `models::Subflow`** (W1's curation, split to
-//!   package #12b), so nothing here can honour it. `restartBehavior` IS carried
+//! * **`scheduleDate` IS honoured now** (package #12b): [`spawn_one`] renders it
+//!   in the parent context, a future instant PARKS the child CREATED with
+//!   `scheduled_start` set (no first settle; `claim::wake` drives it when due)
+//!   and a past/now one starts it immediately. The spec census counts the key
+//!   `honoured`. `restartBehavior` IS carried
 //!   now (package #12 Task 3): it gates [`restart_earlier_child`] between the
 //!   in-place restart (`RETRY_FAILED`, the default) and a fresh spawn
 //!   (`NEW_EXECUTION`). `valids/task-flow-inherited-labels` and
@@ -579,15 +582,44 @@ pub(super) async fn spawn_one(
         }
         _ => Admit::Run,
     };
+    // **Package #12b: `scheduleDate`, rendered in the PARENT context** (the same
+    // `cx` as the target and inputs), matching Kestra's
+    // `runContext.render(scheduleDate).as(ZonedDateTime.class)`
+    // (`ExecutableUtils.java:240`). `Some` only when the rendered instant is in
+    // the FUTURE -- that child is parked CREATED (no first settle) and started by
+    // the waker once due. A past/now instant starts the child NOW with no clamp
+    // (Kestra's `scheduleDate.isAfter(now)` is the only gate), indistinguishable
+    // from no `scheduleDate`. An unrenderable or unparseable value FAILS this
+    // `Subflow` run, as every other Subflow render error does.
+    let scheduled_start: Option<chrono::DateTime<chrono::Utc>> = match sub.schedule_date.as_ref() {
+        None => None,
+        Some(p) => match p.render(&cx) {
+            Err(e) => return Ok(fail_run(ctx, r.run, &format!("subflow scheduleDate: {e}"))),
+            Ok(s) => match chrono::DateTime::parse_from_rfc3339(s.trim()) {
+                Err(e) => {
+                    return Ok(fail_run(
+                        ctx,
+                        r.run,
+                        &format!("subflow scheduleDate: not an instant {s:?}: {e}"),
+                    ));
+                }
+                Ok(dt) => {
+                    let instant = dt.with_timezone(&chrono::Utc);
+                    (instant > chrono::Utc::now()).then_some(instant)
+                }
+            },
+        },
+    };
+
     let row = claim::admit_row(&[json!("CREATED")], admit);
     let mut sp = sqlx::Connection::begin(&mut *conn).await.map_err(db_err)?;
     let child_id: Uuid = sqlx::query_scalar(concat!(
         "INSERT INTO workflow.executions \
                (workspace_id, flow_id, namespace, flow_key, source, state, history, \
                 trigger_execution_id, trigger_run_ix, inputs, execution_depth, secret_inputs, \
-                labels, trigger_run_iteration, ",
+                labels, trigger_run_iteration, scheduled_start, ",
         super::stamps::stamp_columns!(),
-        ") VALUES ($1,$2,$3,$4,$5,$11,$12::jsonb,$6,$7,$8,$9,$10,$13,$14, ",
+        ") VALUES ($1,$2,$3,$4,$5,$11,$12::jsonb,$6,$7,$8,$9,$10,$13,$14,$15, ",
         super::stamps::stamp_values!("$11", "$12"),
         ") RETURNING id",
     ))
@@ -607,6 +639,10 @@ pub(super) async fn spawn_one(
     // Package #12 Task 3: the child's iteration identity (Kestra's
     // `taskRunIteration`), so a restart matches a looped child by identity.
     .bind(child_iteration(ctx, state, r.run))
+    // Package #12b: the parked-start instant ($15), `Some` only for a future
+    // `scheduleDate` (NULL otherwise). A parked row is CREATED by construction
+    // (`row.state` at $11) and carries no first settle.
+    .bind(scheduled_start)
     .fetch_one(&mut *sp)
     .await
     .map_err(db_err)?;
@@ -667,7 +703,14 @@ pub(super) async fn spawn_one(
     let mut jobs = Vec::new();
     match row.disposition {
         claim::Disposition::Run => {
-            jobs.push(claim::Job::Settle(Box::new(claim::Frame::first(child_ctx))));
+            // Package #12b: a future `scheduleDate` PARKS the child -- it stays
+            // CREATED with `scheduled_start` set and NO first settle enqueued.
+            // `claim::wake`'s deferred-start due-query drives that first settle
+            // when `scheduled_start <= now()`. A past/now or absent one leaves
+            // `scheduled_start` NULL and settles the child now, as before.
+            if scheduled_start.is_none() {
+                jobs.push(claim::Job::Settle(Box::new(claim::Frame::first(child_ctx))));
+            }
         }
         claim::Disposition::Queue => {}
         claim::Disposition::Terminal(state) => {

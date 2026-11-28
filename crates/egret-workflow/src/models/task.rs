@@ -675,8 +675,10 @@ pub struct CheckFrequency {
 
 // kestra: Subflow.java. Kept to the interface's field list
 // (namespace/flowId/inputs/wait/transmitFailed) plus `revision`, `labels`,
-// `inheritLabels` and `restartBehavior` (package #12). Only `scheduleDate` is
-// deferred (package #12b); it is accepted and warned, not modelled.
+// `inheritLabels` and `restartBehavior` (package #12) and `scheduleDate`
+// (package #12b). `scheduleDate` is now MODELLED and honoured by the worker
+// (`worker::subflow::spawn_one` renders it and parks a future child:
+// deferred child start), and the spec census counts it `honoured`.
 //
 // `namespace` is `@NotEmpty` and `flowId` is `@NotNull`, both in Java with no
 // default (Task 4 fix round 3 owes both checks) -- same bean-validation-not-
@@ -717,6 +719,17 @@ pub struct Subflow {
     /// child linked to the restarted run.
     #[serde(default)]
     pub restart_behavior: RestartBehavior,
+
+    /// `Subflow.scheduleDate` (`Property<ZonedDateTime>` in Kestra): the instant
+    /// the child execution should start, rendered in the PARENT context at spawn
+    /// (`ExecutableUtils.java:240`). A FUTURE instant parks the child CREATED
+    /// (`workflow.executions.scheduled_start`); a past/now one starts it
+    /// immediately (Kestra's `scheduleDate.isAfter(now)` is the only gate, no
+    /// clamp); an unrenderable/invalid one FAILS the Subflow run. Modelled as a
+    /// `Property<String>` and parsed to an instant in the worker, because egret's
+    /// `Property<T>` conversion has no `ZonedDateTime` target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_date: Option<Property<String>>,
 
     // Task 6 fix round 1: `publish::resolve_task` fills this in. Since debt
     // §5.1 (2026-10-19) it looks `namespace`/`flow_id` up in the PUBLISHING

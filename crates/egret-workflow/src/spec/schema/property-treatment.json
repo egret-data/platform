@@ -715,7 +715,7 @@
       "retry": "honoured",
       "revision": "honoured",
       "runIf": "honoured",
-      "scheduleDate": "ignored",
+      "scheduleDate": "honoured",
       "taskCache": "ignored",
       "timeout": "honoured",
       "transmitFailed": "honoured",
